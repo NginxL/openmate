@@ -1,0 +1,122 @@
+{
+  "manifest_version": 1,
+  "id": "openmate-feishu",
+  "name": "飞书（OpenMate）",
+  "version": "0.1.0",
+  "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
+  "publisher": "NginxL",
+  "homepage": "https://github.com/NginxL/openmate",
+  "icon": "assets/icon.png",
+  "tags": ["飞书", "Lark", "聊天", "收件箱", "知识库", "OpenMate"],
+  "engines": {"persona": ">=202611110000", "extension_protocol": 1},
+  "runtime": {"command": "bin/openmate-feishu"},
+  "activation_events": ["on_startup"],
+  "contributes": {
+    "connectors": [
+      {
+        "id": "matefeishu",
+        "name": "飞书（OpenMate）",
+        "capabilities": ["status", "tools", "actions", "events", "inbox", "archive", "login", "threads"],
+        "agent_tools": ["matefeishu_status", "matefeishu_chats", "matefeishu_messages", "matefeishu_search", "matefeishu_docs", "matefeishu_agent_reply"],
+        "confirm_always": ["matefeishu_*"],
+        "poll_seconds": 60,
+        "kinds": ["dm", "mention", "group"],
+        "kind_descriptions": {
+          "dm": "类型：飞书私聊里别人发给我、我还没回的消息",
+          "mention": "类型：飞书群里有人 @我、我还没回的消息",
+          "group": "类型：飞书群里的新消息，没有 @我"
+        }
+      }
+    ],
+    "assistant": [
+      {"id": "matefeishu", "instructions": "assistant/instructions.md"}
+    ]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "larkx_python": {
+        "type": "string",
+        "title": "LarkAgentX 的 Python",
+        "description": "装了 LarkAgentX 的 Python 解释器的绝对路径（例如某个 venv 里的 bin/python）。LarkAgentX 需要你自己安装，本扩展不附带。",
+        "maxLength": 1024
+      },
+      "larkx_commit": {
+        "type": "string",
+        "title": "LarkAgentX 版本",
+        "description": "这个扩展适配的 LarkAgentX 提交（40 位十六进制）。只有确认换了 LarkAgentX 版本时才改。",
+        "default": "97ad48e69e34bd8c78ee30f795b7c3759dd81659",
+        "pattern": "^[0-9a-f]{40}$"
+      },
+      "region": {
+        "type": "string",
+        "title": "区域",
+        "description": "飞书（中国）或 Lark（国际版）",
+        "default": "feishu",
+        "oneOf": [
+          {"const": "feishu", "title": "飞书"},
+          {"const": "lark", "title": "Lark（国际版）"}
+        ]
+      },
+      "http_proxy": {
+        "type": "string",
+        "title": "代理",
+        "description": "连接飞书时用的代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（SOCKS 需要 LarkAgentX 的 Python 里装了 python-socks）。留空就用系统设置。",
+        "maxLength": 512
+      },
+      "agent": {
+        "type": "boolean",
+        "title": "启用 /agent",
+        "description": "你在飞书里发以前缀开头的消息时，交给 Agent 处理，并以你的身份回复。",
+        "default": false,
+        "x-confirm": "打开后，你自己在飞书里发的 /agent 消息会让 Agent 用你的全部权限处理，并以你的身份回复到原话题。确定打开吗？"
+      },
+      "agent_prefix": {
+        "type": "string",
+        "title": "/agent 前缀",
+        "description": "以“/”开头、不含空格，不能是 /stop。",
+        "default": "/agent",
+        "pattern": "^/\\S+$",
+        "maxLength": 32
+      },
+      "agent_machine": {
+        "type": "string",
+        "format": "machine",
+        "title": "/agent 在哪台电脑上跑",
+        "description": "不设置就用助手所在的电脑。"
+      },
+      "agent_launcher": {
+        "type": "string",
+        "format": "launcher",
+        "title": "/agent 用哪个启动器",
+        "description": "不设置就用 Persona 里“Lark /agent”的模型设置。"
+      },
+      "agent_reply_suffix": {
+        "type": "string",
+        "title": "AI 代答标记",
+        "description": "加在每条 /agent 回复末尾。写 \\n 表示换行；只写一个空格表示不加。",
+        "default": "> 🤖 AI 代答，仅供参考",
+        "maxLength": 200
+      },
+      "history_chats": {
+        "type": "integer",
+        "title": "首次补收的会话数",
+        "description": "第一次登录后，补收最近多少个会话的历史消息（0–50）。",
+        "default": 20,
+        "minimum": 0,
+        "maximum": 50
+      },
+      "triage_rules": {
+        "type": "string",
+        "title": "收件箱分拣规则",
+        "description": "用你自己的话写飞书消息该怎么分拣（哪些要你处理、哪些看看就行、哪些是噪音）。留空就用 Persona 的全局规则。没有 @你 的群消息总是按噪音处理。",
+        "maxLength": 4000
+      }
+    }
+  },
+  "permissions": {
+    "network": ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com", "larkoffice.com", "*.larkoffice.com"],
+    "hub": ["agents.control", "agents.read", "assistant.ask", "kb.read"]
+  },
+  "host_integrations": [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}]
+}
