@@ -50,7 +50,10 @@ def platform(manifest_path: str = "") -> Platform:
 
 
 def main() -> int:
+    from openmate_core.app import ConnectorApp
+
     from . import launch
 
-    first = launch.handoff(os.path.join(ROOT, "bin", "openmate-feishu"))  # may become larkx_python (no return)
+    early = ConnectorApp(platform(), env={})  # answers what comes before initialize, as the real one will
+    first = launch.handoff(os.path.join(ROOT, "bin", "openmate-feishu"), early=early.handle)  # may become larkx_python
     return run(platform(), first=first)

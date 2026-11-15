@@ -158,6 +158,47 @@ class HandoffTest(unittest.TestCase):
             os.fstat(fd)  # closed
         self.assertEqual(launch.handoff(LAUNCHER, env={launch.CHILD: "/p"}, stdin_fd=-1), b"")
 
+    def test_requests_before_initialize_are_answered_as_the_core_does(self):
+        from openmate_core.app import ConnectorApp
+        import openmate_feishu
+
+        early = ConnectorApp(openmate_feishu.platform(), env={}).handle
+        line = init_line({"larkx_python": "/venv/bin/python"})
+        wrong = json.dumps({"id": "h3", "method": "initialize", "params": {"protocol": 101}}) + "\n"
+        before = ('{"id":"h0","method":"ping"}\n{"method":"note"}\n{"id":"h2","method":"manifest"}\n' + wrong).encode()
+        stdin = piped(before + line + b'{"id":"h9","method":"ping"}\n')
+        self.addCleanup(os.close, stdin)
+        out_r, out_w = os.pipe()
+        self.addCleanup(os.close, out_r)
+        calls = []
+
+        def execve(path, argv, env):
+            fd = int(env[launch.FIRST_FD])
+            calls.append(launch.read_all(fd))
+            os.close(fd)
+            raise Done()
+
+        with self.assertRaises(Done):
+            launch.handoff(LAUNCHER, env={}, stdin_fd=stdin, stdout_fd=out_w, execve=execve, check=lambda p: "", early=early)
+        os.close(out_w)
+        self.assertEqual(calls, [line], "the choice is still made on initialize")
+        answers = [json.loads(x) for x in launch.read_all(out_r).splitlines()]
+        self.assertEqual([a["id"] for a in answers], ["h0", "h2", "h3"])
+        self.assertEqual(answers[0]["error"]["code"], "not_initialized")
+        self.assertEqual(answers[1]["result"]["id"], "openmate-feishu")
+        self.assertNotIn("tags", answers[1]["result"])
+        self.assertEqual(answers[2]["error"]["code"], "wrong_protocol")
+        self.assertEqual(os.read(stdin, 100), b'{"id":"h9","method":"ping"}\n')
+
+    def test_the_input_ends_before_initialize(self):
+        stdin = piped(b'{"id":"h0","method":"ping"}\n')
+        self.addCleanup(os.close, stdin)
+        out_r, out_w = os.pipe()
+        self.addCleanup(os.close, out_r)
+        self.addCleanup(os.close, out_w)
+        self.assertEqual(launch.handoff(LAUNCHER, env={}, stdin_fd=stdin, stdout_fd=out_w, execve=self.fail,
+                                        early=lambda m, p: {}), b"")
+
     def test_stays_with_the_reason(self):
         fd = piped(init_line({"larkx_python": "relative/python"}))
         self.addCleanup(os.close, fd)
@@ -198,6 +239,11 @@ class LauncherTest(unittest.TestCase):
                              stderr=subprocess.PIPE, env=env)
         self.addCleanup(self._stop, p)
         hub = StdioHub(p.stdout, p.stdin)
+        from harness import HubSideError
+
+        with self.assertRaises(HubSideError) as e:  # as the hub's conformance check does first
+            hub.request("ping", {})
+        self.assertEqual(e.exception.code, "not_initialized")
         res = hub.request("initialize", json.loads(init_line(config))["params"])
         self.assertEqual(res["id"], "openmate-feishu")
         return p, hub
