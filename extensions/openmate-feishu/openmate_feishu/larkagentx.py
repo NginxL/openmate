@@ -36,7 +36,7 @@ from urllib.parse import quote, unquote, urlsplit
 from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, LoginDone, LoginQR, Media,
                                    Message, Person, SendRejected)
 
-from . import pin
+from . import launch, pin
 
 log = logging.getLogger("openmate.larkx")
 
@@ -134,6 +134,9 @@ def load_larkx(data_dir: str, region: str) -> types.SimpleNamespace:
 def create(config: Dict, data_dir: str) -> Backend:
     if not str(config.get("larkx_python") or "").strip():
         raise BackendError(NO_PYTHON, "config")
+    why = launch.problem()
+    if why:
+        raise BackendError(why, "config")
     region = str(config.get("region") or "feishu").strip().lower()
     if region not in REGION_LABELS:
         raise BackendError("区域只能是 feishu（飞书）或 lark（Lark 国际版）", "config")

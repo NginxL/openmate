@@ -19,7 +19,7 @@ for p in (os.path.join(ROOT, "core"), EXT_DIR):
         sys.path.insert(0, p)
 
 from openmate_core.backend import BackendError, CredentialsExpired, SendRejected  # noqa: E402
-from openmate_feishu import larkagentx  # noqa: E402
+from openmate_feishu import larkagentx, launch  # noqa: E402
 
 FAKES = os.path.join(HERE, "fakelarkx")
 SHADOWED = ("larkx", "requests", "websockets", "dotenv", "loguru")
@@ -626,6 +626,14 @@ class CreateTest(Base):
                 larkagentx.create(config, self.data)
             self.assertEqual(e.exception.kind, "config")
             self.assertIn(word, e.exception.message)
+
+    def test_a_launch_problem_is_the_status(self):
+        old = launch._problem
+        launch._problem = "LarkAgentX 的 Python 是 3.8，需要 3.9 或更新"
+        self.addCleanup(setattr, launch, "_problem", old)
+        with self.assertRaises(BackendError) as e:
+            larkagentx.create({"larkx_python": "/x"}, self.data)
+        self.assertEqual((e.exception.kind, e.exception.message), ("config", launch._problem))
 
     def test_made(self):
         b = larkagentx.create({"larkx_python": "/x", "region": "lark", "http_proxy": "http://127.0.0.1:7890"}, self.data)

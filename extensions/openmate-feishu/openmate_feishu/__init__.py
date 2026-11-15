@@ -1,7 +1,8 @@
 """OpenMate for Feishu / Lark: the platform half of the openmate-feishu extension.
 
-The backend talks to Feishu through LarkAgentX, which the user installs themselves (larkx_python). OPENMATE_BACKEND=
-fixture selects the core's deterministic fixture instead (tests, conformance runs); nothing else changes.
+The backend talks to Feishu through LarkAgentX, which the user installs themselves (larkx_python); the program runs
+under that interpreter (launch.handoff re-executes it there once initialize says which one). OPENMATE_BACKEND=fixture
+selects the core's deterministic fixture instead (tests, conformance runs); nothing else changes.
 """
 
 from __future__ import annotations
@@ -49,4 +50,7 @@ def platform(manifest_path: str = "") -> Platform:
 
 
 def main() -> int:
-    return run(platform())
+    from . import launch
+
+    first = launch.handoff(os.path.join(ROOT, "bin", "openmate-feishu"))  # may become larkx_python (no return)
+    return run(platform(), first=first)
