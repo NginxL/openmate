@@ -37,6 +37,15 @@ class HandshakeTest(unittest.TestCase):
         self.assertEqual(res["contributes"]["connectors"], manifest["contributes"]["connectors"])
         self.assertEqual(h.hub.request("ping", {}), {})
 
+    def test_calls_right_after_initialize_wait_for_startup(self):
+        h = Harness(self, initialize=False)
+        h.hub.secrets_delay = 0.5  # the saved sign-in takes a while to read
+        h.hub.request("initialize", {"protocol": 1, "hub": {"build": 0, "extension_points": {}}, "granted": {},
+                                     "extension": {"id": EXT, "version": "0.1.0", "data_dir": h.data_dir}})
+        self.assertEqual(h.c("status")["state"], "error")  # memory only: answers at once, says it is starting
+        p = h.c("login.step", step="")  # waits for the program to be ready instead of refusing
+        self.assertEqual(p["kind"], "qr")
+
     def test_unknown_and_undeclared(self):
         h = Harness(self)
         for method, code in (("nonexistent.method", "unknown_method"), ("connector.nonexistent_method", "unknown_method"),

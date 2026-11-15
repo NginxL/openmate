@@ -69,6 +69,7 @@ class StdioHub:
         self._ids = itertools.count(1)
         self.secrets: Dict[str, str] = {}
         self.secrets_fail = False
+        self.secrets_delay = 0.0
         self.cli: Optional[Callable[[dict], Any]] = None  # params → result; raise HubSideError for an error answer
         self.calls: List[tuple] = []
         self.events: List[tuple] = []
@@ -101,6 +102,8 @@ class StdioHub:
         self.calls.append((method, params))
         try:
             if method.startswith("connector.secrets."):
+                if self.secrets_delay:
+                    time.sleep(self.secrets_delay)
                 if self.secrets_fail:
                     raise HubSideError("unavailable", "secrets unavailable")
                 c = params.get("contribution")

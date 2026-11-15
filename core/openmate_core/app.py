@@ -35,6 +35,7 @@ THREAD_MOST = 50
 THREAD_MEDIA_MOST = 4 << 20
 ARCHIVE_MEDIA_MOST = 20 << 20
 ARCHIVE_ROWS_MOST = 2000
+STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, backend, saved sign-in) waits this long
 
 # Connector methods of capabilities this connector does not declare: answered no_capability (unknown ones are
 # unknown_method).
@@ -139,6 +140,8 @@ class ConnectorApp:
                 raise RPCError("没有连接器 %s" % contribution, "no_contribution")
             fn = self._methods.get(rest)
             if fn is not None:
+                if rest != "status" and not self.ready.wait(STARTUP_WAIT):
+                    raise RPCError("扩展还在启动，请稍后再试")
                 return fn(params)
             if rest in UNDECLARED:
                 raise RPCError("连接器 %s 没有声明这项能力：%s" % (self.cid, rest), "no_capability")
