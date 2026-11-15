@@ -47,6 +47,7 @@ class ManifestTest(unittest.TestCase):
             self.assertTrue(d.startswith("类型："))
         self.assertEqual(CONN["poll_seconds"], 60)
         self.assertEqual(CONN["confirm_always"], ["matefeishu_*"])
+        self.assertIs(CONN["sends_as_user"], True)  # /agent replies go out unconfirmed and are put in the ledger
         self.assertNotIn("matefeishu_send", CONN["agent_tools"])
         self.assertNotIn("matefeishu_send_dm", CONN["agent_tools"])
 
@@ -73,6 +74,8 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(d["agent_reply_suffix"], "> 🤖 AI 代答，仅供参考")
         self.assertEqual((props["history_chats"]["minimum"], props["history_chats"]["maximum"], d["history_chats"]), (0, 50, 20))
         self.assertLessEqual(props["triage_rules"]["maxLength"], 4000)
+        self.assertIn("http://", props["http_proxy"]["description"])
+        self.assertNotIn("socks5://", props["http_proxy"]["description"])
         self.assertEqual(MANIFEST["configuration"]["type"], "object")
 
     def test_packaged_manifest_drops_source_only_fields(self):
@@ -97,15 +100,18 @@ class BackendSelectionTest(unittest.TestCase):
         os.environ["OPENMATE_BACKEND"] = "fixture"
         self.assertIsInstance(openmate_feishu.make_backend({}, "/tmp"), FixtureBackend)
 
-    def test_larkagentx_is_phase_1b(self):
+    def test_larkagentx_is_the_default(self):
         os.environ.pop("OPENMATE_BACKEND", None)
         with self.assertRaises(BackendError) as e:
             openmate_feishu.make_backend({}, "/tmp")
         self.assertEqual(e.exception.kind, "config")
         self.assertIn("larkx_python", e.exception.message)
+        if "larkx" in sys.modules:
+            return  # another test module put a stand-in in place
         with self.assertRaises(BackendError) as e:
-            openmate_feishu.make_backend({"larkx_python": "/usr/bin/python3"}, "/tmp")
-        self.assertIn("1b", e.exception.message)
+            openmate_feishu.make_backend({"larkx_python": sys.executable}, "/tmp")
+        self.assertEqual(e.exception.kind, "config")
+        self.assertIn("没有装 LarkAgentX", e.exception.message)  # this interpreter has no LarkAgentX
 
     def test_unknown(self):
         os.environ["OPENMATE_BACKEND"] = "nope"

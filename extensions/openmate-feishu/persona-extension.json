@@ -62,7 +62,7 @@
       "http_proxy": {
         "type": "string",
         "title": "代理",
-        "description": "连接飞书时用的代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（SOCKS 需要 LarkAgentX 的 Python 里装了 python-socks）。留空就用系统设置。",
+        "description": "连接飞书时用的代理，只支持 http:// 或 https://，例如 http://127.0.0.1:7890，只对这个扩展生效。留空就用系统设置；系统代理是 SOCKS 时，LarkAgentX 的 Python 里要装 python-socks。",
         "maxLength": 512
       },
       "agent": {
