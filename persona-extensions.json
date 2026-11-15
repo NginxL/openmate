@@ -49,6 +49,7 @@
               "confirm_always": [
                 "matefeishu_*"
               ],
+              "sends_as_user": true,
               "poll_seconds": 60,
               "kinds": [
                 "dm",
@@ -104,7 +105,7 @@
             "http_proxy": {
               "type": "string",
               "title": "代理",
-              "description": "连接飞书时用的代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（SOCKS 需要 LarkAgentX 的 Python 里装了 python-socks）。留空就用系统设置。",
+              "description": "连接飞书时用的代理，只支持 http:// 或 https://，例如 http://127.0.0.1:7890，只对这个扩展生效。留空就用系统设置；系统代理是 SOCKS 时，LarkAgentX 的 Python 里要装 python-socks。",
               "maxLength": 512
             },
             "agent": {
@@ -192,8 +193,8 @@
       "packages": [
         {
           "url": "packages/openmate-feishu/0.1.0/openmate-feishu-0.1.0.tar.gz",
-          "sha256": "ec7888dfec0679a0a6fa7ace24471f6993544107e78f6c3a6d15ff062537c912",
-          "size": 62075
+          "sha256": "710d7260fc2edc17175cedbed016f5b093e1748cbb708daddcf978093eda25dc",
+          "size": 81316
         }
       ]
     }
