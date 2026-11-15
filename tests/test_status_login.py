@@ -91,6 +91,14 @@ class StatusTest(unittest.TestCase):
             h.c("login.step", step="")
         self.assertIn("larkx_python", e.exception.message)
 
+    def test_a_backend_that_broke_is_an_error_not_a_setting(self):
+        def factory(cfg, data_dir):
+            raise BackendError("加载 LarkAgentX 时出错，详情见扩展日志", "unknown")
+
+        st = Harness(self, backend_factory=factory).status()
+        self.assertEqual((st["state"], st["error"]), ("error", "加载 LarkAgentX 时出错，详情见扩展日志"))
+        self.assertNotIn("guide", st)
+
 
 class LoginTest(unittest.TestCase):
     def test_qr_steps_and_credentials_in_secrets(self):

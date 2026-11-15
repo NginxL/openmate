@@ -88,5 +88,27 @@ class HandshakeTest(unittest.TestCase):
             self.assertIn(params["scope"], ("inbox", "chats"))
 
 
+class PrefixedInputTest(unittest.TestCase):
+    """A launcher that read the first line itself (to pick the interpreter) hands it to the core with the rest."""
+
+    def test_a_whole_line_then_the_stream(self):
+        import io
+
+        from openmate_core.main import PrefixedInput
+
+        inp = PrefixedInput(b'{"id":"h1"}\n', io.BytesIO(b'{"id":"h2"}\n'))
+        self.assertEqual([inp.readline(), inp.readline(), inp.readline()], [b'{"id":"h1"}\n', b'{"id":"h2"}\n', b""])
+
+    def test_a_line_cut_short_is_finished_from_the_stream(self):
+        import io
+
+        from openmate_core.main import PrefixedInput
+
+        inp = PrefixedInput(b'{"id":', io.BytesIO(b'"h1"}\n{"id":"h2"}\n'))
+        self.assertEqual(inp.readline(), b'{"id":"h1"}\n')
+        self.assertEqual(inp.readline(), b'{"id":"h2"}\n')
+        self.assertEqual(PrefixedInput(b"", io.BytesIO(b"x\n")).readline(), b"x\n")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,7 @@ class ConnectorApp:
         self.store: Optional[Store] = None
         self.backend = None
         self.setup_error = ""
+        self.setup_kind = ""  # the BackendError kind make_backend raised: config is not_configured, others error
         self.creds = "loading"  # loading | none | present | error
         self.creds_error = ""
         self._credentials: Optional[dict] = None
@@ -195,6 +196,7 @@ class ConnectorApp:
                 self.backend.on_credentials = self._credentials_rotated
             except BackendError as e:
                 self.setup_error = e.message
+                self.setup_kind = e.kind
                 log.warning("backend not available: %s", e.kind)
             self.agent = AgentRunner(self)
             creds = self._load_credentials()
@@ -502,8 +504,11 @@ class ConnectorApp:
         if self.last_event:
             out["last_event"] = rfc3339(self.last_event)
         if self.setup_error:
-            out.update(state="not_configured", error=self.setup_error,
-                       guide=["在 设置 › 扩展 › %s 里把设置填好，扩展会自动重启" % self.manifest.get("name", "")])
+            if self.setup_kind in ("", "config"):
+                out.update(state="not_configured", error=self.setup_error,
+                           guide=["在 设置 › 扩展 › %s 里把设置填好，扩展会自动重启" % self.manifest.get("name", "")])
+            else:
+                out.update(state="error", error=self.setup_error)
             return out
         if not self.ready.is_set() or self.creds == "loading":
             out.update(state="error", error="正在启动，读取登录信息…")
