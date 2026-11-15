@@ -35,7 +35,7 @@ TOKEN = "pext_test_token"
 
 def fast(**kw) -> Timing:
     base = dict(debounce=0.15, backoff_min=0.05, backoff_max=0.2, stable_after=0.3, login_wait=3.0, agent_poll=0.05,
-                agent_timeout=60.0, secrets_retry=0.05)
+                agent_timeout=60.0, secrets_retry=0.05, sent_retry=(0.05, 0.05, 0.05))
     base.update(kw)
     return Timing(**base)
 
@@ -52,10 +52,18 @@ def wait_until(cond: Callable[[], Any], timeout: float = 5.0, what: str = "condi
 
 
 class HubSideError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, data: Optional[dict] = None):
         super().__init__("%s: %s" % (code, message))
         self.code = code
         self.message = message
+        self.data = data
+
+
+def _sends_as_user() -> set:
+    """The connector ids the extension's manifest says send as the user (what the hub reads at install)."""
+    with open(os.path.join(ROOT, "extensions", EXT, "persona-extension.json"), encoding="utf-8") as f:
+        m = json.load(f)
+    return {c["id"] for c in (m.get("contributes") or {}).get("connectors") or [] if c.get("sends_as_user") is True}
 
 
 class StdioHub:
@@ -71,6 +79,9 @@ class StdioHub:
         self.secrets_fail = False
         self.secrets_delay = 0.0
         self.cli: Optional[Callable[[dict], Any]] = None  # params → result; raise HubSideError for an error answer
+        self.sent_records: List[dict] = []  # sent.record calls the hub accepted
+        self.sent_calls = 0
+        self.sent_answer: Optional[Callable[[dict], Any]] = None  # before accepting: raise HubSideError to refuse
         self.calls: List[tuple] = []
         self.events: List[tuple] = []
         self.raw_lines: List[bytes] = []
@@ -115,6 +126,22 @@ class StdioHub:
                 else:
                     self.secrets.pop(c, None)
                     result = {}
+            elif method == "sent.record":
+                # The hub's checks, in its order (docs/extensions/extensions.md "Sent as the user: sent.record").
+                with self._cv:
+                    self.sent_calls += 1
+                if self.sent_answer is not None:
+                    self.sent_answer(params)
+                if params.get("contribution") not in _sends_as_user():
+                    raise HubSideError("permission_denied", "this connector does not declare sends_as_user")
+                if not isinstance(params.get("text"), str):
+                    raise HubSideError("invalid_params", "sent.record: no text")
+                if not isinstance(params.get("target"), dict):
+                    raise HubSideError("invalid_params", "sent.record: target is not an object")
+                with self._cv:
+                    self.sent_records.append(params)
+                    self._cv.notify_all()
+                result = {}
             elif method == "cli.call":
                 if self.cli is None:
                     raise HubSideError("permission_denied", "host CLI: integration is not enabled by the manager")
@@ -123,7 +150,10 @@ class StdioHub:
                 raise HubSideError("unknown_method", "unknown method " + method)
             self._send({"id": msg["id"], "result": result})
         except HubSideError as e:
-            self._send({"id": msg["id"], "error": {"code": e.code, "message": e.message}})
+            err = {"code": e.code, "message": e.message} if e.code else {"message": e.message}
+            if e.data is not None:
+                err["data"] = e.data
+            self._send({"id": msg["id"], "error": err})
 
     def request(self, method: str, params: dict, timeout: float = 15.0) -> Any:
         rid = "h%d" % next(self._ids)

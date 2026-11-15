@@ -36,6 +36,7 @@ THREAD_MEDIA_MOST = 4 << 20
 ARCHIVE_MEDIA_MOST = 20 << 20
 ARCHIVE_ROWS_MOST = 2000
 STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, backend, saved sign-in) waits this long
+SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
 
 # Connector methods of capabilities this connector does not declare: answered no_capability (unknown ones are
 # unknown_method).
@@ -274,6 +275,48 @@ class ConnectorApp:
                 log.warning("saving refreshed credentials failed (%s)", e.code or "error")
 
         threading.Thread(target=run, name="openmate-creds", daemon=True).start()
+
+    # ------------------------------------------------------------------ the sent-as-user ledger
+
+    def record_sent(self, chat_id: str, text: str, message_ref: str, reply_to: str = "", root: str = "",
+                    session_id: str = "", machine_id: str = "", setting: str = "", summary: str = "") -> None:
+        """Tell the hub about a message sent in the user's name without the hub's gate (sent.record, which the
+        manifest's sends_as_user allows), in the background: the send happened, so a failed record never undoes it.
+        A gated write (actions.do) and the user's own Inbox Send are recorded by the hub, never here."""
+        target = {"chat": chat_id}
+        if root:
+            target["thread"] = root
+        if reply_to:
+            target["reply_to"] = reply_to
+        params: Dict[str, Any] = {"contribution": self.cid, "target": target, "text": (text or "")[:SENT_TEXT_MOST]}
+        for k, v in (("summary", summary), ("message_ref", message_ref), ("session_id", session_id),
+                     ("machine_id", machine_id), ("setting", setting)):
+            if v:
+                params[k] = v
+        threading.Thread(target=self._record_sent, args=(params,), name="openmate-sent", daemon=True).start()
+
+    def _record_sent(self, params: dict) -> None:
+        waits = list(self.timing.sent_retry)
+        while True:
+            try:
+                self.hub_call("sent.record", params)
+                return
+            except RPCError as e:
+                code = e.code or ""
+                retry_after = (e.data or {}).get("retry_after") if isinstance(e.data, dict) else None
+                if code == "rate_limited" and waits:
+                    try:
+                        wait = min(60.0, max(0.0, float(retry_after)))
+                    except (TypeError, ValueError):
+                        wait = waits[0]
+                elif code == "" and waits:  # the ledger could not be written: worth another try later
+                    wait = waits[0]
+                else:  # permission_denied, invalid_params, no_database, unknown_method (an older hub), closed, timeout
+                    log.warning("sent.record failed (%s): the send is not in the hub's ledger", code or "error")
+                    return
+                waits.pop(0)
+                if self.closing.wait(wait):
+                    return
 
     def _emit_changed(self, scope: str) -> None:
         if self.peer is not None:

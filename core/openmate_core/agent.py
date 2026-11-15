@@ -587,13 +587,28 @@ class AgentRunner:
         sep = "" if self.suffix.startswith("\n") else "\n\n"
         return t + sep + self.suffix
 
+    def _send(self, run: dict, key: str, body: str, reply_to: str, root: str) -> dict:
+        """Send body into the run's chat as the user, once per key (the send journal). Nobody confirms these sends
+        (the user asked for them with /agent), so each one that went out is told to the hub's sent-as-user ledger
+        (sent.record, allowed by the manifest's sends_as_user); one answered from the journal is not told again."""
+
+        def go() -> dict:
+            mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None)
+            chat = self.store.get_chat(run["chat_id"])
+            self.app.record_sent(run["chat_id"], body, str(mid or ""), reply_to=reply_to, root=root,
+                                 session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "",
+                                 setting="agent",
+                                 summary="/agent 以你的身份回复到" + views.where(self.app.platform.name, chat, run["chat_id"]))
+            return {"text": "已回复", "message_ref": mid}
+
+        return self.app.send_once(key, "agent", go)
+
     def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "") -> str:
         """Send text (with the suffix) into the run's chat once per key; the new message's id, "" when it failed."""
         body = self.with_suffix(text)
         self._remember_post(body)
         try:
-            res = self.app.send_once(key, "agent", lambda: {
-                "text": "已回复", "message_ref": self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None)})
+            res = self._send(run, key, body, reply_to, root)
             return str(res.get("message_ref") or "")
         except RPCError as e:
             log.warning("an /agent message was not sent: %s", e.code or "error")
@@ -621,9 +636,7 @@ class AgentRunner:
         self._remember_post(body)
         sent_id = ""
         try:
-            res = self.app.send_once(key, "agent", lambda: {
-                "text": "已回复", "message_ref": self.app.send_as_user(cur["chat_id"], body, cur["request_id"],
-                                                                      cur["root_id"] or cur["request_id"])})
+            res = self._send(cur, key, body, cur["request_id"], cur["root_id"] or cur["request_id"])
             sent_id = str(res.get("message_ref") or "")
             went = True
         except RPCError:

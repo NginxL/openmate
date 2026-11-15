@@ -220,6 +220,113 @@ class ReplyTest(unittest.TestCase):
             h.tool("agent_reply", request=self.run["id"], text="还想回")
 
 
+class SentRecordTest(unittest.TestCase):
+    """Every /agent send goes out without a card, so each one that went out is put in the hub's sent-as-user ledger
+    (sent.record, allowed by sends_as_user in the manifest); gated writes and the user's own Inbox Send are not."""
+
+    def setUp(self):
+        self.h = agent(self)
+        self.m = ask(self.h, "/agent 帮我回复一下")
+        started(self.h)
+        self.run = running(self.h, self.m)
+        self.sid = self.run["session_id"]
+
+    def records(self, n):
+        return wait_until(lambda: (lambda r: r if len(r) >= n else None)(list(self.h.hub.sent_records)),
+                          what="%d sent.record call(s)" % n)
+
+    def test_the_manifest_declares_it(self):
+        import json
+        import os
+        from harness import ROOT
+
+        with open(os.path.join(ROOT, "extensions", "openmate-feishu", "persona-extension.json"), encoding="utf-8") as f:
+            conn = json.load(f)["contributes"]["connectors"][0]
+        self.assertIs(conn["sends_as_user"], True)
+        res = self.h.restart(initialize=False).hub.request("initialize", {
+            "protocol": 1, "hub": {}, "extension": {"id": "openmate-feishu", "version": "0.1.0"}, "config": {}})
+        self.assertIs(res["contributes"]["connectors"][0]["sends_as_user"], True)
+
+    def test_a_reply_through_the_tool_is_recorded_once(self):
+        h = self.h
+        h.tool("agent_reply", request=self.run["id"], text="接口文档我这周五前更新。")
+        rec = self.records(1)[0]
+        sent = h.sent()[-1]
+        self.assertEqual(rec["contribution"], CID)
+        self.assertEqual(rec["text"], "接口文档我这周五前更新。\n\n" + SUFFIX)
+        self.assertEqual(rec["target"], {"chat": "chat_example_team", "thread": self.m.id, "reply_to": self.m.id})
+        self.assertEqual(rec["message_ref"], sent["id"])
+        self.assertEqual((rec["session_id"], rec["machine_id"]), (self.sid, "mac-example"))
+        self.assertEqual(rec["setting"], "agent")
+        self.assertEqual(rec["summary"], "/agent 以你的身份回复到飞书群「示例项目群」（5 人）")
+        self.assertNotIn("\n", rec["summary"])
+        h.tool("agent_reply", request=self.run["id"], text="接口文档我这周五前更新。")  # answered from the journal
+        time.sleep(0.3)
+        self.assertEqual(len(h.hub.sent_records), 1)
+
+    def test_the_fallback_and_stop_answers_are_recorded(self):
+        h = self.h
+        h.http.add(self.sid, "assistant", "text", "最终答案")
+        h.http.end_turn(self.sid)
+        wait_until(lambda: replies(h), what="the fallback")
+        stop = ask(h, "/stop", root_id=self.m.id)
+        wait_until(lambda: len(replies(h)) == 2, what="the stop answer")
+        recs = self.records(2)
+        self.assertEqual([r["text"] for r in recs], [x["text"] for x in replies(h)])
+        self.assertEqual(recs[0]["text"], "最终答案\n\n" + SUFFIX)
+        self.assertEqual(recs[1]["target"], {"chat": "chat_example_team", "thread": self.m.id, "reply_to": stop.id})
+
+    def test_long_text_is_cut_to_what_the_hub_keeps(self):
+        h = self.h
+        h.tool("agent_reply", request=self.run["id"], text="字" * 5000)
+        self.assertEqual(len(self.records(1)[0]["text"]), 4000)
+
+    def test_a_send_that_did_not_surely_go_out_is_not_recorded(self):
+        h = self.h
+        h.world.send_fail = "uncertain"
+        with self.assertRaises(HubSideError):
+            h.tool("agent_reply", request=self.run["id"], text="可能发出去了")
+        h.world.send_fail = "rejected"
+        with self.assertRaises(HubSideError):
+            h.tool("agent_reply", request=self.run["id"], text="没发出去")
+        time.sleep(0.3)
+        self.assertEqual(h.hub.sent_records, [])
+
+    def test_gated_writes_and_inbox_sends_are_the_hubs_to_record(self):
+        h = self.h
+        h.c("actions.do", name=CID + "_send", request_id="req-1", args={"chat": "chat_example_dm_a", "text": "确认过的"})
+        h.c("inbox.reply", thread="chat_example_dm_a", text="我自己发的")
+        time.sleep(0.3)
+        self.assertEqual(h.hub.sent_records, [])
+        self.assertEqual(h.hub.sent_calls, 0)
+
+    def test_a_busy_ledger_is_tried_again(self):
+        h = self.h
+        answers = [HubSideError("rate_limited", "slow down", {"retry_after": 0.05}), HubSideError("", "ledger write failed")]
+
+        def answer(params):
+            if answers:
+                raise answers.pop(0)
+
+        h.hub.sent_answer = answer
+        h.tool("agent_reply", request=self.run["id"], text="稍后记下")
+        self.assertEqual(self.records(1)[0]["text"], "稍后记下\n\n" + SUFFIX)
+        self.assertEqual(h.hub.sent_calls, 3)
+
+    def test_a_refusal_is_not_tried_again(self):
+        h = self.h
+
+        def answer(params):
+            raise HubSideError("permission_denied", "not declared")
+
+        h.hub.sent_answer = answer
+        text = h.tool("agent_reply", request=self.run["id"], text="照样发出")
+        self.assertIn("已回复", text)  # the send stands
+        time.sleep(0.3)
+        self.assertEqual(h.hub.sent_calls, 1)
+        self.assertEqual(h.sent()[-1]["text"], "照样发出\n\n" + SUFFIX)
+
+
 class ContinueTest(unittest.TestCase):
     def test_a_request_in_the_thread_goes_on_in_the_same_conversation(self):
         h = agent(self)

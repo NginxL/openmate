@@ -19,6 +19,7 @@
         "capabilities": ["status", "tools", "actions", "events", "inbox", "archive", "login", "threads"],
         "agent_tools": ["matefeishu_status", "matefeishu_chats", "matefeishu_messages", "matefeishu_search", "matefeishu_docs", "matefeishu_agent_reply"],
         "confirm_always": ["matefeishu_*"],
+        "sends_as_user": true,
         "poll_seconds": 60,
         "kinds": ["dm", "mention", "group"],
         "kind_descriptions": {

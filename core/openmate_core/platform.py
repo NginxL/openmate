@@ -52,4 +52,5 @@ class Timing:
     agent_keep: float = 3 * 86400.0  # runs kept this long, at most agent_keep_most of them
     agent_keep_most: int = 200
     secrets_retry: float = 2.0
+    sent_retry: Tuple[float, ...] = (5.0, 30.0, 120.0)  # waits before sent.record is tried again (the hub was busy)
     extra: Dict[str, float] = field(default_factory=dict)
