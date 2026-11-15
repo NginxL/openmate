@@ -92,7 +92,8 @@ class ConnectorApp:
         self._link_stop = threading.Event()
         self._login_lock = threading.Lock()
         self._login: Optional[dict] = None
-        self._catchup_lock = threading.Lock()
+        self._catchup_pending = 0  # the link generation a catch-up was asked for (0: none)
+        self._catchup_running = False
         self._catchup_done = threading.Event()
         self._link_up = threading.Event()
         self.ready = threading.Event()
@@ -345,7 +346,7 @@ class ConnectorApp:
                 if state == "up":
                     up_at[0] = time.monotonic()
                     self._set_link(gen, "up")
-                    threading.Thread(target=self._catch_up, args=(gen,), name="openmate-catchup", daemon=True).start()
+                    self._request_catch_up(gen)
                 elif state == "expired":
                     self._set_link(gen, "expired", why or CredentialsExpired().message)
                 else:
@@ -391,10 +392,27 @@ class ConnectorApp:
             if not self.closing.is_set():
                 log.exception("a live message could not be stored")
 
+    def _request_catch_up(self, gen: int) -> None:
+        """Read history after a link up; one asked for while one runs is run after it (a second outage's messages)."""
+        with self.lock:
+            self._catchup_pending = gen
+            if self._catchup_running:
+                return
+            self._catchup_running = True
+        threading.Thread(target=self._catch_up_loop, name="openmate-catchup", daemon=True).start()
+
+    def _catch_up_loop(self) -> None:
+        while True:
+            with self.lock:
+                gen, self._catchup_pending = self._catchup_pending, 0
+                if not gen:
+                    self._catchup_running = False
+                    self._catchup_done.set()
+                    return
+            self._catch_up(gen)
+
     def _catch_up(self, gen: int) -> None:
         """After the link is really up: the one-time initial history, then recent chats again (what came while down)."""
-        if not self._catchup_lock.acquire(blocking=False):
-            return
         try:
             t = self.timing
             done_now = set()
@@ -422,9 +440,6 @@ class ConnectorApp:
         except Exception:
             if not self.closing.is_set():
                 log.exception("history catch-up failed")
-        finally:
-            self._catchup_lock.release()
-            self._catchup_done.set()
 
     # ------------------------------------------------------------------ storing messages
 

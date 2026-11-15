@@ -112,6 +112,7 @@ class AgentRunner:
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_prune = 0.0
+        self._posted: Dict[str, float] = {}  # hashes of what /agent posted lately: their echoes are never requests
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -161,6 +162,21 @@ class AgentRunner:
 
     # ---------------------------------------------------------------- messages
 
+    @staticmethod
+    def _digest(text: str) -> str:
+        return hashlib.sha256((text or "").strip().encode("utf-8")).hexdigest()
+
+    def _echo(self, text: str) -> bool:
+        with self._mu:
+            now = time.time()
+            for k in [k for k, at in self._posted.items() if now - at > 600]:
+                del self._posted[k]
+            return self._digest(text) in self._posted
+
+    def _remember_post(self, body: str) -> None:
+        with self._mu:
+            self._posted[self._digest(body)] = time.time()
+
     def is_agent_text(self, text: str) -> bool:
         t = (text or "").rstrip()
         for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
@@ -179,7 +195,7 @@ class AgentRunner:
         at = row.get("at") or 0
         if at and abs(now - at) > self.app.timing.agent_fresh:
             return
-        if self.is_agent_text(text):
+        if self.is_agent_text(text) or self._echo(text):
             return
         body = strip_leading_mentions(text).strip()
         if body.lower() in STOP_WORDS:
@@ -249,6 +265,7 @@ class AgentRunner:
         try:
             if prev is not None:
                 mid, sid = prev["machine_id"], prev["session_id"]
+                self._supersede(prev["id"], run["id"])
                 baseline = self._latest_seq(mid, sid)
                 cmid = "openmate-" + run["id"]
                 self.hub.send_message(mid, sid, prompt, cmid)
@@ -279,6 +296,16 @@ class AgentRunner:
             return
         log.info("/agent request started (%s)", "continued" if prev is not None else "new conversation")
         self._wake.set()
+
+    def _supersede(self, prev_id: str, run_id: str) -> None:
+        """A newer request goes on in the same conversation: the turn's end is the newer one's to answer, so the older
+        run stops waiting (and can never post a fallback for the same turn). Its reply tool keeps working."""
+        with self._lock(prev_id):
+            cur = self.store.run_get(prev_id)
+            if cur is not None and cur["state"] in ACTIVE:
+                cur["state"] = "done"
+                cur["superseded_by"] = run_id
+                self.store.run_put(cur)
 
     def _latest_seq(self, mid: str, sid: str) -> int:
         try:
@@ -563,6 +590,7 @@ class AgentRunner:
     def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "") -> str:
         """Send text (with the suffix) into the run's chat once per key; the new message's id, "" when it failed."""
         body = self.with_suffix(text)
+        self._remember_post(body)
         try:
             res = self.app.send_once(key, "agent", lambda: {
                 "text": "已回复", "message_ref": self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None)})
@@ -590,6 +618,7 @@ class AgentRunner:
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
         body = self.with_suffix(text)
+        self._remember_post(body)
         sent_id = ""
         try:
             res = self.app.send_once(key, "agent", lambda: {

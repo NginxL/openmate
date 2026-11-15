@@ -192,8 +192,8 @@
       "packages": [
         {
           "url": "packages/openmate-feishu/0.1.0/openmate-feishu-0.1.0.tar.gz",
-          "sha256": "e8a5a2f1c8fa6b71f88a5226043c5b9345d4f12f30cf2edc03847ac4e48ce32a",
-          "size": 61610
+          "sha256": "ec7888dfec0679a0a6fa7ace24471f6993544107e78f6c3a6d15ff062537c912",
+          "size": 62075
         }
       ]
     }

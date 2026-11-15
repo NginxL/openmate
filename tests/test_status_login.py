@@ -201,6 +201,23 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(thing["last"], missed.id)
         self.assertEqual(thing["kind"], "mention")
 
+    def test_a_link_up_during_a_catch_up_gets_its_own(self):
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        n = len(h.world.history_calls)
+        h.app._catchup_done.clear()
+        gen = h.app._gen
+        with h.app.lock:
+            h.app._catchup_running = True  # as if one were running now
+        h.app._request_catch_up(gen)  # a second link up meanwhile: remembered, not dropped
+        self.assertEqual(len(h.world.history_calls), n)
+        with h.app.lock:
+            h.app._catchup_running = False
+        h.app._request_catch_up(gen)
+        wait_until(lambda: h.app._catchup_done.is_set(), what="the second catch-up")
+        self.assertGreater(len(h.world.history_calls), n)
+
     def test_backoff_resets_after_a_stable_link(self):
         h = Harness(self, timing=fast(backoff_min=0.05, backoff_max=5.0, stable_after=0.2))
         h.sign_in()

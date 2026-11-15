@@ -250,6 +250,35 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(h.app.store.run_get(run1["id"])["request_id"], first.id)
 
 
+class SupersedeTest(unittest.TestCase):
+    def test_a_second_request_while_the_first_runs_gets_the_single_answer(self):
+        h = agent(self)
+        first = ask(h, "/agent 第一个")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+        second = ask(h, "/agent 再补充一点", root_id=first.id)
+        wait_until(lambda: h.http.posts("/api/v1/sessions/mac-example/%s/messages" % sid), what="continued")
+        run2 = running(h, second)
+        self.assertEqual(h.app.store.run_get(run1["id"])["state"], "done")
+        h.http.add(sid, "assistant", "text", "两件事一起答")
+        h.http.end_turn(sid)
+        wait_until(lambda: replies(h), what="the answer")
+        time.sleep(0.3)
+        self.assertEqual([(s["text"], s["reply_to"]) for s in replies(h)], [("两件事一起答\n\n" + SUFFIX, second.id)])
+        self.assertEqual(h.app.store.run_get(run2["id"])["state"], "done")
+        # the first request's tool still answers into its own thread
+        h.tool("agent_reply", request=run1["id"], text="第一个的补充")
+        self.assertEqual(h.sent()[-1]["reply_to"], first.id)
+
+    def test_an_unmarked_reply_that_looks_like_a_request_is_not_one(self):
+        h = agent(self, agent_reply_suffix=" ")
+        m = ask(h, "/agent 回一句")
+        run = running(h, m)
+        h.tool("agent_reply", request=run["id"], text="/agent 这句只是回复里的文字")
+        time.sleep(0.3)
+        self.assertEqual(len(h.http.starts()), 1)
+
+
 class StopTest(unittest.TestCase):
     def setUp(self):
         self.h = agent(self)
