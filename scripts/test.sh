@@ -1,6 +1,8 @@
 #!/bin/sh
 # Every test, standard library only, in isolated mode (python3 -I), then the package check.
 # PYTHON=/path/to/python3 scripts/test.sh to use another interpreter (3.9 or newer).
+# OPENMATE_LARKX_PYTHON=/path/to/larkx-venv/bin/python scripts/test.sh also runs the smoke test against a real
+# LarkAgentX installed there (no network, no sign-in).
 set -eu
 cd "$(dirname "$0")/.."
 PY="${PYTHON:-python3}"
