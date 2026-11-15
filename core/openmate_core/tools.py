@@ -1,0 +1,407 @@
+"""The connector's tools (reads, no gate) and actions (writes: only after the hub's gate, the phone's confirmation).
+
+Names are <connector id>_<what>, so another platform's connector reuses this module with its own prefix.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+from typing import Any, Dict, List, Optional
+
+from . import views
+from .backend import BackendError
+from .textutil import clip, local_stamp, one_line
+from .wire import RPCError
+
+log = logging.getLogger("openmate.tools")
+
+TEXT_MOST = 8000  # characters in one message the actions send
+
+
+def _obj(props: Dict[str, Any], required: Optional[List[str]] = None) -> dict:
+    s: Dict[str, Any] = {"type": "object", "properties": props}
+    if required:
+        s["required"] = required
+    return s
+
+
+def read_tools(app) -> List[dict]:
+    c, p = app.cid, app.platform.name
+    return [
+        {"name": c + "_status", "description": "%s连接器的状态：是否登录、实时连接是否正常、最近收到消息的时间、本地记录了多少会话。" % p,
+         "input_schema": _obj({})},
+        {"name": c + "_chats", "description": "最近活跃的%s会话（私聊和群），按最近消息排序，带会话 id、类型和还没回的消息数。可以按名字过滤。" % p,
+         "input_schema": _obj({"query": {"type": "string", "description": "按会话名过滤，可选"},
+                               "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "最多几个，默认 30"}})},
+        {"name": c + "_messages", "description": "读一个%s会话的消息，从旧到新，每页最多 50 条；用返回的 before 往前翻。给 thread 只看一个话题。" % p,
+         "input_schema": _obj({"chat": {"type": "string", "description": "会话 id（%s_chats 或 %s_search 给出）" % (c, c)},
+                               "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "条数，默认 20"},
+                               "before": {"type": "string", "description": "上一页返回的 before，往前翻时用"},
+                               "thread": {"type": "string", "description": "话题根消息 id，可选"}}, ["chat"])},
+        {"name": c + "_search", "description": "在%s里搜人和群，返回用户 id（给 %s_send_dm）或群的会话 id（给 %s_send、%s_messages）。" % (p, c, c, c),
+         "input_schema": _obj({"query": {"type": "string", "description": "名字或关键词"},
+                               "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最多几个，默认 20"}}, ["query"])},
+        {"name": c + "_docs", "description": "通过管理端的 lark-cli 只读集成搜%s文档（标题、链接、摘要）。管理端没开启这个集成时会说明。" % p,
+         "input_schema": _obj({"query": {"type": "string", "description": "关键词"},
+                               "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多几个，默认 10"}}, ["query"])},
+        {"name": c + "_agent_reply", "description": "只给 /agent 用：把处理结果以我的身份回复到发出 /agent 的那个%s话题。request 必须是这次请求给出的 id；可以多次调用发进度，不要编造没做到的事。" % p,
+         "input_schema": _obj({"request": {"type": "string", "description": "这次 /agent 请求的 id（请求说明里给出）"},
+                               "text": {"type": "string", "description": "要回复的内容（纯文本）"}}, ["request", "text"])},
+    ]
+
+
+def write_tools(app) -> List[dict]:
+    c, p = app.cid, app.platform.name
+    return [
+        {"name": c + "_send", "description": "以我的身份在%s会话（私聊或群）里发一条消息，可以回复某条消息。每次都要我在手机上确认全文和发给谁。" % p,
+         "input_schema": _obj({"chat": {"type": "string", "description": "会话 id"},
+                               "text": {"type": "string", "description": "完整内容（纯文本）"},
+                               "reply_to": {"type": "string", "description": "要回复的消息 id，可选"}}, ["chat", "text"])},
+        {"name": c + "_send_dm", "description": "以我的身份私聊一个%s用户（没有私聊会话时先建一个）。每次都要我在手机上确认全文和发给谁。" % p,
+         "input_schema": _obj({"user": {"type": "string", "description": "对方的用户 id（%s_search 给出）" % c},
+                               "text": {"type": "string", "description": "完整内容（纯文本）"}}, ["user", "text"])},
+    ]
+
+
+def _args(params: dict) -> dict:
+    a = params.get("args")
+    if a is None:
+        return {}
+    if isinstance(a, str):
+        try:
+            a = json.loads(a)
+        except ValueError:
+            raise RPCError("参数不是 JSON 对象")
+    if not isinstance(a, dict):
+        raise RPCError("参数不是 JSON 对象")
+    return a
+
+
+def _need(a: dict, key: str, what: str) -> str:
+    v = a.get(key)
+    if not isinstance(v, str) or not v.strip():
+        raise RPCError("缺少%s（%s）" % (what, key))
+    return v.strip() if key != "text" else v
+
+
+def _limit(a: dict, default: int, most: int) -> int:
+    try:
+        n = int(a.get("limit") or default)
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(most, n))
+
+
+def _require_store(app) -> None:
+    if app.store is None:
+        raise RPCError("扩展还在启动，请稍后再试")
+
+
+# ---------------------------------------------------------------- reads
+
+
+def call_tool(app, params: dict) -> dict:
+    name = str(params.get("name") or "")
+    a = _args(params)
+    c = app.cid
+    fn = {
+        c + "_status": _status,
+        c + "_chats": _chats,
+        c + "_messages": _messages,
+        c + "_search": _search,
+        c + "_docs": _docs,
+        c + "_agent_reply": _agent_reply,
+    }.get(name)
+    if fn is None:
+        raise RPCError("没有这个工具：%s" % name)
+    return {"text": fn(app, a)}
+
+
+def _status(app, a: dict) -> str:
+    st = app.m_status({})
+    p = app.platform.name
+    words = {"ok": "已连接", "not_signed_in": "没有登录", "not_configured": "还没设置好", "error": "有问题"}
+    lines = ["%s：%s%s" % (app.manifest.get("name", p), words.get(st["state"], st["state"]),
+                           "，账号 " + st["account"] if st.get("account") else "")]
+    if st.get("error"):
+        lines.append("原因：" + st["error"])
+    if app.last_event:
+        lines.append("最近收到消息：" + local_stamp(app.last_event, app.tz))
+    if app.last_sync:
+        lines.append("最近补收历史：" + local_stamp(app.last_sync, app.tz))
+    if app.store is not None:
+        lines.append("本地记录：%d 个会话，%d 条消息" % (len(app.store.chats_recent(100000)), app.store.message_count()))
+    if app.agent is not None:
+        lines.append("/agent：" + ("已开启（前缀 %s）" % app.agent.prefix if app.agent.enabled else "没有开启"))
+    return "\n".join(lines)
+
+
+def _chats(app, a: dict) -> str:
+    _require_store(app)
+    query = str(a.get("query") or "").strip()
+    chats = app.store.chats_recent(_limit(a, 30, 100), query)
+    if not chats:
+        return "没有找到会话" + ("（过滤：%s）" % query if query else "")
+    me = app.me_name()
+    lines = ["最近的%s会话（按最近消息排序）：" % app.platform.name]
+    for ch in chats:
+        rows = [r for r in app.store.messages_before(ch["id"], None, 40) if not views.is_system(r) and views.has_content(r)]
+        run = views.unanswered_run(rows)
+        bits = [ch.get("name") or ch["id"], "私聊" if ch.get("kind") == "dm" else "群", "chat=" + ch["id"]]
+        if ch.get("last_at"):
+            bits.append("最近 " + local_stamp(ch["last_at"], app.tz))
+        if run:
+            bits.append("有 %d 条没回%s" % (len(run), "（@我）" if any(r.get("at_me") for r in run) else ""))
+        elif rows:
+            bits.append("最后一条是我发的")
+        lines.append("- " + " · ".join(bits))
+    return "\n".join(lines)
+
+
+def _messages(app, a: dict) -> str:
+    _require_store(app)
+    chat_id = _need(a, "chat", "会话 id")
+    limit = _limit(a, 20, 50)
+    before = str(a.get("before") or "").strip()
+    before_pos: Optional[int] = None
+    if before:
+        try:
+            before_pos = int(before)
+        except ValueError:
+            raise RPCError("before 不对：用上一页返回的 before")
+    chat = app.store.get_chat(chat_id)
+    if chat is None and app.signed_in:
+        try:
+            app.store.upsert_chat(app.backend.chat_info(chat_id))
+            chat = app.store.get_chat(chat_id)
+        except BackendError:
+            chat = None
+    if chat is None:
+        raise RPCError("没有这个%s会话：%s" % (app.platform.name, chat_id))
+    thread = str(a.get("thread") or "").strip()
+    if thread:
+        rows = app.store.thread_messages(chat_id, thread, limit)
+    else:
+        rows = app.store.messages_before(chat_id, before_pos, limit)
+        if len(rows) < limit:
+            app.fill_older(chat_id, rows[0]["position"] if rows else before_pos, limit - len(rows))
+            rows = app.store.messages_before(chat_id, before_pos, limit)
+    me = app.me_name()
+    head = "%s（%s，chat=%s）" % (views.chat_name(chat, chat_id), "私聊" if chat.get("kind") == "dm" else "群", chat_id)
+    if not rows:
+        return head + "：没有更多消息"
+    lines = [head + "，%d 条，从旧到新：" % len(rows)]
+    for r in rows:
+        extra = ""
+        if r.get("parent_id"):
+            extra += " 回复=" + r["parent_id"]
+        if r.get("root_id"):
+            extra += " 话题=" + r["root_id"]
+        lines.append("[%s] %s (id=%s%s)" % (r["position"], views.log_line(r, app.tz, me), r["id"], extra))
+    if not thread and len(rows) >= limit:
+        lines.append("更早的消息：before=%s" % rows[0]["position"])
+    return "\n".join(lines)
+
+
+def _search(app, a: dict) -> str:
+    query = _need(a, "query", "关键词")
+    if not app.signed_in:
+        raise RPCError("还没有登录%s" % app.platform.name)
+    try:
+        hits = app.backend.search(query, _limit(a, 20, 50))
+    except BackendError as e:
+        raise RPCError("搜索失败：" + e.message)
+    if not hits:
+        return "没有找到“%s”" % query
+    lines = ["搜到 %d 个：" % len(hits)]
+    for h in hits:
+        if h.kind == "group":
+            lines.append("- 群：%s（chat=%s）%s" % (h.name, h.id, " " + h.detail if h.detail else ""))
+        else:
+            lines.append("- 人：%s（user=%s）%s" % (h.name, h.id, " " + h.detail if h.detail else ""))
+    return "\n".join(lines)
+
+
+_CLI_REASONS = {
+    "permission_denied": "管理端没有开启 lark-cli 只读集成（manager 的 lark.cli.extensions），或者没有授权给这个扩展",
+    "unsupported": "管理端的 lark-cli 版本不符合要求",
+    "unavailable": "lark-cli 暂时不可用（可能没有登录）",
+    "rate_limited": "lark-cli 被限流了，请稍后再试",
+    "timeout": "lark-cli 超时了",
+    "unknown_method": "这个 hub 不支持 lark-cli 集成",
+}
+
+
+def cli_search_docs(app, query: str, limit: int) -> List[dict]:
+    """Documents found through the host lark-cli integration: [{title, url, summary}]. Raises RPCError with a reason."""
+    try:
+        res = app.hub_call("cli.call", {"operation": "search", "kind": "docs", "query": query, "limit": limit}, timeout=30)
+    except RPCError as e:
+        raise RPCError("文档搜索不可用：" + _CLI_REASONS.get(e.code, e.message or "lark-cli 集成出错"))
+    data = ((res or {}).get("result") or {}).get("data") if isinstance(res, dict) else None
+    return _docs_in(data)[:limit]
+
+
+def _docs_in(data: Any) -> List[dict]:
+    """Pick documents out of lark-cli's search answer, whatever its exact shape: objects with a link and a title."""
+    out: List[dict] = []
+    seen = set()
+
+    def text(v: Any) -> str:
+        if isinstance(v, str):
+            return re.sub(r"</?[a-zA-Z][^>]*>", "", v).strip()
+        return ""
+
+    def walk(v: Any, depth: int) -> None:
+        if depth > 8 or len(out) >= 50:
+            return
+        if isinstance(v, dict):
+            url = text(v.get("url") or v.get("link") or v.get("doc_url") or v.get("obj_url") or "")
+            title = text(v.get("title") or v.get("name") or v.get("title_highlighted") or v.get("doc_title") or "")
+            if url and title and url not in seen:
+                seen.add(url)
+                summary = text(v.get("summary") or v.get("summary_highlighted") or v.get("preview") or v.get("description") or "")
+                out.append({"title": title, "url": url, "summary": summary})
+            for x in v.values():
+                walk(x, depth + 1)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+
+    walk(data, 0)
+    return out
+
+
+def _docs(app, a: dict) -> str:
+    query = _need(a, "query", "关键词")
+    docs = cli_search_docs(app, query, _limit(a, 10, 20))
+    if not docs:
+        return "没有搜到和“%s”有关的文档" % query
+    lines = ["搜到 %d 篇文档：" % len(docs)]
+    for d in docs:
+        lines.append("- %s %s%s" % (d["title"], d["url"], ("\n  " + one_line(d["summary"], 200)) if d.get("summary") else ""))
+    return "\n".join(lines)
+
+
+def _agent_reply(app, a: dict) -> str:
+    if app.agent is None:
+        raise RPCError("扩展还在启动，请稍后再试")
+    return app.agent.reply_tool(_need(a, "request", "请求 id"), _need(a, "text", "回复内容"))
+
+
+# ---------------------------------------------------------------- writes
+
+
+def _check_text(text: str) -> str:
+    if not text.strip():
+        raise RPCError("消息内容是空的")
+    if len(text) > TEXT_MOST:
+        raise RPCError("消息太长了（%d 字），最多 %d 字" % (len(text), TEXT_MOST))
+    return text
+
+
+def _send_card(app, a: dict) -> tuple:
+    chat_id = _need(a, "chat", "会话 id")
+    text = _check_text(_need(a, "text", "消息内容"))
+    reply_to = str(a.get("reply_to") or "").strip()
+    p = app.platform.name
+    chat = app.store.get_chat(chat_id) if app.store is not None else None
+    if chat is None:
+        target = "%s会话 %s（本地没有记录，名字未知）" % (p, chat_id)
+        visible = "会话 %s 里的人" % chat_id
+    elif chat.get("kind") == "dm":
+        target = "%s私聊「%s」" % (p, views.chat_name(chat, chat_id))
+        visible = views.chat_name(chat, chat_id)
+    else:
+        members = chat.get("members") or 0
+        target = "%s群「%s」%s" % (p, views.chat_name(chat, chat_id), "（%d 人）" % members if members else "")
+        visible = "%s群「%s」的所有成员" % (p, views.chat_name(chat, chat_id))
+    lines = ["以你的身份发到" + target]
+    if reply_to:
+        quoted = app.store.message(chat_id, reply_to) if app.store is not None else None
+        if quoted is not None:
+            lines.append("回复 %s：“%s”" % (views.sender_of(quoted, app.me_name()), one_line(views.text_of(quoted), 80)))
+        else:
+            lines.append("回复消息 %s" % reply_to)
+    lines += ["——", text]
+    return chat_id, text, reply_to, visible, "\n".join(lines)
+
+
+def _dm_card(app, a: dict) -> tuple:
+    user = _need(a, "user", "用户 id")
+    text = _check_text(_need(a, "text", "消息内容"))
+    name = ""
+    if app.store is not None:
+        name = app.store.name(user)
+    who = "%s（%s）" % (name, user) if name else "用户 %s" % user
+    summary = "以你的身份私聊 %s（%s）\n——\n%s" % (who, app.platform.name, text)
+    return user, text, name or user, summary
+
+
+def describe(app, params: dict) -> dict:
+    name = str(params.get("name") or "")
+    a = _args(params)
+    c = app.cid
+    if name == c + "_send":
+        _, _, _, visible, summary = _send_card(app, a)
+        return {"action": {"name": name, "visible": visible}, "summary": summary}
+    if name == c + "_send_dm":
+        _, _, visible, summary = _dm_card(app, a)
+        return {"action": {"name": name, "visible": visible}, "summary": summary}
+    raise RPCError("没有这个写操作：%s" % name)
+
+
+def do(app, params: dict) -> dict:
+    name = str(params.get("name") or "")
+    request_id = str(params.get("request_id") or "").strip()
+    if not request_id:
+        raise RPCError("缺少 request_id，不执行")
+    a = _args(params)
+    c = app.cid
+    _require_store(app)
+    key = "action:" + request_id
+    p = app.platform.name
+    if name == c + "_send":
+        chat_id, text, reply_to, visible, _ = _send_card(app, a)
+        root = None
+        if reply_to:
+            quoted = app.store.message(chat_id, reply_to)
+            if quoted is not None and quoted.get("root_id"):
+                root = quoted["root_id"]
+
+        def send():
+            mid = app.send_as_user(chat_id, text, reply_to or None, root)
+            return {"text": "已发送到%s" % visible, "message_ref": mid}
+
+        return _result(app.send_once(key, name, send))
+    if name == c + "_send_dm":
+        user, text, who, _ = _dm_card(app, a)
+        earlier = app.store.send_get(key)
+        if earlier is None:
+            # The chat first, before the request id is taken: a failure here leaves the id free for a retry.
+            if not app.signed_in:
+                raise RPCError("还没有登录%s" % p)
+            try:
+                chat_id = app.backend.create_chat(user)
+            except BackendError as e:
+                raise RPCError("没能打开和 %s 的私聊：%s" % (who, e.message))
+        else:
+            chat_id = ""
+
+        def send():
+            mid = app.send_as_user(chat_id, text)
+            return {"text": "已私聊 %s" % who, "message_ref": mid}
+
+        return _result(app.send_once(key, name, send))
+    raise RPCError("没有这个写操作：%s" % name)
+
+
+def _result(r: dict) -> dict:
+    out = {"text": str(r.get("text") or "已发送")}
+    ref = str(r.get("message_ref") or "")
+    if ref and len(ref) <= 200:
+        out["message_ref"] = ref
+    return out
