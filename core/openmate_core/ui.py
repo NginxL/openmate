@@ -445,12 +445,25 @@ def check_view(view: dict, compact: bool = False) -> List[str]:
         problems.append("state must be a string of at most 16 KB")
     if "refresh_after" in view and (not isinstance(view["refresh_after"], int) or view["refresh_after"] < 0):
         problems.append("refresh_after must be seconds")
+    if view.get("layout") is not None and view["layout"] not in ("stack", "split", "columns"):
+        problems.append("layout %r" % view["layout"])
     sections = view.get("sections")
     if not isinstance(sections, list):
         return problems + ["sections must be a list"]
     keys = set()
     count = 0
     for i, sec in enumerate(sections):
+        # UI version 8 (#9158): span, icon + icon_color, link {title, action} and columns of a section
+        if sec.get("span") is not None and sec["span"] != "full":
+            problems.append("section %d: span %r" % (i, sec["span"]))
+        if sec.get("icon_color") is not None and sec["icon_color"] not in COLORS:
+            problems.append("section %d: icon_color %r" % (i, sec["icon_color"]))
+        if sec.get("columns") is not None and (not isinstance(sec["columns"], int) or not 1 <= sec["columns"] <= 3):
+            problems.append("section %d: columns 1–3" % i)
+        link = sec.get("link")
+        if link is not None and (not isinstance(link, dict) or not 1 <= len(link.get("title") or "") <= 40
+                                 or not (link.get("action") or {}).get("id")):
+            problems.append("section %d: a link needs a title (1–40) and an action" % i)
         for j, item in enumerate(sec.get("items") or []):
             count += 1
             where = "section %d item %d (%s)" % (i, j, item.get("type"))

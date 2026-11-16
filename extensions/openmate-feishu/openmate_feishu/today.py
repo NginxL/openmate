@@ -236,6 +236,7 @@ class Day:
         tz = page.app.tz
         self.icons = version >= 6
         self.links = version >= 3  # push (another page on top) came with UI version 3
+        self.v8 = version >= 8  # a page of cards side by side (layout columns), with icons and links on the cards
         self.current = [e for e in today if not e.all_day and e.start <= now]
         self.upcoming = [e for e in today if not e.all_day and e.start > now]
         self.inbox_needs = [i for i in p["inbox"] if str(i.get("tier") or "") in NEEDS_TIERS]
@@ -263,6 +264,14 @@ class Day:
 
     def _link(self, title: str, action: str, key: str, value: str = "") -> List[dict]:
         return [row(title, "", value, action, key=key)] if self.links else []
+
+    def _card(self, sec: Dict[str, Any], icon: str, color: str, link: Optional[Tuple[str, str]] = None) -> Dict[str, Any]:
+        """A card's icon and its link beside the title (UI version 8)."""
+        if self.v8:
+            sec["icon"], sec["icon_color"] = icon, color
+            if link is not None:
+                sec["link"] = {"title": link[0], "action": {"id": link[1]}}
+        return sec
 
     def _todo_row(self, t: dict, key: str) -> dict:
         _, due = todo_due(t, self.page.app.tz)
@@ -324,9 +333,15 @@ class Day:
         if todos is not None:
             sections.append(todos)
         if self.p["missing"]:
-            sections.append({"items": [self._caption("暂时读不到：%s（稍后自动重试）" % "、".join(self.p["missing"]))]})
+            note: Dict[str, Any] = {"items": [self._caption("暂时读不到：%s（稍后自动重试）" % "、".join(self.p["missing"]))]}
+            if self.v8:
+                note["span"] = "full"
+            sections.append(note)
         title = "今天 · %s 周%s" % (self.now.strftime("%m月%d日").lstrip("0"), WEEKDAYS[self.now.weekday()])
-        return {"title": title, "sections": sections, "refresh_after": REFRESH}
+        view = {"title": title, "sections": sections, "refresh_after": REFRESH}
+        if self.v8:
+            view["layout"] = "columns"  # 需要我 across, then 日程 | 飞书今天, 正在跑的 Agent | 待办
+        return view
 
     def needs_card(self) -> dict:
         p = self.p
@@ -339,6 +354,9 @@ class Day:
                                + (rows[:NEEDS_MOST] or [empty("没有要你处理的事", "", self.version)])}
         if len(rows) > NEEDS_MOST:
             sec["footer"] = "还有 %d 件" % (len(rows) - NEEDS_MOST)
+        if self.v8:
+            sec["span"], sec["columns"] = "full", 2
+            return self._card(sec, "bell", "red" if self.needs_total else "gray", ("全部", "go:chats") if self.chat_needs else None)
         if self.chat_needs:
             sec["items"] += self._link("在“飞书今天”里看全部私聊和 @我 ›", "go:chats", "link:needs")
         return sec
@@ -346,7 +364,7 @@ class Day:
     def calendar_card(self) -> dict:
         v = self.version
         if self.cal_missing:
-            return {"title": "日程", "items": [empty("日程读不到", self.cal_missing, v)]}
+            return self._card({"title": "日程", "items": [empty("日程读不到", self.cal_missing, v)]}, "calendar", "blue")
         parts = ["今天 %d 个" % len(self.today), self.cal_line]
         if self.pending:
             parts.append("%d 个邀请没回复" % len(self.pending))
@@ -358,10 +376,11 @@ class Day:
                                + (rows or [empty("今天没有日程了", "", v)])}
         if len(self.today) > CAL_MOST:
             sec["footer"] = "今天还有 %d 个" % (len(self.today) - CAL_MOST)
-        more = "本周还有 %d 个 ›" % self.later if self.later else "打开日程 ›"
-        sec["items"] += self._link(more, "go:calendar", "link:calendar",
-                                   "待回复 %d" % len(self.pending) if self.pending else "")
-        return sec
+        if self.later or not self.v8:
+            more = "本周还有 %d 个 ›" % self.later if self.later else "打开日程 ›"
+            sec["items"] += self._link(more, "go:calendar", "link:calendar",
+                                       "待回复 %d" % len(self.pending) if self.pending else "")
+        return self._card(sec, "calendar", "blue", ("日历", "go:calendar"))
 
     def feishu_card(self) -> dict:
         app, c = self.page.app, self.counts
@@ -376,8 +395,9 @@ class Day:
                             key="group:" + chat["id"], **self._icon("chat", "indigo")))
         sec: Dict[str, Any] = {"title": "飞书今天", "items": [self._caption(line)]
                                + (rows or [empty("今天群里还没有新消息", "", self.version)])}
-        sec["items"] += self._link("打开飞书今天 ›", "go:chats", "link:feishu")
-        return sec
+        if not self.v8:
+            sec["items"] += self._link("打开飞书今天 ›", "go:chats", "link:feishu")
+        return self._card(sec, "chat", "indigo", ("飞书", "go:chats"))
 
     def agents_card(self) -> dict:
         p = self.p
@@ -391,7 +411,7 @@ class Day:
                                "items": [self._caption(line)] + (rows or [empty("现在没有在跑的 Agent", "", self.version)])}
         if len(p["working"]) > WORK_MOST:
             sec["footer"] = "还有 %d 个" % (len(p["working"]) - WORK_MOST)
-        return sec
+        return self._card(sec, "robot", "teal")
 
     def todos_card(self) -> Optional[dict]:
         if not self.todos:
@@ -402,4 +422,4 @@ class Day:
                                "items": [self._caption(line)] + [self._todo_row(t, "todo:") for t in self.todos[:WORK_MOST]]}
         if len(self.todos) > WORK_MOST:
             sec["footer"] = "还有 %d 个" % (len(self.todos) - WORK_MOST)
-        return sec
+        return self._card(sec, "check", "green")

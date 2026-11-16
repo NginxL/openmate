@@ -28,6 +28,19 @@ def items(view):
     return [it for s in view["sections"] for it in s["items"]]
 
 
+class CheckViewV8Test(unittest.TestCase):
+    def test_columns_fields(self):
+        from openmate_core.ui import check_view
+
+        ok = {"layout": "columns", "sections": [
+            {"title": "需要我", "span": "full", "columns": 2, "icon": "bell", "icon_color": "red",
+             "link": {"title": "全部", "action": {"id": "go:chats"}}, "items": [{"type": "text", "text": "x"}]}]}
+        self.assertEqual(check_view(ok), [])
+        bad = {"layout": "grid", "sections": [
+            {"span": "half", "columns": 4, "icon_color": "black", "link": {"title": "", "action": {}}, "items": []}]}
+        self.assertEqual(len(check_view(bad)), 5, check_view(bad))
+
+
 def stats(view):
     grid = [it for it in items(view) if it["type"] == "stat_grid"][0]
     return {s["label"]: s["value"] for s in grid["stats"]}

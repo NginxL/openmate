@@ -131,6 +131,35 @@ class TodayTest(unittest.TestCase):
         self.assertEqual([r["title"] for r in rows(todos)], ["下周的事"], "the one waiting for a decision is in 需要我")
         self.assertTrue(all(t == 8.0 for _, _, t in hub.calls), "short waits")
 
+    def test_ui_version_8_lays_the_cards_out_two_by_two(self):
+        page, _, _ = make()
+        view = page.render({"ui_version": 8})
+        items(view)
+        self.assertEqual(view["layout"], "columns")
+        needs, cal, feishu, agents, todos = view["sections"]
+        self.assertEqual((needs.get("span"), needs.get("columns")), ("full", 2), "需要我 across, its rows two by two")
+        self.assertEqual([s.get("span") for s in (cal, feishu, agents, todos)], [None] * 4, "the rest two to a row")
+        self.assertEqual([(s["icon"], s["icon_color"]) for s in view["sections"]],
+                         [("bell", "red"), ("calendar", "blue"), ("chat", "indigo"), ("robot", "teal"), ("check", "green")])
+        self.assertEqual(needs["link"], {"title": "全部", "action": {"id": "go:chats"}})
+        self.assertEqual(cal["link"], {"title": "日历", "action": {"id": "go:calendar"}})
+        self.assertEqual(feishu["link"], {"title": "飞书", "action": {"id": "go:chats"}})
+        self.assertNotIn("link", agents)
+        self.assertNotIn("go:chats", str(needs["items"]) + str(feishu["items"]), "the links are on the cards, not rows")
+        self.assertEqual(rows(cal)[-1]["title"], "本周还有 3 个 ›", "the week's rest stays at the bottom")
+        self.assertEqual(texts(needs), ["飞书 2 · 收件箱 1 · Agent 等你 1 · 待办等你拍板 1"])
+        # nothing waits: no link on 需要我, a gray bell
+        page, _, _ = make(answers={"/api/v1/todos": {"todos": []}}, needs=[], groups=[])
+        quiet = page.render({"ui_version": 8})["sections"][0]
+        self.assertEqual((quiet["icon_color"], "link" in quiet), ("gray", False))
+
+    def test_before_8_no_columns_fields(self):
+        page, _, _ = make()
+        for v in (6, 7):
+            view = page.render({"ui_version": v})
+            self.assertNotIn("layout", view)
+            self.assertFalse(any(k in s for s in view["sections"] for k in ("span", "icon", "link", "columns")))
+
     def test_bot_notices_are_counted_apart(self):
         page, _, _ = make()
         page.chats.bots = 7
