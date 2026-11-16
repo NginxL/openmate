@@ -309,16 +309,27 @@ def _send_card(app, a: dict) -> tuple:
     reply_to = str(a.get("reply_to") or "").strip()
     p = app.platform.name
     chat = app.store.get_chat(chat_id) if app.store is not None else None
+    me = getattr(app, "account", None)
+    ref = "会话 id %s" % chat_id  # beside the name, to check it by
     if chat is None:
         target = "%s会话 %s（本地没有记录，名字未知）" % (p, chat_id)
         visible = "会话 %s 里的人" % chat_id
     elif chat.get("kind") == "dm":
-        target = "%s私聊「%s」" % (p, views.chat_name(chat, chat_id))
-        visible = views.chat_name(chat, chat_id)
+        name = chat.get("name") or ""
+        if me is not None and me.id and chat.get("peer_id") == me.id:
+            target = "%s里你和自己的私聊「%s」（%s）" % (p, name or app.me_name(), ref)
+            visible = "只有你自己"
+        elif name:
+            target = "%s私聊「%s」（%s）" % (p, name, ref)
+            visible = name
+        else:
+            target = "%s私聊（对方名字未知，%s）" % (p, ref)
+            visible = "这个私聊里的对方（名字未知）"
     else:
         members = chat.get("members") or 0
-        target = "%s群「%s」%s" % (p, views.chat_name(chat, chat_id), "（%d 人）" % members if members else "")
-        visible = "%s群「%s」的所有成员" % (p, views.chat_name(chat, chat_id))
+        name = views.chat_name(chat, chat_id)
+        target = "%s群「%s」（%s%s）" % (p, name, "%d 人，" % members if members else "", ref)
+        visible = "%s群「%s」的所有成员" % (p, name)
     lines = ["以你的身份发到" + target]
     if reply_to:
         quoted = app.store.message(chat_id, reply_to) if app.store is not None else None

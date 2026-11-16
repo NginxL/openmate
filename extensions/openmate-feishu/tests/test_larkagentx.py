@@ -457,6 +457,26 @@ class ReadTest(Base):
             self.b.chat_info("404")
         self.assertEqual(e.exception.kind, "not_found")
 
+    def test_the_chat_with_yourself_is_named_after_you(self):
+        calls = []
+        real = self.b._client.create_chat
+        self.b._client.create_chat = lambda uid: (calls.append(uid), real(uid))[1]
+        S.created[ME] = "505"
+        S.chats["505"] = {"id": "505", "type": 1, "name": ""}
+        S.chats["506"] = {"id": "506", "type": 1, "name": ""}  # a dm nobody else has written in yet
+        c = self.b.chat_info("505")
+        self.assertEqual((c.kind, c.name, c.peer_id), ("dm", "示例用户", ME))
+        c = self.b.chat_info("506")
+        self.assertEqual((c.name, c.peer_id), ("", ""), "never guessed to be the chat with yourself")
+        self.assertEqual(calls, [ME], "asked once")
+        self.assertEqual(S.posts, [], "nothing sent")
+
+    def test_the_chat_with_yourself_unknown(self):
+        S.chats["505"] = {"id": "505", "type": 1, "name": ""}
+        self.b._client.create_chat = lambda uid: (_ for _ in ()).throw(R.ConnectionError("down"))
+        c = self.b.chat_info("505")
+        self.assertEqual((c.name, c.peer_id), ("", ""))
+
     def test_a_direct_chat_is_named_after_the_other_person(self):
         from larkx._fake import text_data
 

@@ -257,6 +257,7 @@ class LarkXBackend(Backend):
         self._chats: Dict[str, Tuple[float, Chat]] = {}
         self._names: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
+        self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
 
     # ------------------------------------------------------------ the session
@@ -460,6 +461,7 @@ class LarkXBackend(Backend):
         with self._lock:
             old = self._client
             self._auth = self._client = self._me = self._creds = None
+            self._own = None
             self._qr.clear()
             self._names.clear()
         if old is not None:
@@ -799,11 +801,36 @@ class LarkXBackend(Backend):
             topic = False
         with self._lock:
             peer = self._peers.get(chat_id, "")
+        if kind == "dm" and not name and not peer:
+            # nobody else has written in it: it may be the account's chat with itself, which has no name of its own
+            _, me = self._session()
+            if me is not None and me.id and chat_id == self._own_chat():
+                peer = me.id
         if kind == "dm" and not name and peer:
             name = self.user_name(peer)
         members = _int(info.get("memberCount")) or _int(info.get("userCount"))
         return Chat(id=chat_id, kind=kind, name=name, peer_id=peer if kind == "dm" else "", topic=topic and kind == "group",
                     members=members if kind == "group" else 0)
+
+    def _own_chat(self) -> str:
+        """The account's chat with itself, "" when unknown: Feishu's answer to opening a direct chat with oneself (it
+        opens nothing new, and sends nothing). Asked once per account, and only for a direct chat with no name and
+        nobody else known in it; a failure is asked again an hour later."""
+        client, me = self._session()
+        if client is None or me is None or not me.id:
+            return ""
+        with self._lock:
+            hit = self._own
+        if hit is not None and hit[0] == me.id and (hit[1] or hit[2] > time.monotonic()):
+            return hit[1]
+        try:
+            chat_id = _id(client.create_chat(me.id))
+        except Exception as e:
+            log.info("the chat with yourself is not known: %s", type(e).__name__)
+            chat_id = ""
+        with self._lock:
+            self._own = (me.id, chat_id, time.monotonic() + 3600.0)
+        return chat_id
 
     def recent_chats(self, limit: int) -> List[Chat]:
         client, _ = self._signed_in()

@@ -838,12 +838,25 @@ class AgentRunner:
                     already = False
         else:
             already = before not in ACTIVE
+        background = False
+        if cur.get("session_id") and not failed and before != "stopped":
+            # the hub stops a turn and the tasks it handed out, not the session's own background commands or
+            # subagents, which may wake it again later: say so (replies here are refused from now on all the same)
+            try:
+                srow = self.hub.session_row(cur["machine_id"], cur["session_id"]) or {}
+                background = bool(srow.get("background_working") or srow.get("background_waiting"))
+            except HubError:
+                pass
         if failed:
             text = ("已停止回复：%s" if before in ACTIVE else "没能停止：%s") % failed
+        elif already and background:
+            text = "这一轮已经结束了，但它在 Persona 里还有后台任务在跑，这里停不掉；它之后不会再回复到这里"
         elif already:
             text = "已经结束了"
         else:
             text = "已停止" + ("：" + "、".join(tasks) if tasks else "")
+            if background:
+                text += "。它在 Persona 里还有后台任务在跑，这里停不掉；它之后不会再回复到这里"
         self._post_once(cur, "agent-stop:%s:%s" % (row["chat_id"], row["id"]), text, reply_to=row["id"],
                         root=row.get("root_id") or "")
 

@@ -452,6 +452,27 @@ class StopTest(unittest.TestCase):
         wait_until(lambda: len(replies(h)) == 2, what="the second stop")
         self.assertEqual(replies(h)[1]["text"], "已经结束了\n\n" + SUFFIX)
 
+    def test_stop_says_when_background_work_goes_on(self):
+        h = self.h
+        with h.http.lock:
+            h.http.sessions[self.sid].update(working=False, background=True)  # the turn is over, a command waits
+        ask(h, "/stop", root_id=self.m.id)
+        wait_until(lambda: replies(h), what="the answer")
+        text = replies(h)[0]["text"]
+        self.assertIn("后台任务在跑", text)
+        self.assertIn("不会再回复到这里", text)
+        self.assertEqual(h.app.store.run_get(self.run["id"])["state"], "stopped")
+        with self.assertRaises(HubSideError):
+            h.tool("agent_reply", request=self.run["id"], text="后台任务醒了")
+
+    def test_stop_while_working_with_background_work(self):
+        h = self.h
+        with h.http.lock:
+            h.http.sessions[self.sid]["background"] = True
+        ask(h, "/stop", root_id=self.m.id)
+        wait_until(lambda: replies(h), what="the answer")
+        self.assertTrue(replies(h)[0]["text"].startswith("已停止。它在 Persona 里还有后台任务在跑"))
+
     def test_a_bare_stop_in_a_private_chat_without_requests_says_nothing(self):
         h = self.h
         ask(h, "/stop", chat="chat_example_dm_a")
@@ -644,6 +665,7 @@ class NetworkTest(unittest.TestCase):
         self.assertTrue(h.http.session_rows())
         h.http.finish(sid)
         wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "done", what="done")
+        wait_until(lambda: replies(h), what="the answer posted")
         time.sleep(0.2)
         self.assertEqual([x["text"] for x in replies(h)], ["短回答\n\n" + SUFFIX])
         asked = len(h.http.session_rows())

@@ -109,7 +109,8 @@ class ActionTest(unittest.TestCase):
         d = self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": text, "reply_to": team["id"]})
         self.assertEqual(d["action"]["name"], CID + "_send")
         self.assertIn("示例项目群", d["action"]["visible"])
-        self.assertIn("以你的身份发到飞书群「示例项目群」", d["summary"])
+        self.assertIn("以你的身份发到飞书群「示例项目群」（", d["summary"])
+        self.assertIn("会话 id chat_example_team", d["summary"].split("\n")[0])
         self.assertIn("回复 示例同事乙", d["summary"])
         self.assertTrue(d["summary"].endswith(text))
         dm = self.h.c("actions.describe", name=CID + "_send_dm", args={"user": "user_example_a", "text": "你好"})
@@ -117,6 +118,22 @@ class ActionTest(unittest.TestCase):
         self.assertIn("你好", dm["summary"])
         self.assertEqual(dm["action"]["visible"], "示例同事甲")
         self.assertEqual(self.h.sent(), [], "describe never sends")
+
+    def test_describe_names_a_direct_chat_and_keeps_its_id(self):
+        from openmate_core.backend import Chat
+
+        store, me = self.h.app.store, self.h.app.account
+        store.upsert_chat(Chat(id="chat_self", kind="dm", name="示例用户", peer_id=me.id))
+        store.upsert_chat(Chat(id="chat_unnamed", kind="dm"))
+        store.upsert_chat(Chat(id="chat_named", kind="dm", name="示例同事丙", peer_id="user_example_c"))
+        cases = (("chat_self", "飞书里你和自己的私聊「示例用户」（会话 id chat_self）", "只有你自己"),
+                 ("chat_unnamed", "飞书私聊（对方名字未知，会话 id chat_unnamed）", "这个私聊里的对方（名字未知）"),
+                 ("chat_named", "飞书私聊「示例同事丙」（会话 id chat_named）", "示例同事丙"))
+        for chat, target, visible in cases:
+            d = self.h.c("actions.describe", name=CID + "_send", args={"chat": chat, "text": "你好"})
+            self.assertEqual(d["summary"].split("\n")[0], "以你的身份发到" + target, chat)
+            self.assertEqual(d["action"]["visible"], visible, chat)
+        self.assertEqual(self.h.sent(), [])
 
     def test_do_needs_a_request_id_and_runs_once(self):
         args = {"chat": "chat_example_team", "text": "我来更新接口文档"}

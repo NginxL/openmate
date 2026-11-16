@@ -322,7 +322,10 @@ class FakeHubHTTP:
                     return 200, {"sessions": [], "total": 0, "has_more": False}
                 status = "offline" if s.get("offline") else "working" if s["working"] else "done"
                 state = {"offline": "offline", "working": "working"}.get(status, "unread")
-                return 200, {"sessions": [{"session_id": sid, "machine_id": mid, "status": status, "state": state}],
+                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state}
+                if s.get("background"):
+                    row.update(background_working=True, state="working")
+                return 200, {"sessions": [row],
                              "total": 1, "has_more": False}
             if len(parts) >= 6 and parts[:3] == ["api", "v1", "sessions"]:
                 mid, sid = parts[3], parts[4]
