@@ -15,7 +15,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openmate_core.hub import HubError
-from openmate_core.ui import ChatsToday, Page, day_start, empty, row, stat
+from openmate_core.ui import ChatsToday, Page, day_start, empty, row, stat, tile
 
 from .agenda import Agenda, CalendarError, Event
 
@@ -153,46 +153,74 @@ class TodayPage(Page):
         except Exception:
             log.exception("the chats that need the user could not be read")
             chat_needs = []
+        try:
+            counts = self.chats.counts(chat_needs)
+        except Exception:
+            counts = {"mentions": sum(1 for t in chat_needs if t["kind"] == "mention"),
+                      "dms": sum(1 for t in chat_needs if t["kind"] == "dm"), "messages": 0, "chats": 0}
         today, pending, cal_missing = self._calendar(now)
         current = [e for e in today if not e.all_day and e.start <= now]
         upcoming = [e for e in today if not e.all_day and e.start > now]
         inbox_needs = [i for i in p["inbox"] if str(i.get("tier") or "") in NEEDS_TIERS]
-        due_today = []
         end_of_day = _dt.datetime.fromtimestamp(day_start(tz, now.timestamp()), tz) + _dt.timedelta(days=1)
-        for t in p["todos"]:
-            d, _ = todo_due(t, tz)
-            if d is not None and d < end_of_day:
-                due_today.append(t)
+        due_today = [t for t in p["todos"] if (todo_due(t, tz)[0] or end_of_day) < end_of_day]
         needs_total = len(p["waiting"]) + len(inbox_needs) + len(chat_needs)
-        stats = [
-            stat("需要我", needs_total, "Agent %d · 收件箱 %d · 飞书 %d" % (len(p["waiting"]), len(inbox_needs), len(chat_needs)),
-                 "caution" if needs_total else ""),
-            stat("日程", "%d 个" % len(today) if not cal_missing else "—",
-                 ("会议中" if current else ("下一个 " + upcoming[0].start.strftime("%H:%M") if upcoming else "今天没有了"))
-                 if not cal_missing else "读不到"),
-            stat("待办", len(p["todos"]), "今天到期 %d" % len(due_today) if due_today else "", "caution" if due_today else ""),
-            stat("Agent", "%d 在跑" % len(p["working"]), "等你 %d" % len(p["waiting"]) if p["waiting"] else "",
-                 "caution" if p["waiting"] else ""),
+
+        if cal_missing:
+            cal_value, cal_line = "—", "读不到"
+        else:
+            cal_value = "%d 个" % len(today)
+            if current:
+                cal_line = "会议中，%s 结束" % max((e.end or e.start) for e in current).strftime("%H:%M")
+            elif upcoming:
+                cal_line = "下一个 %s · %s" % (upcoming[0].start.strftime("%H:%M"), upcoming[0].title)
+            else:
+                cal_line = "今天没有了"
+        blocks = [
+            # (title, value, line, icon, color, badge, key)
+            ("需要我", str(needs_total), "飞书 %d · 收件箱 %d · Agent %d" % (len(chat_needs), len(inbox_needs), len(p["waiting"])),
+             "bell", "red" if needs_total else "gray", None, "b:needs"),
+            ("日程", cal_value, cal_line, "calendar", "blue",
+             {"text": "待回复 %d" % len(pending), "tone": "caution"} if pending else None, "b:calendar"),
+            ("飞书", "@我 %d · 私聊 %d" % (counts["mentions"], counts["dms"]),
+             "今天收到 %d 条 · %d 个会话" % (counts["messages"], counts["chats"]), "chat", "indigo", None, "b:feishu"),
+            ("Agent", "%d 在跑" % len(p["working"]), "等你 %d" % len(p["waiting"]) if p["waiting"] else "没有在等你的",
+             "robot", "teal", {"text": "等你 %d" % len(p["waiting"]), "tone": "danger"} if p["waiting"] else None, "b:agents"),
+            ("待办", "%d 个" % len(p["todos"]), "今天到期 %d" % len(due_today) if due_today else "今天没有到期的",
+             "check", "green", {"text": "到期 %d" % len(due_today), "tone": "caution"} if due_today else None, "b:todos"),
         ]
-        head = {"type": "stat_grid", "stats": stats} if version >= 2 else {
-            "type": "text", "text": " · ".join("%s %s" % (s["label"], s["value"]) for s in stats)}
+        if self.card:
+            blocks = blocks[:4]  # a card's grid holds four tiles
+        if version >= 6:
+            head = {"type": "grid", "max_columns": 4 if self.card else 5, "key": "blocks",
+                    "tiles": [tile(t, v, line, icon, color, key, badge) for t, v, line, icon, color, badge, key in blocks]}
+        elif version >= 2:
+            head = {"type": "stat_grid", "stats": [stat(t, v, line, "caution" if badge else "") for t, v, line, _, _, badge, _ in blocks[:6]]}
+        else:
+            head = {"type": "text", "text": " · ".join("%s %s" % (t, v) for t, v, *_ in blocks)}
+
+        icons = version >= 6
         needs_rows = []
         for s in p["waiting"]:
             needs_rows.append(row(agent_title(s), agent_detail(s) or "在等你回答", "", key="wait:" + str(s.get("session_id")),
-                                  badge={"text": "Agent 等你", "tone": "danger"}))
+                                  badge={"text": "Agent 等你", "tone": "danger"}, icon="robot" if icons else "",
+                                  icon_color="red" if icons else ""))
         for i in inbox_needs:
             needs_rows.append(row(str(i.get("title") or "收件箱"), str(i.get("summary") or i.get("preview") or ""), "",
-                                  key="inbox:" + str(i.get("id")), badge={"text": "收件箱", "tone": "caution"}))
+                                  key="inbox:" + str(i.get("id")), badge={"text": "收件箱", "tone": "caution"},
+                                  icon="mail" if icons else "", icon_color="amber" if icons else ""))
         for t in chat_needs:
-            label = "@我" if t["kind"] == "mention" else "私聊"
+            mention = t["kind"] == "mention"
             needs_rows.append(row(t["title"], "%s：%s" % (t["sender"], t["preview"]), "", key="chat:" + t["thread"],
-                                  badge={"text": label, "tone": "caution" if t["kind"] == "mention" else "neutral"}))
+                                  badge={"text": "@我" if mention else "私聊", "tone": "caution" if mention else "neutral"},
+                                  icon="chat" if icons else "", icon_color=("orange" if mention else "indigo") if icons else ""))
         if self.card:
-            sections = [{"items": [head]}]
-            sections.append({"items": needs_rows[:3] or [empty("没有要你处理的事", "", version)]})
-            return {"sections": sections, "refresh_after": REFRESH}
+            return {"sections": [{"items": [head]}, {"items": needs_rows[:3] or [empty("没有要你处理的事", "", version)]}],
+                    "refresh_after": REFRESH}
+
         sections: List[Dict[str, Any]] = [{"items": [head]}]
-        need_sec: Dict[str, Any] = {"title": "需要我", "items": needs_rows[:NEEDS_MOST] or [empty("没有要你处理的事", "", version)]}
+        need_sec: Dict[str, Any] = {"title": "需要我 · %d" % needs_total if needs_total else "需要我",
+                                    "items": needs_rows[:NEEDS_MOST] or [empty("没有要你处理的事", "", version)]}
         if len(needs_rows) > NEEDS_MOST:
             need_sec["footer"] = "还有 %d 件，在“飞书”页和收件箱里看" % (len(needs_rows) - NEEDS_MOST)
         sections.append(need_sec)
@@ -200,20 +228,28 @@ class TodayPage(Page):
             sections.append({"title": "日程", "items": [empty("日程读不到", cal_missing, version)]})
         else:
             cal_rows = [row(e.title, e.detail(), e.span(False), "open:" + e.id if e.id else "", key="ev:" + e.id,
-                            badge={"text": "进行中", "tone": "positive"} if e in current else e.badge())
+                            badge={"text": "进行中", "tone": "positive"} if e in current else e.badge(),
+                            icon="clock" if icons else "", icon_color=("green" if e in current else "blue") if icons else "")
                         for e in today[:5]]
-            cal_sec: Dict[str, Any] = {"title": "日程", "items": cal_rows or [empty("今天没有日程了", "", version)]}
+            cal_sec: Dict[str, Any] = {"title": "日程 · %s" % cal_line, "items": cal_rows or [empty("今天没有日程了", "", version)]}
+            footer = []
+            if len(today) > 5:
+                footer.append("今天还有 %d 个" % (len(today) - 5))
             if pending:
-                cal_sec["footer"] = "还有 %d 个邀请没回复，在“日程”页里看" % len(pending)
+                footer.append("%d 个邀请没回复，在“日程”页里看" % len(pending))
+            if footer:
+                cal_sec["footer"] = "；".join(footer)
             sections.append(cal_sec)
         work = []
         for t in p["todos"][:WORK_MOST]:
             _, due = todo_due(t, tz)
             sub = " · ".join(x for x in (("到期 " + due) if due else "", str(t.get("stage") or "")) if x)
             work.append(row(str(t.get("title") or "待办"), sub, "", key="todo:" + str(t.get("id")),
-                            badge={"text": "等你拍板", "tone": "caution"} if t.get("ask") else None))
+                            badge={"text": "等你拍板", "tone": "caution"} if t.get("ask") else None,
+                            icon="check" if icons else "", icon_color="green" if icons else ""))
         for s in p["working"][:WORK_MOST]:
-            work.append(row(agent_title(s), agent_detail(s), str(s.get("agent") or ""), key="work:" + str(s.get("session_id"))))
+            work.append(row(agent_title(s), agent_detail(s), str(s.get("agent") or ""), key="work:" + str(s.get("session_id")),
+                            icon="robot" if icons else "", icon_color="teal" if icons else ""))
         sections.append({"title": "在推进的事", "items": work or [empty("没有进行中的待办和 Agent", "", version)]})
         if p["missing"]:
             sections.append({"items": [{"type": "text", "style": "caption",

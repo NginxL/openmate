@@ -48,8 +48,13 @@ def stat(label: str, value, detail: str = "", tone: str = "") -> dict:
     return out
 
 
-def row(title: str, subtitle: str = "", value: str = "", action: str = "", key: str = "", badge: Optional[dict] = None) -> dict:
+def row(title: str, subtitle: str = "", value: str = "", action: str = "", key: str = "", badge: Optional[dict] = None,
+        icon: str = "", icon_color: str = "") -> dict:
     out: Dict[str, Any] = {"type": "row", "title": one_line(title or "（无标题）", 120)}
+    if icon:
+        out["icon"] = icon
+        if icon_color:
+            out["icon_color"] = icon_color  # UI version 6
     if subtitle:
         out["subtitle"] = one_line(subtitle, 200)
     if value:
@@ -60,6 +65,27 @@ def row(title: str, subtitle: str = "", value: str = "", action: str = "", key: 
         out["action"] = {"id": action}
     if key:
         out["key"] = key
+    return out
+
+
+def tile(title: str, value: str = "", subtitle: str = "", icon: str = "", color: str = "", key: str = "",
+         badge: Optional[dict] = None, action: str = "") -> dict:
+    """A tile of a grid (UI version 6): an icon in its color, a title, a line, a value."""
+    out: Dict[str, Any] = {"title": one_line(title, 40)}
+    if value:
+        out["value"] = one_line(value, 40)
+    if subtitle:
+        out["subtitle"] = one_line(subtitle, 80)
+    if icon:
+        out["icon"] = icon
+    if color:
+        out["color"] = color
+    if key:
+        out["key"] = key
+    if badge:
+        out["badge"] = badge
+    if action:
+        out["action"] = {"id": action}
     return out
 
 
@@ -282,6 +308,7 @@ class UI:
 
 
 TONES = ("neutral", "positive", "caution", "danger")
+COLORS = ("red", "orange", "amber", "yellow", "green", "teal", "blue", "indigo", "purple", "pink", "gray")
 
 
 def check_view(view: dict, compact: bool = False) -> List[str]:
@@ -318,6 +345,23 @@ def check_view(view: dict, compact: bool = False) -> List[str]:
                 problems.append(where + ": https links only")
             if compact and item.get("type") == "field":
                 problems.append(where + ": no fields on a card")
+            if item.get("type") == "grid":
+                tiles = item.get("tiles") or []
+                if not 1 <= len(tiles) <= (4 if compact else 60):
+                    problems.append(where + ": 1–%d tiles" % (4 if compact else 60))
+                count += max(0, len(tiles) - 1)  # each tile counts as a component
+                for n, t in enumerate(tiles):
+                    tw = "%s tile %d" % (where, n)
+                    if not 1 <= len(t.get("title") or "") <= 40 or len(t.get("subtitle") or "") > 80 or len(t.get("value") or "") > 40:
+                        problems.append(tw + ": title 1–40, subtitle ≤80, value ≤40")
+                    if t.get("color") is not None and t["color"] not in COLORS:
+                        problems.append("%s: color %r" % (tw, t["color"]))
+                    if t.get("key") is not None:
+                        if t["key"] in keys:
+                            problems.append("%s: key %r twice" % (tw, t["key"]))
+                        keys.add(t["key"])
+            if item.get("icon_color") is not None and item["icon_color"] not in COLORS:
+                problems.append("%s: icon_color %r" % (where, item["icon_color"]))
 
     def walk(v, path):
         if isinstance(v, dict):
