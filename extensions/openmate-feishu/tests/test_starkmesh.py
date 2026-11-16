@@ -165,6 +165,28 @@ class StarkMeshTest(unittest.TestCase):
         self.assertEqual(heads["今日请求"]["value"], "—")
         self.assertEqual(view["sections"][1]["items"][0]["tiles"][0]["value"], "1.30 号")
 
+    def test_rings_from_ui_version_9(self):
+        page, _ = make()
+        v9 = page.render({"ui_version": 9})
+        items(v9)
+        quota = v9["sections"][1]
+        tiles = quota["items"][0]["tiles"]
+        self.assertEqual([(t["title"], t["value"], t["gauge"]) for t in tiles],
+                         [("5 小时", "1.30", {"ratio": 0.4333, "unit": "号", "color": "amber"}),
+                          ("本周", "1.40", {"ratio": 0.4667, "unit": "号", "color": "amber"}),
+                          ("Fable 本周", "1.50", {"ratio": 0.75, "unit": "号", "color": "green"})])
+        self.assertTrue(all("icon" not in t and "spark" not in t for t in tiles))
+        self.assertEqual([it["type"] for it in quota["items"]], ["grid"], "the rings say it: no bars")
+        self.assertEqual(quota["footer"], "最近一次重置在 1 小时 49 分后")
+        v8 = page.render({"ui_version": 8})
+        self.assertFalse(any("gauge" in t for t in v8["sections"][1]["items"][0]["tiles"]), "before 9: tiles and bars")
+        self.assertIn("progress", [it["type"] for it in v8["sections"][1]["items"]])
+        card = page.card(9, True, True)
+        self.assertTrue(all("gauge" in t for t in card["items"][1]["tiles"]), "the 今天 block's rings too")
+        from openmate_core.ui import check_view
+        bad = {"sections": [{"items": [{"type": "grid", "tiles": [{"title": "x", "gauge": {"ratio": 1.5}, "spark": {"points": [1]}}]}]}]}
+        self.assertTrue(check_view(bad))
+
     def test_versions(self):
         page, _ = make()
         v8 = page.render({"ui_version": 8})

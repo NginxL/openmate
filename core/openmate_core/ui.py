@@ -598,6 +598,12 @@ def check_view(view: dict, compact: bool = False) -> List[str]:
                         problems.append(tw + ": title 1–40, subtitle ≤80, value ≤40")
                     if t.get("color") is not None and t["color"] not in COLORS:
                         problems.append("%s: color %r" % (tw, t["color"]))
+                    g = t.get("gauge")  # UI version 9
+                    if g is not None:
+                        ratio = g.get("ratio") if isinstance(g, dict) else None
+                        if (not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1 or len(g.get("unit") or "") > 8
+                                or (g.get("color") is not None and g["color"] not in COLORS) or t.get("image") or t.get("spark")):
+                            problems.append(tw + ": a gauge needs a ratio 0–1, a unit of at most 8, a known color, no image or spark")
                     if t.get("key") is not None:
                         if t["key"] in keys:
                             problems.append("%s: key %r twice" % (tw, t["key"]))

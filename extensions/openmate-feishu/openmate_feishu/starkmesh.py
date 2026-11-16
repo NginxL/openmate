@@ -251,6 +251,8 @@ class StarkMeshPage(Page):
             return None, empty("StarkMesh 读不到", e.message, version)
 
     def quota_tiles(self, s: Snapshot, version: int) -> List[dict]:
+        """The quota left per window: from UI version 9 a ring (Tile.gauge) filled to what is left, the 号 in its centre;
+        before, a tile saying it."""
         out = []
         for key, label in WINDOWS:
             w = s.window(key)
@@ -258,7 +260,12 @@ class StarkMeshPage(Page):
                 continue
             color, _ = tone_of(w["ratio"])
             reset = "%s后重置" % span(w["reset"]) if w["reset"] else "重置时间未知"
-            out.append(tile(label, "%.2f 号" % w["left"], reset, "gauge", color, key="q:" + key))
+            if version >= 9:
+                t = tile(label, "%.2f" % w["left"], reset, "", color, key="q:" + key)
+                t["gauge"] = {"ratio": round(min(1.0, max(0.0, w["ratio"])), 4), "unit": "号", "color": color}
+            else:
+                t = tile(label, "%.2f 号" % w["left"], reset, "gauge", color, key="q:" + key)
+            out.append(t)
         return out
 
     def quota_bars(self, s: Snapshot) -> List[dict]:
@@ -317,7 +324,9 @@ class StarkMeshPage(Page):
             tiles = self.quota_tiles(s, version)
             if tiles:
                 quota["items"].append({"type": "grid", "max_columns": 3, "key": "quota", "tiles": tiles})
-        quota["items"] += self.quota_bars(s) or [empty("还没有额度快照", "账号用过之后 StarkMesh 才有 5 小时和每周的用量", version)]
+        bars = self.quota_bars(s)
+        if version < 9 or not bars:  # the rings say it from UI version 9
+            quota["items"] += bars or [empty("还没有额度快照", "账号用过之后 StarkMesh 才有 5 小时和每周的用量", version)]
         resets = [w["reset"] for w in (s.window(k) for k, _ in WINDOWS) if w and w["reset"]]
         if resets:
             quota["footer"] = "最近一次重置在 %s后" % span(min(resets))
