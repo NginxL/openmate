@@ -48,6 +48,7 @@ class FixtureWorld:
         self.reactions: List[Tuple[str, str, str]] = []  # (chat, message, reaction) put by react
         self.doc_replies: List[Tuple[str, str, str]] = []  # (doc url, comment id, text) by reply_doc_comment
         self.doc_reply_fail = False
+        self.doc_texts: Dict[str, str] = {}  # doc url → its text, for doc_text
         self.doc_listener: Optional[Callable] = None
         self.react_fail = False
         self.kinds_calls: List[List[str]] = []
@@ -271,6 +272,10 @@ class FixtureBackend(Backend):
         if c is None:
             raise BackendError("没有这个会话", "not_found")
         return c
+
+    def doc_text(self, doc_url: str, most: int) -> str:
+        with self.world.lock:
+            return self.world.doc_texts.get(doc_url, "")[:most]
 
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
         w = self.world

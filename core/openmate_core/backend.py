@@ -242,6 +242,11 @@ class Backend(abc.ABC):
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         """A person's display name ("" when unknown); chat_id when the name is per chat (an alias in a group)."""
 
+    def doc_text(self, doc_url: str, most: int) -> str:
+        """A document's text (read as the user), at most `most` characters; "" when it can't be read. For a guest
+        conversation answering its comment, which can't read anything itself."""
+        return ""
+
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
         """Reply to a document's comment as the user; the reply's id. BackendError when it can't (no such comment, a
         solved one, no rights)."""

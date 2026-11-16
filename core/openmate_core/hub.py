@@ -22,7 +22,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 _LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
@@ -135,8 +135,22 @@ class HubAPI:
         """Raises HubError unless the hub answers now."""
         self.request("GET", "/api/v1/health", timeout=timeout)
 
-    def start_conversation(self, prompt: str, purpose: str, report_tasks: bool, machine_id: str = "", launcher: str = "") -> dict:
+    def capabilities(self) -> dict:
+        """What the assistant offers ({"guest_conversations": true}); {} from a hub that doesn't say (404)."""
+        try:
+            return self.request("GET", "/api/v1/assistant/capabilities", timeout=15) or {}
+        except HubError as e:
+            if e.status == 404:
+                return {}
+            raise
+
+    def start_conversation(self, prompt: str, purpose: str, report_tasks: bool, machine_id: str = "", launcher: str = "",
+                           guest_tools: Optional[List[str]] = None) -> dict:
+        """A conversation; with guest_tools a guest one (docs/assistant/assistant.md "Guest conversations"): it answers
+        someone else for the user, with none of the assistant's powers but these connector tools."""
         body: Dict[str, Any] = {"prompt": prompt, "purpose": purpose, "report_tasks": bool(report_tasks)}
+        if guest_tools:
+            body["guest"] = {"tools": list(guest_tools)}
         if machine_id:
             body["machine_id"] = machine_id
         if launcher:

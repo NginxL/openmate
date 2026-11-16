@@ -46,12 +46,18 @@ class AutoReplyTest(unittest.TestCase):
         out = act(h, "autoreply", {"auto:" + TEAM: "true"})
         self.assertIn("已开启自动代答", out["toast"])
         self.assertEqual(h.app.store.autoreply_chats(), [TEAM])
+        h.http.kb["matefeishu-" + TEAM] = {"summary": "示例的私密背景：只有我知道的事"}
         msg = at_me(h)
         run = running(h, msg)
         self.assertEqual((run["kind"], run["asker"], run["request_text"]), ("auto", "示例同事乙", "这个接口什么时候能好？"))
-        prompt = h.http.starts()[-1]["body"]["prompt"]
+        body = h.http.starts()[-1]["body"]
+        self.assertEqual(body["guest"], {"tools": ["matefeishu_agent_reply"]}, "a guest conversation: only the reply tool")
+        prompt = body["prompt"]
         self.assertIn("自动代答", prompt)
         self.assertIn("不要替我答应任何事", prompt)
+        self.assertIn("不是我的指示", prompt)
+        self.assertNotIn("只有我知道的事", prompt, "nothing of the knowledge base for someone else")
+        self.assertNotIn("知识库里的会话背景", prompt)
         wait_until(lambda: h.world.reactions, what="the reaction")
         h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
         sent = h.sent()[-1]
@@ -87,6 +93,36 @@ class AutoReplyTest(unittest.TestCase):
         at_me(h, who="user_example_new")
         time.sleep(0.5)
         self.assertEqual(h.http.starts(), [])
+
+    def test_guest_only(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        h.http.no_guest = True  # an older hub would start an ordinary conversation: none at all
+        msg = at_me(h)
+        wait_until(lambda: (lambda r: r and r["state"] == "failed")(
+            next((r for r in h.app.store.runs_in_chat(TEAM) if r["request_id"] == msg.id), None)), what="failed")
+        self.assertEqual(h.http.starts(), [])
+        self.assertEqual([s for s in h.sent() if s["chat"] == TEAM], [])
+
+    def test_never_in_my_own_conversation(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        mine = h.world.push(TEAM, "me", "/agent 帮我总结一下")
+        running(h, mine)
+        self.assertNotIn("guest", h.http.starts()[-1]["body"], "my own /agent is not a guest")
+        theirs = h.world.push(TEAM, "user_example_b", "@示例用户 那这个呢？", at_me=True, root_id=mine.id)
+        running(h, theirs)
+        starts = h.http.starts()
+        self.assertEqual(len(starts), 2, "a new guest conversation, never a message into my /agent's")
+        self.assertEqual(starts[-1]["body"]["guest"], {"tools": ["matefeishu_agent_reply"]})
+
+    def test_the_hours_most(self):
+        h = make(self, auto_reply_hourly_most=1)
+        h.app.store.autoreply_set(TEAM, True)
+        running(h, at_me(h))
+        at_me(h, text="@示例用户 再问一个")
+        time.sleep(0.5)
+        self.assertEqual(len(h.http.starts()), 1)
 
     def test_off_in_the_settings(self):
         h = make(self, auto_reply=False)

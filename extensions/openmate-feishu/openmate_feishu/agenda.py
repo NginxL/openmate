@@ -73,6 +73,33 @@ class LarkCLI:
         self._bin = path
         return path
 
+    def fetch_doc(self, doc_url: str, most: int) -> str:
+        """A document's text as Markdown (a read as the user), at most `most` characters; "" when it can't be read."""
+        b = self.bin()
+        if not b or not doc_url:
+            return ""
+        args = [b] + (["--profile", self.profile] if self.profile else []) + [
+            "docs", "+fetch", "--as", "user", "--doc", doc_url, "--doc-format", "markdown", "--format", "json"]
+        env = dict(os.environ)
+        env["PATH"] = os.path.dirname(b) + os.pathsep + env.get("PATH", "")
+        try:
+            p = self._run(args, capture_output=True, text=True, timeout=TIMEOUT, env=env, stdin=subprocess.DEVNULL)
+            d = json.loads(p.stdout or "{}")
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return ""
+        if not isinstance(d, dict) or not d.get("ok"):
+            return ""
+        data = d.get("data")
+        text = ""
+        if isinstance(data, str):
+            text = data
+        elif isinstance(data, dict):
+            for k in ("markdown", "content", "text", "body"):
+                if isinstance(data.get(k), str) and data[k].strip():
+                    text = data[k]
+                    break
+        return text.strip()[:most]
+
     def add_reply(self, doc_url: str, comment_id: str, text: str) -> str:
         """Reply to a document's comment as the user; the reply's id ("" when lark-cli doesn't say)."""
         b = self.bin()

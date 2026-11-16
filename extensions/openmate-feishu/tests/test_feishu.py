@@ -69,7 +69,8 @@ class ManifestTest(unittest.TestCase):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
                                        "agent_machine", "agent_launcher", "agent_reply_header", "agent_ack_reaction",
-                                       "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_header",
+                                       "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
+                                       "auto_reply_header",
                                        "agent_reply_suffix",
                                        "history_chats", "triage_rules", "lark_cli", "lark_cli_profile", "starkmesh_url"])
         self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])

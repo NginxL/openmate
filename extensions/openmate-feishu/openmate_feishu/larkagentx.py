@@ -750,6 +750,9 @@ class LarkXBackend(Backend):
                 except Exception as e:
                     log.warning("a document mention was not taken (%s)", type(e).__name__)
 
+    def doc_text(self, doc_url: str, most: int) -> str:
+        return self.cli.fetch_doc(doc_url, most) if self.cli is not None else ""
+
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
         if self.cli is None:
             raise BackendError("没有 lark-cli，回复不了文档评论", "unsupported")

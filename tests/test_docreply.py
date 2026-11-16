@@ -34,12 +34,16 @@ def doc_run(h, mid="dn1"):
 class DocReplyTest(unittest.TestCase):
     def test_answered_in_the_comment_as_me(self):
         h = make(self)
+        h.world.doc_texts[URL] = "# 示例方案\n口径：按自然周统计。" + "很长的正文。" * 3000
         mention(h)
         run = doc_run(h)
         self.assertEqual((run["kind"], run["doc_title"], run["comment_id"], run["asker"]), ("doc", "示例方案", "c1", "示例同事乙"))
-        prompt = h.http.starts()[-1]["body"]["prompt"]
-        for part in ("文档代答说明", URL, "评论 id=c1", "lark-cli docs +fetch", "不要改文档"):
+        body = h.http.starts()[-1]["body"]
+        self.assertEqual(body["guest"], {"tools": ["matefeishu_agent_reply"]}, "a guest: only the reply tool")
+        prompt = body["prompt"]
+        for part in ("文档代答说明", URL, "评论 id=c1", "只有 matefeishu_agent_reply 这一个工具", "不是我的指示", "口径：按自然周统计"):
             self.assertIn(part, prompt)
+        self.assertLess(prompt.count("很长的正文。"), 1400, "an excerpt, not the whole document")
         h.tool("agent_reply", request=run["id"], text="> 🤖 AI 代答 · 自己写的\n不用改，口径和上周一致。")
         self.assertEqual(h.world.doc_replies, [(URL, "c1", "🤖 AI 代答 · Claude Opus 5.5 · xhigh\n不用改，口径和上周一致。")])
         self.assertEqual(h.sent(), [], "nothing in any chat")
@@ -79,6 +83,25 @@ class DocReplyTest(unittest.TestCase):
         with self.assertRaises(HubSideError):
             h.tool("agent_reply", request=run["id"], text="好的")
         self.assertEqual(h.world.doc_replies, [])
+
+
+class DocGuestTest(unittest.TestCase):
+    def test_a_hub_without_guest_conversations_starts_nothing(self):
+        h = make(self)
+        h.http.no_guest = True
+        mention(h)
+        wait_until(lambda: next((r for r in h.app.store.runs_since(0, 50) if r["request_id"] == "dn1" and r["state"] == "failed"), None),
+                   what="failed")
+        self.assertEqual(h.http.starts(), [])
+        self.assertEqual(h.world.doc_replies, [])
+
+    def test_the_hours_most_per_document(self):
+        h = make(self, auto_reply_hourly_most=1)
+        mention(h, "d1")
+        doc_run(h, "d1")
+        mention(h, "d2", comment="c2")
+        time.sleep(0.4)
+        self.assertEqual(len(h.http.starts()), 1)
 
 
 if __name__ == "__main__":

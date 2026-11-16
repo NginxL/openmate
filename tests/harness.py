@@ -191,6 +191,7 @@ class FakeHubHTTP:
         self.requests: List[dict] = []
         self.sessions: Dict[str, dict] = {}
         self.model_late = 0  # the session list leaves the model out of this many answers
+        self.no_guest = False  # an older hub: no /api/v1/assistant/capabilities
         self.kb: Dict[str, dict] = {}
         self.full: Dict[str, str] = {}  # item id → full text
         self.stop_status: Dict[str, int] = {}  # session id → HTTP status for …/stop
@@ -292,6 +293,8 @@ class FakeHubHTTP:
                              "code": "manager_offline"}
             if method == "GET" and p == "/api/v1/health":
                 return 200, {"ok": True}
+            if method == "GET" and p == "/api/v1/assistant/capabilities":
+                return (404, {"error": "no route"}) if self.no_guest else (200, {"guest_conversations": True})
             if method == "POST" and p == "/api/v1/assistant/conversations":
                 if self.start_fail:
                     return self.start_fail, {"error": "refused"}

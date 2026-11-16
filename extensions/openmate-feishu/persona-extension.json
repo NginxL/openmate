@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -118,7 +118,7 @@
       "auto_reply": {
         "type": "boolean",
         "title": "自动代答",
-        "description": "在“飞书”页里开了自动代答的群，有人 @ 你时 AI 直接以你的身份回复，不用确认（要先打开 /agent）。私聊、机器人和 @所有人 不代答。",
+        "description": "在“飞书”页里开了自动代答的群，有人 @ 你时 AI 直接以你的身份回复，不用确认（要先打开 /agent）。私聊、机器人和 @所有人 不代答。代答用访客会话：AI 只能回复这一条，读不到你的知识库、文件和其他工具。",
         "default": true
       },
       "auto_reply_docs": {
@@ -134,6 +134,14 @@
         "default": 20,
         "minimum": 1,
         "maximum": 100
+      },
+      "auto_reply_hourly_most": {
+        "type": "integer",
+        "title": "每个群每小时最多代答",
+        "description": "一个群（或一篇文档）一小时内最多自动代答几次；同时最多 3 个代答在跑。",
+        "default": 6,
+        "minimum": 1,
+        "maximum": 30
       },
       "auto_reply_header": {
         "type": "string",
