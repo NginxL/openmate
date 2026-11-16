@@ -35,7 +35,7 @@ TOKEN = "pext_test_token"
 
 def fast(**kw) -> Timing:
     base = dict(debounce=0.15, backoff_min=0.05, backoff_max=0.2, stable_after=0.3, login_wait=3.0, agent_poll=0.05,
-                agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, secrets_retry=0.05,
+                agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, agent_settle=0.1, secrets_retry=0.05,
                 sent_retry=(0.05, 0.05, 0.05))
     base.update(kw)
     return Timing(**base)
@@ -257,6 +257,17 @@ class FakeHubHTTP:
 
     def end_turn(self, sid: str) -> None:
         self.add(sid, "system", "turn_duration", turn_duration={"duration_ms": 1000})
+        with self.lock:
+            self.sessions[sid]["working"] = False
+
+    def finish(self, sid: str) -> None:
+        """The turn ends without a turn_duration item (Claude Code does not always write one): only the status says."""
+        with self.lock:
+            self.sessions[sid]["working"] = False
+
+    def session_rows(self) -> List[dict]:
+        with self.lock:
+            return [r for r in self.requests if r["method"] == "GET" and r["path"] == "/api/v1/sessions"]
 
     def starts(self) -> List[dict]:
         with self.lock:
@@ -304,6 +315,15 @@ class FakeHubHTTP:
                 s["stopped"], s["working"] = True, False
                 tasks = s.get("tasks") or []
                 return 200, {"conversation": was, "tasks": tasks, "already": not was and not tasks}
+            if method == "GET" and p == "/api/v1/sessions":
+                sid, mid = query.get("session_id"), query.get("machine_id")
+                s = self.sessions.get(sid or "")
+                if s is None or s["machine"] != mid:
+                    return 200, {"sessions": [], "total": 0, "has_more": False}
+                status = "working" if s["working"] else "done"
+                return 200, {"sessions": [{"session_id": sid, "machine_id": mid, "status": status,
+                                           "state": "working" if s["working"] else "unread"}],
+                             "total": 1, "has_more": False}
             if len(parts) >= 6 and parts[:3] == ["api", "v1", "sessions"]:
                 mid, sid = parts[3], parts[4]
                 s = self.sessions.get(sid)

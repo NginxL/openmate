@@ -54,6 +54,7 @@ class Timing:
     agent_hub_wait: float = 300.0  # how long a /agent request waits for the hub to be reachable before it fails
     agent_hub_probe: float = 5.0  # meanwhile the hub is asked this often whether it answers
     agent_start_tries: int = 3  # starts that may have reached the hub (each with a new request id) before it fails
+    agent_settle: float = 8.0  # a session quiet this long after it answered: its status says whether the turn ended
     secrets_retry: float = 2.0
     sent_retry: Tuple[float, ...] = (5.0, 30.0, 120.0)  # waits before sent.record is tried again (the hub was busy)
     extra: Dict[str, float] = field(default_factory=dict)

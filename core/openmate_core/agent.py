@@ -6,7 +6,8 @@ A request is taken once, only from a live message of the user's own (not a syste
 thread or the last 40 messages, the quoted message, the knowledge base's view of the chat, up to two linked documents)
 and answers with <connector>_agent_reply, bound to this request by its id. A request in the thread of an earlier one
 goes on in that conversation. If the turn ends without a reply through the tool, the latest answer is posted once
-instead (never both). /stop, /停止 or /停 in the thread (or quoting the request) stops it. Runs are kept in the store,
+instead (never both). A turn ends at its turn_duration item; Claude Code does not always write one, so a session that
+answered and then stayed quiet for `agent_settle` has ended its turn too when its status says done or idle. /stop, /停止 or /停 in the thread (or quoting the request) stops it. Runs are kept in the store,
 so a restart goes on waiting for the running ones.
 
 The hub is reached over a network that drops now and then. A request waits for it (`agent_hub_wait`), and a start that
@@ -118,6 +119,7 @@ class AgentRunner:
         self._thread: Optional[threading.Thread] = None
         self._last_prune = 0.0
         self._posted: Dict[str, float] = {}  # hashes of what /agent posted lately: their echoes are never requests
+        self._asked: Dict[str, float] = {}  # run id → when its session's status was last asked
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -554,32 +556,39 @@ class AgentRunner:
                 after = max(after, max(int(it.get("seq") or 0) for it in page))
             if not page or not res.get("more_after"):
                 break
-        if not items:
-            return
         ended = interrupted = False
-        with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"])
-            if cur is None or cur["state"] != "running":
-                return
-            ours = bool(cur.get("ours_seen"))
-            last_text = cur.get("last_text")
-            for it in items:
-                if not ours:
-                    if (cur.get("client_msg_id") and it.get("client_msg_id") == cur["client_msg_id"]) or (
-                            it.get("role") == "user" and cur["id"] in (it.get("text") or "")):
-                        ours = True
-                    continue
-                kind, role = it.get("kind") or "", it.get("role") or ""
-                if role == "assistant" and kind == "text" and (it.get("text") or "").strip():
-                    last_text = {"id": it.get("id") or "", "text": it.get("text") or "", "full": int(it.get("full_size") or 0)}
-                elif kind == "turn_duration" or it.get("turn_duration"):
-                    ended = True
-                elif kind == "notice" and _interrupted(it.get("text") or ""):
-                    interrupted = True
-            cur["ours_seen"] = ours
-            cur["last_text"] = last_text
-            cur["last_seq"] = after
-            self.store.run_put(cur)
+        if items:
+            with self._lock(run["id"]):
+                cur = self.store.run_get(run["id"])
+                if cur is None or cur["state"] != "running":
+                    return
+                ours = bool(cur.get("ours_seen"))
+                last_text = cur.get("last_text")
+                answered = bool(cur.get("answered"))
+                for it in items:
+                    if not ours:
+                        if (cur.get("client_msg_id") and it.get("client_msg_id") == cur["client_msg_id"]) or (
+                                it.get("role") == "user" and cur["id"] in (it.get("text") or "")):
+                            ours = True
+                        continue
+                    kind, role = it.get("kind") or "", it.get("role") or ""
+                    if role == "assistant":
+                        answered = True
+                    if role == "assistant" and kind == "text" and (it.get("text") or "").strip():
+                        last_text = {"id": it.get("id") or "", "text": it.get("text") or "", "full": int(it.get("full_size") or 0)}
+                    elif kind == "turn_duration" or it.get("turn_duration"):
+                        ended = True
+                    elif kind == "notice" and _interrupted(it.get("text") or ""):
+                        interrupted = True
+                cur["ours_seen"] = ours
+                cur["last_text"] = last_text
+                cur["answered"] = answered
+                cur["quiet_since"] = time.time()
+                cur["last_seq"] = after
+                self.store.run_put(cur)
+                run = cur
+        if not ended and not interrupted and self._settled(run):
+            ended = True
         if interrupted:
             # stopped in Persona (the app's stop button): say so, and never post the half-finished answer
             with self._lock(run["id"]):
@@ -592,6 +601,28 @@ class AgentRunner:
                             root=cur["root_id"] or cur["request_id"])
         elif ended:
             self._turn_ended(run["id"])
+
+    def _settled(self, run: dict) -> bool:
+        """The turn ended without its turn_duration item: the session answered our request, has been quiet for
+        agent_settle (so the session list's status, which lags the transcript, has caught up) and is done or idle."""
+        if not run.get("ours_seen") or not run.get("answered"):
+            return False
+        settle = self.app.timing.agent_settle
+        now = time.time()
+        if now - float(run.get("quiet_since") or run["created"]) < settle:
+            return False
+        with self._mu:
+            if now - self._asked.get(run["id"], 0.0) < settle:
+                return False
+            self._asked[run["id"]] = now
+            for k in [k for k, at in self._asked.items() if now - at > 3600]:
+                del self._asked[k]
+        try:
+            row = self.hub.session_row(run["machine_id"], run["session_id"])
+        except HubError as e:
+            log.info("/agent session status: HTTP %s", e.status)
+            return False
+        return bool(row) and (row.get("status") in ("done", "idle") or row.get("state") in ("unread", "idle"))
 
     def _turn_ended(self, run_id: str) -> None:
         with self._lock(run_id):
@@ -747,6 +778,17 @@ class AgentRunner:
             runs = self.store.runs_in_thread(chat_id, root)
             if runs:
                 return runs[0]
+            return None
+        if parent or views.chat_kind(self.store.get_chat(chat_id)) != "dm":
+            return None
+        # a bare /stop in a private chat (no threads there, the answers quote the request): the chat's latest request
+        # still at work, else a recent one. In a group the answers are in the request's thread, and so is its /stop.
+        runs = self.store.runs_in_chat(chat_id)
+        for r in runs:
+            if r["state"] in ACTIVE:
+                return r
+        if runs and time.time() - runs[0]["created"] <= self.app.timing.agent_fresh:
+            return runs[0]
         return None
 
     def _on_stop(self, row: dict) -> None:

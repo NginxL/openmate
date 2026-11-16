@@ -4,7 +4,8 @@ asks for (docs/extensions/extensions.md "Hub API: scopes"):
 
     assistant.ask   POST /api/v1/assistant/conversations, POST …/conversations/{id}/stop
     agents.control  POST /api/v1/sessions/{mid}/{sid}/messages, …/interrupt
-    agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full
+    agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
+                    GET  /api/v1/sessions?machine_id=&session_id= (the session's status)
     kb.read         GET  /api/v1/kb/chats/{id}/context
     (none)          GET  /api/v1/health, the hub's one route without authentication: is the hub reachable now?
 
@@ -156,6 +157,15 @@ class HubAPI:
 
     def item_full(self, machine_id: str, session_id: str, item_id: str) -> dict:
         return self.request("GET", "/api/v1/sessions/%s/%s/items/%s/full" % (_seg(machine_id), _seg(session_id), _seg(item_id)))
+
+    def session_row(self, machine_id: str, session_id: str) -> Optional[dict]:
+        """The session's row in the session list (status, state, updated_at), None when the list has no such row."""
+        res = self.request("GET", "/api/v1/sessions", query={"machine_id": machine_id, "session_id": session_id,
+                                                             "summary": 1, "limit": 1}, timeout=15) or {}
+        for row in res.get("sessions") or []:
+            if isinstance(row, dict) and row.get("session_id") == session_id:
+                return row
+        return None
 
     def stop_conversation(self, session_id: str) -> dict:
         return self.request("POST", "/api/v1/assistant/conversations/%s/stop" % _seg(session_id), {})

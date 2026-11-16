@@ -438,6 +438,26 @@ class StopTest(unittest.TestCase):
         self.assertTrue(h.http.posts("/api/v1/sessions/mac-example/%s/interrupt" % self.sid))
         self.assertEqual(replies(h)[-1]["text"], "已停止\n\n" + SUFFIX)
 
+    def test_a_bare_stop_in_a_private_chat_stops_its_latest_request(self):
+        h = self.h
+        m = ask(h, "/agent 私聊里的长任务", chat="chat_example_dm_a")
+        run = running(h, m)
+        stop = ask(h, "/stop", chat="chat_example_dm_a")
+        wait_until(lambda: len(replies(h)) == 1, what="stopped")
+        s = replies(h)[0]
+        self.assertEqual((s["chat"], s["text"], s["reply_to"]), ("chat_example_dm_a", "已停止\n\n" + SUFFIX, stop.id))
+        self.assertEqual(h.app.store.run_get(run["id"])["state"], "stopped")
+        self.assertEqual(h.app.store.run_get(self.run["id"])["state"], "running", "the group's request goes on")
+        ask(h, "/停", chat="chat_example_dm_a")
+        wait_until(lambda: len(replies(h)) == 2, what="the second stop")
+        self.assertEqual(replies(h)[1]["text"], "已经结束了\n\n" + SUFFIX)
+
+    def test_a_bare_stop_in_a_private_chat_without_requests_says_nothing(self):
+        h = self.h
+        ask(h, "/stop", chat="chat_example_dm_a")
+        time.sleep(0.3)
+        self.assertEqual(replies(h), [])
+
     def test_only_my_stop_counts(self):
         h = self.h
         h.world.push("chat_example_team", "user_example_a", "/stop", root_id=self.m.id)
@@ -612,6 +632,46 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(h2.http.starts(), [])
         self.assertEqual(run_of(h2, m)["state"], "failed")
 
+    def test_a_turn_without_its_end_marker_ends_when_the_session_is_done(self):
+        h = agent(self)
+        m = ask(h, "/agent 短问题")
+        run = running(h, m)
+        sid = run["session_id"]
+        h.http.add(sid, "assistant", "text", "短回答")
+        time.sleep(0.4)  # quiet, but still working: not the end
+        self.assertEqual(replies(h), [])
+        self.assertEqual(h.app.store.run_get(run["id"])["state"], "running")
+        self.assertTrue(h.http.session_rows())
+        h.http.finish(sid)
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "done", what="done")
+        time.sleep(0.2)
+        self.assertEqual([x["text"] for x in replies(h)], ["短回答\n\n" + SUFFIX])
+        asked = len(h.http.session_rows())
+        time.sleep(0.3)
+        self.assertEqual(len(h.http.session_rows()), asked, "a finished run is not polled any more")
+
+    def test_a_done_status_before_the_answer_is_not_the_end(self):
+        h = agent(self)
+        m = ask(h, "/agent 还没开口")
+        run = running(h, m)
+        h.http.finish(run["session_id"])  # the list says done, but nothing answered our request yet
+        time.sleep(0.4)
+        self.assertEqual(h.app.store.run_get(run["id"])["state"], "running")
+        self.assertEqual(h.http.session_rows(), [])
+
+    def test_a_replied_turn_ends_by_its_status_with_nothing_more_posted(self):
+        h = agent(self)
+        m = ask(h, "/agent 用工具回复")
+        run = running(h, m)
+        sid = run["session_id"]
+        h.tool("agent_reply", request=run["id"], text="工具里的回复")
+        h.http.add(sid, "assistant", "tool_use", tool_name="matefeishu_agent_reply")
+        h.http.add(sid, "assistant", "text", "已经回复到飞书了")
+        h.http.finish(sid)
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "done", what="done")
+        time.sleep(0.2)
+        self.assertEqual([x["text"] for x in replies(h)], ["工具里的回复\n\n" + SUFFIX])
+
     def test_stop_while_it_waits_for_the_hub(self):
         h = agent(self)
         h.http.offline = 10 ** 6
@@ -711,6 +771,7 @@ class SettingsAndFailuresTest(unittest.TestCase):
 
     def test_runs_are_kept_three_days_and_at_most_200(self):
         h = agent(self)
+        h.app.agent.stop()  # these rows are made up: the poll loop must not time the running one out meanwhile
         store = h.app.store
         now = time.time()
         for i in range(210):
