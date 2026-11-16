@@ -50,7 +50,7 @@ def stat(label: str, value, detail: str = "", tone: str = "") -> dict:
 
 
 def row(title: str, subtitle: str = "", value: str = "", action: str = "", key: str = "", badge: Optional[dict] = None,
-        icon: str = "", icon_color: str = "") -> dict:
+        icon: str = "", icon_color: str = "", actions: Optional[List[dict]] = None) -> dict:
     out: Dict[str, Any] = {"type": "row", "title": one_line(title or "（无标题）", 120)}
     if icon:
         out["icon"] = icon
@@ -66,7 +66,14 @@ def row(title: str, subtitle: str = "", value: str = "", action: str = "", key: 
         out["action"] = {"id": action}
     if key:
         out["key"] = key
+    if actions:
+        out["actions"] = actions  # UI version 6: the row's menu (right click, …, long press) and its swipe
     return out
+
+
+def done_action(key: str) -> dict:
+    """A row's 处理完: hides it until it changes (a new message, an update)."""
+    return {"title": "处理完", "icon": "check", "swipe": True, "action": {"id": "done:" + key}}
 
 
 def tile(title: str, value: str = "", subtitle: str = "", icon: str = "", color: str = "", key: str = "",
@@ -225,10 +232,12 @@ class ChatsToday:
 
     def needs(self) -> List[dict]:
         """Direct chats and @me the user has not answered (the inbox's rule), newest first. A bot's (People) are
-        notices: left out, and counted in self.bots."""
+        notices: left out, and counted in self.bots. The ones marked 处理完 and still the same are left out too, in
+        self.done."""
         app = self.app
         out = []
         self.bots = 0
+        self.done = []
         if app.store is None:
             return out
         for chat in app.store.chats_since(time.time() - app.timing.inbox_window, app.timing.inbox_most):
@@ -257,12 +266,33 @@ class ChatsToday:
         for t in out:
             # an @me says what asked for me, from whom and when, not the chat's last line (often a bot's)
             ats = [r for r in t.get("_ats") or [] if r.get("sender_id") not in bots]
+            t["_version"] = str(t.get("last") or "")
             if ats:
                 r = ats[-1]
                 t["sender"], t["preview"] = views.sender_of(r, me), one_line(views.text_of(r), 200)
                 t["_at"] = r.get("at") or t["_at"]
+                t["_version"] = str(r.get("id") or "")  # a new @me brings it back, not any line of the group
+            t["_done_key"] = "chat:" + t["_chat"]["id"]
         out.sort(key=lambda t: -t["_at"])
-        return out
+        marked = app.store.dismissed(t["_done_key"] for t in out) if out else {}
+        self.done = [t for t in out if marked.get(t["_done_key"]) == t["_version"]]
+        return [t for t in out if marked.get(t["_done_key"]) != t["_version"]]
+
+    def dismiss(self, chat_id: str) -> bool:
+        """Mark a chat's need 处理完 (until a newer message, or a newer @me in a group). False: it needs nothing now."""
+        app = self.app
+        for t in self.needs() + self.done:
+            if t["_chat"]["id"] == chat_id:
+                app.store.dismiss(t["_done_key"], t["_version"])
+                if hasattr(app, "mark_changed"):
+                    app.mark_changed("inbox")  # the badge counts again
+                return True
+        return False
+
+    def undismiss(self, chat_id: str) -> None:
+        self.app.store.undismiss("chat:" + chat_id)
+        if hasattr(self.app, "mark_changed"):
+            self.app.mark_changed("inbox")
 
     def counts(self, needs: List[dict]) -> Dict[str, int]:
         app = self.app
@@ -270,7 +300,7 @@ class ChatsToday:
         today = app.store.count_since(start) if app.store is not None else {"messages": 0, "chats": 0}
         return {"needs": len(needs), "mentions": sum(1 for t in needs if t["kind"] == "mention"),
                 "dms": sum(1 for t in needs if t["kind"] == "dm"), "messages": today["messages"], "chats": today["chats"],
-                "bots": getattr(self, "bots", 0)}
+                "bots": getattr(self, "bots", 0), "done": len(getattr(self, "done", []))}
 
     def active_groups(self) -> List[dict]:
         app = self.app
@@ -308,6 +338,15 @@ class ChatsPage(Page):
             return {"view": self._chat(aid[5:], version)}
         if aid == "back":
             return {"view": self._overview(version)}
+        state = state_of(params)
+        here = lambda: self._chat(str(state["chat"]), version) if state.get("chat") and not self.card else self._overview(version)  # noqa: E731
+        if aid.startswith("done:chat:"):
+            if not self.data.dismiss(aid[len("done:chat:"):]):
+                return {"toast": "这个会话现在没有要处理的了", "view": here()}
+            return {"toast": "已标记处理完，有新消息会再出现", "view": here()}
+        if aid.startswith("undone:chat:"):
+            self.data.undismiss(aid[len("undone:chat:"):])
+            return {"toast": "已恢复", "view": here()}
         return {}
 
     def _summary(self, c: Dict[str, int], version: int) -> dict:
@@ -331,7 +370,8 @@ class ChatsPage(Page):
             label = "@我" if t["kind"] == "mention" else "私聊"
             rows.append(row(t["title"], "%s：%s" % (t["sender"], t["preview"]), when(t["_at"], app.tz),
                             "" if self.card else "chat:" + chat["id"], key="need:" + chat["id"],
-                            badge={"text": label, "tone": "caution" if t["kind"] == "mention" else "neutral"}))
+                            badge={"text": label, "tone": "caution" if t["kind"] == "mention" else "neutral"},
+                            actions=[done_action("chat:" + chat["id"])] if version >= 6 and not self.card else None))
         sections = [{"items": [self._summary(c, version)]}]
         if rows:
             sections.append({"title": "需要我", "items": rows})
@@ -343,6 +383,14 @@ class ChatsPage(Page):
                       for chat, last in self.data.active_groups()]
             if groups:
                 sections.append({"title": "今天活跃的群", "items": groups})
+            done = [row(t["title"], "%s：%s" % (t["sender"], t["preview"]), when(t["_at"], app.tz), "chat:" + t["_chat"]["id"],
+                        key="done:" + t["_chat"]["id"],
+                        actions=[{"title": "恢复", "icon": "refresh", "action": {"id": "undone:chat:" + t["_chat"]["id"]}}]
+                        if version >= 6 else None)
+                    for t in self.data.done]
+            if done:
+                sections.append({"title": "已标记处理完", "items": done,
+                                 "footer": "有新消息会自动回到“需要我”；要提前放回，在这一行的菜单里选“恢复”"})
         view: Dict[str, Any] = {"sections": sections, "refresh_after": REFRESH, "state": ""}
         if not self.card:
             view["title"] = "%s今天" % p
@@ -360,9 +408,11 @@ class ChatsPage(Page):
                  for r in rows]
         if not items:
             items = [empty("最近没有消息", "", version)]
-        back = {"type": "button", "title": "返回", "action": {"id": "back"}}
+        top = [{"type": "button", "title": "返回", "action": {"id": "back"}}]
+        if any(t["_chat"]["id"] == chat_id for t in self.data.needs()):
+            top.append({"type": "button", "title": "处理完", "action": {"id": "done:chat:" + chat_id}})
         return {"title": views.chat_name(chat, chat_id), "state": state_text({"chat": chat_id}), "refresh_after": REFRESH,
-                "sections": [{"items": [back]}, {"title": views.where(app.platform.name, chat, chat_id), "items": items}]}
+                "sections": [{"items": top}, {"title": views.where(app.platform.name, chat, chat_id), "items": items}]}
 
 
 class UI:
@@ -499,6 +549,11 @@ def check_view(view: dict, compact: bool = False) -> List[str]:
                         keys.add(t["key"])
             if item.get("icon_color") is not None and item["icon_color"] not in COLORS:
                 problems.append("%s: icon_color %r" % (where, item["icon_color"]))
+            acts = item.get("actions")
+            if acts is not None:
+                if not isinstance(acts, list) or not 1 <= len(acts) <= 4 or sum(1 for a in acts if a.get("swipe")) > 2 \
+                        or any(not 1 <= len(a.get("title") or "") <= 20 or not (a.get("action") or {}).get("id") for a in acts):
+                    problems.append(where + ": 1–4 actions, each a title (1–20) and an action, at most 2 swiped")
 
     def walk(v, path):
         if isinstance(v, dict):

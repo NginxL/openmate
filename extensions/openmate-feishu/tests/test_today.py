@@ -3,6 +3,7 @@
 import datetime as dt
 import os
 import sys
+import tempfile
 import types
 import unittest
 
@@ -11,6 +12,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "..", "core"))
 
 from openmate_core.hub import HubError  # noqa: E402
+from openmate_core.store import Store  # noqa: E402
 from openmate_core.ui import check_view  # noqa: E402
 from openmate_feishu import agenda, today  # noqa: E402
 
@@ -35,11 +37,18 @@ class Hub:
 
 class Chats:
     def __init__(self, needs, groups=None):
-        self._needs = needs
+        self._needs = list(needs)
         self._groups = groups or []
+        self.done = []
 
     def needs(self):
         return self._needs
+
+    def dismiss(self, chat_id):
+        hit = [t for t in self._needs if t["_chat"]["id"] == chat_id]
+        self._needs = [t for t in self._needs if t not in hit]
+        self.done += hit
+        return bool(hit)
 
     bots = 0
 
@@ -56,10 +65,11 @@ GROUPS = [({"id": "g1", "kind": "group", "name": "示例项目群"}, {"id": "m1"
 
 
 PERSONA = {
-    "/api/v1/sessions?state=needs_you": {"sessions": [{"session_id": "s1", "title": "修复登录问题", "activity": "在问：要不要合并？", "agent": "claude"}]},
+    "/api/v1/sessions?state=needs_you": {"sessions": [{"session_id": "s1", "title": "修复登录问题", "activity": "在问：要不要合并？", "agent": "claude",
+                                                       "state_since": "2026-11-16T01:00:00Z"}]},
     "/api/v1/sessions?state=working": {"sessions": [{"session_id": "s2", "title": "整理周报", "activity": "读取文档", "agent": "codex"},
                                                      {"session_id": "s3", "space_name": "示例仓库", "agent": "claude"}]},
-    "/api/v1/inbox": {"items": [{"id": "i1", "title": "示例告警", "summary": "服务异常", "tier": "action"},
+    "/api/v1/inbox": {"items": [{"id": "i1", "title": "示例告警", "summary": "服务异常", "tier": "action", "updated_at": "2026-11-16T01:00:00Z"},
                                 {"id": "i2", "title": "周报提醒", "tier": "fyi"}]},
     "/api/v1/todos": {"todos": [{"id": "t1", "title": "提交评审材料", "due_date": "2026-11-16", "ask": {"verdict": "x"}},
                                 {"id": "t2", "title": "下周的事", "due_date": "2026-11-20"},
@@ -74,7 +84,8 @@ def make(answers=None, needs=None, runner=None, clock=None, groups=None):
     clock = clock or (lambda: NOW)
     cfg = {"lark_cli": "/bin/sh", "lark_cli_profile": "persona"}
     hub = Hub(answers if answers is not None else PERSONA)
-    app = types.SimpleNamespace(config=cfg, tz=TZ, hub=hub, store=None, me_name=lambda: "我")
+    d = tempfile.mkdtemp(prefix="openmate-today-")
+    app = types.SimpleNamespace(config=cfg, tz=TZ, hub=hub, store=Store(os.path.join(d, "t.db")), me_name=lambda: "我")
     shared = agenda.Agenda(app, clock=clock, cli=agenda.LarkCLI(cfg, run=runner or Runner()), spawn=INPLACE)
     persona = today.PersonaToday(app, clock=clock, spawn=INPLACE)
     chats = Chats(CHAT_NEEDS if needs is None else needs, GROUPS if groups is None else groups)
@@ -159,6 +170,34 @@ class TodayTest(unittest.TestCase):
             view = page.render({"ui_version": v})
             self.assertNotIn("layout", view)
             self.assertFalse(any(k in s for s in view["sections"] for k in ("span", "icon", "link", "columns")))
+
+    def test_marked_done(self):
+        now = [NOW]
+        answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
+        page, card, _ = make(answers=answers, clock=lambda: now[0])
+        view = page.render({"ui_version": 6})
+        needs = rows(view["sections"][0])
+        self.assertEqual([r["actions"][0]["action"]["id"] for r in needs[:-1]],
+                         ["done:wait:s1", "done:inbox:i1", "done:ask:t1", "done:chat:c1", "done:chat:c2"])
+        self.assertTrue(all(r["actions"][0]["title"] == "处理完" for r in needs[:-1]))
+        self.assertFalse(any("actions" in r for r in card.render({"ui_version": 6})["sections"][1]["items"]))
+        self.assertFalse(any("actions" in r for r in rows(page.render({"ui_version": 5})["sections"][0])), "a row menu is 6")
+        for aid in ("done:inbox:i1", "done:wait:s1", "done:ask:t1", "done:chat:c1"):
+            out = page.action({"action": {"id": aid}, "ui_version": 6})
+            self.assertIn("已标记处理完", out["toast"])
+        view = out["view"]
+        self.assertEqual(view["sections"][0]["title"], "需要我 · 1")
+        self.assertEqual([r["title"] for r in rows(view["sections"][0])][:1], ["示例同事甲"])
+        self.assertEqual(texts(view["sections"][0]), ["飞书 1 · 收件箱 0 · Agent 等你 0 · 已处理 4"])
+        self.assertIn("没有要处理", page.action({"action": {"id": "done:inbox:nope"}, "ui_version": 6})["toast"])
+        # the inbox item is updated, the Agent asks again: they come back; the others stay handled
+        answers["/api/v1/inbox"] = {"items": [dict(PERSONA["/api/v1/inbox"]["items"][0], updated_at="2026-11-16T03:00:00Z")]}
+        answers["/api/v1/sessions?state=needs_you"] = {"sessions": [dict(PERSONA["/api/v1/sessions?state=needs_you"]["sessions"][0],
+                                                                        state_since="2026-11-16T03:00:00Z")]}
+        now[0] += 700  # past STALE: a fresh read
+        view = page.render({"ui_version": 6})
+        self.assertEqual([r["title"] for r in rows(view["sections"][0])][:2], ["修复登录问题", "示例告警"])
+        self.assertIn("已处理 2", texts(view["sections"][0])[0])
 
     def test_bot_notices_are_counted_apart(self):
         page, _, _ = make()

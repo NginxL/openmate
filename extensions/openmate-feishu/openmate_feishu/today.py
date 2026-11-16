@@ -16,7 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openmate_core.hub import HubError
 from openmate_core import views
-from openmate_core.ui import CHATS_PAGE, ChatsToday, Fresh, Page, day_start, empty, row, stat, state_text, tile, when
+from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, Page, day_start, done_action, empty, row, stat, state_text,
+                              tile, when)
 
 from .agenda import PAGE as CALENDAR_PAGE
 from .agenda import Agenda, CalendarError, Event
@@ -124,6 +125,17 @@ def agent_detail(s: dict) -> str:
     return " · ".join(p for p in parts if p)
 
 
+def version_of(d: dict, *fields: str) -> str:
+    """What says a Persona item changed (a new question, an update): a marked 处理完 comes back when it differs."""
+    return next((str(d[f]) for f in fields if d.get(f)), "")
+
+
+# kind: (the list in PersonaToday.read, its id field, the fields that change when it needs the user again)
+DONE_KINDS = {"wait": ("waiting", "session_id", ("state_since", "updated_at")),
+              "inbox": ("inbox", "id", ("updated_at", "created_at", "at")),
+              "ask": ("todos", "id", ("updated_at", "created_at"))}
+
+
 def todo_due(t: dict, tz) -> Tuple[Optional[_dt.datetime], str]:
     """(when it is due, how to say it) of a to-do: due_at (a moment) or due_date (a day)."""
     if t.get("due_at"):
@@ -207,6 +219,11 @@ class TodayPage(Page):
                 if e.id == aid[5:]:
                     return {"open_url": e.link} if e.link else {"toast": "这个日程没有可以打开的链接"}
             return {"toast": "这个日程已经不在日历里了"}
+        if aid.startswith("done:"):
+            kind, _, ident = aid[5:].partition(":")
+            ok = self.chats.dismiss(ident) if kind == "chat" else self._dismiss(kind, ident)
+            toast = "已标记处理完，有新消息会再出现" if kind == "chat" else "已标记处理完，有新变化会再出现"
+            return {"toast": toast if ok else "这一件现在没有要处理的了", "view": self.render(params)}
         if aid.startswith("chat:"):
             chat_id = aid[5:]
             return {"push": {"ui": CHATS_PAGE, "state": state_text({"chat": chat_id}), "title": self._chat_title(chat_id)}}
@@ -215,6 +232,17 @@ class TodayPage(Page):
         if aid == "go:chats":
             return {"push": {"ui": CHATS_PAGE, "title": "飞书今天"}}
         return {}
+
+    def _dismiss(self, kind: str, ident: str) -> bool:
+        store = getattr(self.app, "store", None)
+        if kind not in DONE_KINDS or store is None:
+            return False
+        part, id_field, fields = DONE_KINDS[kind]
+        for d in self.persona.read()[part]:
+            if str(d.get(id_field)) == ident:
+                store.dismiss("%s:%s" % (kind, ident), version_of(d, *fields))
+                return True
+        return False
 
     def _chat_title(self, chat_id: str) -> str:
         store = getattr(self.app, "store", None)
@@ -242,6 +270,20 @@ class Day:
         self.inbox_needs = [i for i in p["inbox"] if str(i.get("tier") or "") in NEEDS_TIERS]
         self.asks = [t for t in p["todos"] if t.get("ask")]
         self.todos = [t for t in p["todos"] if not t.get("ask")]
+        self.done = len(getattr(page.chats, "done", []) or [])
+        store = getattr(page.app, "store", None)
+        if store is not None:
+            def keep(kind: str, items: List[dict]) -> List[dict]:
+                _, id_field, fields = DONE_KINDS[kind]
+                keyed = [("%s:%s" % (kind, d.get(id_field)), version_of(d, *fields), d) for d in items]
+                marked = store.dismissed(k for k, _, _ in keyed) if keyed else {}
+                kept = [d for k, v, d in keyed if marked.get(k) != v]
+                self.done += len(items) - len(kept)
+                return kept
+            p = dict(p, waiting=keep("wait", p["waiting"]))
+            self.p = p
+            self.inbox_needs = keep("inbox", self.inbox_needs)
+            self.asks = keep("ask", self.asks)
         end_of_day = _dt.datetime.fromtimestamp(day_start(tz, now.timestamp()), tz) + _dt.timedelta(days=1)
         self.due_today = [t for t in p["todos"] if (todo_due(t, tz)[0] or end_of_day) < end_of_day]
         self.needs_total = len(p["waiting"]) + len(self.inbox_needs) + len(chat_needs) + len(self.asks)
@@ -277,17 +319,22 @@ class Day:
         _, due = todo_due(t, self.page.app.tz)
         sub = " · ".join(x for x in (("到期 " + due) if due else "", str(t.get("stage") or "")) if x)
         return row(str(t.get("title") or "待办"), sub, "", key=key + str(t.get("id")),
-                   badge={"text": "等你拍板", "tone": "caution"} if t.get("ask") else None, **self._icon("check", "green"))
+                   badge={"text": "等你拍板", "tone": "caution"} if t.get("ask") else None, **self._icon("check", "green"),
+                   actions=self._done("ask:" + str(t.get("id"))) if t.get("ask") else None)
+
+    def _done(self, key: str) -> Optional[List[dict]]:
+        return [done_action(key)] if self.icons else None  # a row's menu came with UI version 6
 
     def needs_rows(self) -> List[dict]:
         out = []
         for s in self.p["waiting"]:
             out.append(row(agent_title(s), agent_detail(s) or "在等你回答", "", key="wait:" + str(s.get("session_id")),
-                           badge={"text": "Agent 等你", "tone": "danger"}, **self._icon("robot", "red")))
+                           badge={"text": "Agent 等你", "tone": "danger"}, **self._icon("robot", "red"),
+                           actions=self._done("wait:" + str(s.get("session_id")))))
         for i in self.inbox_needs:
             out.append(row(str(i.get("title") or "收件箱"), str(i.get("summary") or i.get("preview") or ""), "",
                            key="inbox:" + str(i.get("id")), badge={"text": "收件箱", "tone": "caution"},
-                           **self._icon("mail", "amber")))
+                           **self._icon("mail", "amber"), actions=self._done("inbox:" + str(i.get("id")))))
         for t in self.asks:
             out.append(self._todo_row(t, "ask:"))
         for t in self.chat_needs:
@@ -297,7 +344,8 @@ class Day:
             out.append(row(t["title"], "%s：%s" % (t["sender"], t["preview"]), at,
                            "chat:" + chat_id if self.links and chat_id else "", key="chat:" + str(t.get("thread") or chat_id),
                            badge={"text": "@我" if mention else "私聊", "tone": "caution" if mention else "neutral"},
-                           **self._icon("chat", "orange" if mention else "indigo")))
+                           **self._icon("chat", "orange" if mention else "indigo"),
+                           actions=self._done("chat:" + chat_id) if chat_id else None))
         return out
 
     # ---- the card
@@ -322,7 +370,7 @@ class Day:
             head = {"type": "stat_grid", "stats": [stat(t, val, line, "caution" if badge else "") for t, val, line, _, _, badge, _ in blocks]}
         else:
             head = {"type": "text", "text": " · ".join("%s %s" % (t, val) for t, val, *_ in blocks)}
-        rows = [{k: x for k, x in r.items() if k != "action"} for r in self.needs_rows()[:3]]  # a card only shows
+        rows = [{k: x for k, x in r.items() if k not in ("action", "actions")} for r in self.needs_rows()[:3]]  # a card only shows
         return {"sections": [{"items": [head]}, {"items": rows or [empty("没有要你处理的事", "", v)]}], "refresh_after": REFRESH}
 
     # ---- the page
@@ -348,6 +396,8 @@ class Day:
         parts = ["飞书 %d" % len(self.chat_needs), "收件箱 %d" % len(self.inbox_needs), "Agent 等你 %d" % len(p["waiting"])]
         if self.asks:
             parts.append("待办等你拍板 %d" % len(self.asks))
+        if self.done:
+            parts.append("已处理 %d" % self.done)
         rows = self.needs_rows()
         sec: Dict[str, Any] = {"title": "需要我 · %d" % self.needs_total if self.needs_total else "需要我",
                                "items": [self._caption(" · ".join(parts))]

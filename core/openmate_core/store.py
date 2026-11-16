@@ -79,6 +79,8 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS seen (key TEXT PRIMARY KEY, at REAL NOT NULL)",
     # who is a program: kind "bot" (bots and AI assistants) or "user", as the service told it (Backend.people_kinds)
     "CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, kind TEXT NOT NULL, checked REAL NOT NULL)",
+    # what the user marked 处理完: hidden while it is still the same (version: its last message, its update time)
+    "CREATE TABLE IF NOT EXISTS dismissed (key TEXT PRIMARY KEY, version TEXT NOT NULL, at REAL NOT NULL)",
 ]
 
 _MESSAGE_COLUMNS = (
@@ -206,6 +208,29 @@ class Store:
             self._tx(lambda db: db.executemany(
                 "INSERT INTO people (id, kind, checked) VALUES (?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, checked = excluded.checked", rows))
+
+    def dismissed(self, keys: Iterable[str]) -> Dict[str, str]:
+        """{key: version} of those of keys the user marked 处理完."""
+        keys = sorted({str(k) for k in keys if k})
+        out: Dict[str, str] = {}
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            rows = self._all("SELECT key, version FROM dismissed WHERE key IN (%s)" % ",".join("?" * len(part)), part)
+            out.update({r["key"]: r["version"] for r in rows})
+        return out
+
+    def dismiss(self, key: str, version: str, now: Optional[float] = None) -> None:
+        now = now or time.time()
+
+        def run(db):
+            db.execute("INSERT INTO dismissed (key, version, at) VALUES (?, ?, ?) "
+                       "ON CONFLICT(key) DO UPDATE SET version = excluded.version, at = excluded.at", (key, version, now))
+            db.execute("DELETE FROM dismissed WHERE at < ?", (now - 30 * 86400,))
+
+        self._tx(run)
+
+    def undismiss(self, key: str) -> None:
+        self._tx(lambda db: db.execute("DELETE FROM dismissed WHERE key = ?", (key,)))
 
     def count_since(self, since: float) -> dict:
         """Other people's messages since then (not system lines), and in how many chats."""
