@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from . import tools as toolmod
 from . import views
 from .agent import AgentRunner
+from .ui import UI
 from .backend import Account, BackendError, Chat, CredentialsExpired, Message, SendRejected
 from .events import Changed
 from .hub import HubAPI
@@ -120,6 +121,7 @@ class ConnectorApp:
             "login.step": self.m_login_step,
             "logout": self.m_logout,
         }
+        self.ui: Optional[UI] = None
 
     # ------------------------------------------------------------------ the protocol
 
@@ -136,6 +138,11 @@ class ConnectorApp:
             raise RPCError("还没有 initialize", "not_initialized")
         if method == "ping":
             return {}
+        if method in ("ui.render", "ui.action"):  # the extension's pages and cards (ui.py), not the connector's
+            if not self.ready.wait(STARTUP_WAIT):
+                raise RPCError("扩展还在启动，请稍后再试")
+            ui = self._ui()
+            return ui.render(params) if method == "ui.render" else ui.action(params)
         if method.startswith("connector."):
             rest = method[len("connector."):]
             contribution = params.get("contribution")
@@ -210,6 +217,7 @@ class ConnectorApp:
                 if self.backend is not None:
                     self._start_link(restore=True)
             self.agent.start()
+            self._ui().update_badge()  # the hub forgets an extension's badges when it restarts
         except Exception:
             log.exception("startup failed")
             if not self.setup_error:
@@ -321,6 +329,14 @@ class ConnectorApp:
     def _emit_changed(self, scope: str) -> None:
         if self.peer is not None:
             self.peer.notify("connector.changed", {"contribution": self.cid, "scope": scope})
+        if scope == "inbox":
+            self._ui().update_badge()
+
+    def _ui(self) -> "UI":
+        with self.lock:
+            if self.ui is None:
+                self.ui = UI(self, self.platform.ui_pages)
+            return self.ui
 
     def mark_changed(self, *scopes: str) -> None:
         if self.changed is not None:

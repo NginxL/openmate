@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.1.10",
+        "version": "0.2.0",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -67,6 +67,32 @@
             {
               "id": "matefeishu",
               "instructions": "assistant/instructions.md"
+            }
+          ],
+          "ui": [
+            {
+              "id": "chats",
+              "title": "飞书",
+              "placement": "nav_page",
+              "icon": "list"
+            },
+            {
+              "id": "chats-today",
+              "title": "飞书今天",
+              "placement": "overview_card",
+              "opens": "chats"
+            },
+            {
+              "id": "calendar",
+              "title": "日程",
+              "placement": "nav_page",
+              "icon": "calendar"
+            },
+            {
+              "id": "calendar-today",
+              "title": "今天的日程",
+              "placement": "overview_card",
+              "opens": "calendar"
             }
           ]
         },
@@ -155,6 +181,16 @@
               "title": "收件箱分拣规则",
               "description": "用你自己的话写飞书消息该怎么分拣（哪些要你处理、哪些看看就行、哪些是噪音）。留空就用 Persona 的全局规则。没有 @你 的群消息总是按噪音处理。",
               "maxLength": 4000
+            },
+            "lark_cli": {
+              "type": "string",
+              "title": "lark-cli 路径",
+              "description": "日程页用飞书 lark-cli 只读地读你的日历（calendar +agenda）。留空时在 PATH 和登录 shell 里找 lark-cli。"
+            },
+            "lark_cli_profile": {
+              "type": "string",
+              "title": "lark-cli 配置档",
+              "description": "lark-cli 的 --profile：你为 Persona 登录的那个飞书应用。留空用 lark-cli 的默认配置档。需要日历只读权限（calendar:calendar.event:read）。"
             }
           }
         },
@@ -192,9 +228,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.1.10/openmate-feishu-0.1.10.tar.gz",
-          "sha256": "c636a4228407a80d701dac9320ad4e5b7361cc1a2d0e1a16fb5a5864023bef98",
-          "size": 91228
+          "url": "packages/openmate-feishu/0.2.0/openmate-feishu-0.2.0.tar.gz",
+          "sha256": "a3fc007c28a49f7a75d0259c4a6c9218a285abbf87a3a78480777699577f981b",
+          "size": 98850
         }
       ]
     }

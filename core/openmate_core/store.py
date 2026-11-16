@@ -187,6 +187,12 @@ class Store:
 
         self._tx(run)
 
+    def count_since(self, since: float) -> dict:
+        """Other people's messages since then (not system lines), and in how many chats."""
+        r = self._one("SELECT COUNT(*) AS n, COUNT(DISTINCT chat_id) AS c FROM messages "
+                      "WHERE at >= ? AND mine = 0 AND type != 'SYSTEM'", (since,))
+        return {"messages": int(r["n"] or 0), "chats": int(r["c"] or 0)} if r else {"messages": 0, "chats": 0}
+
     def chats_with_types(self, types, since: float, limit: int) -> List[str]:
         """Chats with a message of one of these types since then, the most recent first."""
         types = [str(t).upper() for t in types]

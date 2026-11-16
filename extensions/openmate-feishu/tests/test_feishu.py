@@ -62,8 +62,10 @@ class ManifestTest(unittest.TestCase):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
                                        "agent_machine", "agent_launcher", "agent_reply_suffix", "history_chats",
-                                       "triage_rules"])
+                                       "triage_rules", "lark_cli", "lark_cli_profile"])
         self.assertNotIn("default", props["larkx_python"])
+        self.assertEqual(config_defaults(MANIFEST).get("lark_cli_profile", ""), "", "lark-cli's default unless named")
+
         d = config_defaults(MANIFEST)
         self.assertEqual(d["larkx_commit"], "97ad48e69e34bd8c78ee30f795b7c3759dd81659")
         self.assertTrue(re.match(props["larkx_commit"]["pattern"], d["larkx_commit"]))
@@ -78,6 +80,13 @@ class ManifestTest(unittest.TestCase):
         self.assertNotIn("socks5://", props["http_proxy"]["description"])
         self.assertEqual(MANIFEST["configuration"]["type"], "object")
 
+
+    def test_pages_and_cards(self):
+        ui = {u["id"]: u for u in MANIFEST["contributes"]["ui"]}
+        self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
+            "chats": ("nav_page", "list", None), "chats-today": ("overview_card", None, "chats"),
+            "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar")})
+        self.assertTrue(all(1 <= len(u["title"]) <= 40 for u in ui.values()))
     def test_packaged_manifest_drops_source_only_fields(self):
         m = packaged_manifest(MANIFEST)
         self.assertNotIn("tags", m)

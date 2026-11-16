@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .backend import Backend
 
@@ -32,6 +32,8 @@ class Platform:
     login_hint: str = "用手机 App 扫码，并在手机上确认登录"
     login_hint_scanned: str = "已扫码，请在手机上确认登录"
     login_hint_expired: str = "二维码过期了，已换一张新的，请重新扫码"
+    #: the platform's own pages and cards, besides the core's chats page and card: app → {contribution id: ui.Page}
+    ui_pages: Optional[Callable[[Any], Dict[str, Any]]] = None
 
 
 @dataclass

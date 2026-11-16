@@ -46,7 +46,14 @@ def platform(manifest_path: str = "") -> Platform:
         login_hint="用飞书手机 App 扫码，并在手机上确认登录",
         login_hint_scanned="已扫码，请在飞书手机 App 上点“确认登录”",
         login_hint_expired="二维码过期了，已换一张新的，请重新扫码",
+        ui_pages=_agenda_pages,
     )
+
+
+def _agenda_pages(app):
+    from . import agenda  # the calendar page and card (lark-cli, read-only)
+
+    return agenda.pages(app)
 
 
 def main() -> int:
