@@ -52,13 +52,16 @@ def platform(manifest_path: str = "") -> Platform:
 
 def _agenda_pages(app):
     # the calendar page and card (lark-cli, read-only) and the 今天 page and card, sharing one read of the calendar
-    from . import agenda, today
+    from . import agenda, starkmesh, today
 
     shared = agenda.Agenda(app)
     persona = today.PersonaToday(app)
+    mesh = starkmesh.StarkMeshPage(app, starkmesh.StarkMesh(app))
     return {
         agenda.PAGE: agenda.CalendarPage(app, shared), agenda.CARD: agenda.CalendarPage(app, shared, card=True),
-        today.PAGE: today.TodayPage(app, shared, persona), today.CARD: today.TodayPage(app, shared, persona, card=True),
+        today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh),
+        today.CARD: today.TodayPage(app, shared, persona, card=True),
+        starkmesh.PAGE: mesh,
     }
 
 

@@ -218,6 +218,23 @@ class TodayTest(unittest.TestCase):
         card = [s for s in v8["sections"] if s.get("title", "").startswith("AI 代答")][0]
         self.assertEqual((card["icon"], card["link"]["title"]), ("robot", "设置"))
 
+    def test_the_starkmesh_block(self):
+        import test_starkmesh
+
+        page, _, _ = make()
+        mesh_page, _ = test_starkmesh.make()
+        page.mesh = mesh_page
+        view = page.render({"ui_version": 6})
+        items(view)
+        sec = section(view, "StarkMesh")
+        self.assertEqual(texts(sec), ["可用号 3/4 · 5 小时剩 1.30 号 · 本周剩 1.40 号"])
+        self.assertEqual(page.action({"action": {"id": "go:starkmesh"}}), {"push": {"ui": "starkmesh", "title": "StarkMesh"}})
+        v8 = page.render({"ui_version": 8})
+        card = [s for s in v8["sections"] if s.get("title") == "StarkMesh"][0]
+        self.assertEqual((card["icon"], card["link"]), ("gauge", {"title": "打开", "action": {"id": "go:starkmesh"}}))
+        page.mesh, _ = test_starkmesh.make(key="")
+        self.assertNotIn("StarkMesh", [s.get("title") for s in page.render({"ui_version": 6})["sections"]], "no key: no block")
+
     def test_bot_notices_are_counted_apart(self):
         page, _, _ = make()
         page.chats.bots = 7

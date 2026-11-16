@@ -155,12 +155,13 @@ def todo_due(t: dict, tz) -> Tuple[Optional[_dt.datetime], str]:
 
 class TodayPage(Page):
     def __init__(self, app, agenda: Agenda, persona: PersonaToday, chats: Optional[ChatsToday] = None,
-                 card: bool = False):
+                 card: bool = False, mesh=None):
         self.app = app
         self.agenda = agenda
         self.persona = persona
         self.chats = chats or ChatsToday(app)
         self.card = card
+        self.mesh = mesh  # starkmesh.StarkMeshPage: its block on the page once a key is set
 
     def warm(self) -> None:
         self.agenda.warm()
@@ -230,6 +231,8 @@ class TodayPage(Page):
         if aid.startswith("doc:"):
             run = self.app.store.run_get(aid[4:]) if getattr(self.app, "store", None) is not None else None
             return {"open_url": run["doc_url"]} if run and run.get("doc_url") else {"toast": "这条评论的文档链接不在了"}
+        if aid == "go:starkmesh":
+            return {"push": {"ui": "starkmesh", "title": "StarkMesh"}}
         if aid == "go:calendar":
             return {"push": {"ui": CALENDAR_PAGE, "title": "日程"}}
         if aid == "go:chats":
@@ -380,6 +383,9 @@ class Day:
 
     def full(self) -> dict:
         sections = [self.needs_card(), self.calendar_card(), self.feishu_card(), self.agents_card()]
+        mesh = self.mesh_card()
+        if mesh is not None:
+            sections.append(mesh)
         auto = self.auto_card()
         if auto is not None:
             sections.append(auto)
@@ -468,6 +474,13 @@ class Day:
         if len(p["working"]) > WORK_MOST:
             sec["footer"] = "还有 %d 个" % (len(p["working"]) - WORK_MOST)
         return self._card(sec, "robot", "teal")
+
+    def mesh_card(self) -> Optional[dict]:
+        page = getattr(self.page, "mesh", None)
+        if page is None:
+            return None
+        sec = page.card(self.version, self.links, self.icons)
+        return self._card(sec, "gauge", "teal", ("打开", "go:starkmesh")) if sec is not None else None
 
     def auto_card(self) -> Optional[dict]:
         """What the Agent answered as the user today without being asked each time (自动代答 in a marked group, a

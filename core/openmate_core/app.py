@@ -77,6 +77,7 @@ class ConnectorApp:
         self.initialized = False
         self._started = False
         self.config: Dict[str, Any] = {}
+        self.secrets: Dict[str, str] = {}
         self.hub = HubAPI("", "")
         self.tz = None
         self.data_dir = ""
@@ -178,6 +179,8 @@ class ConnectorApp:
                 self.config = dict(config_defaults(self.manifest))
                 if isinstance(config, dict):
                     self.config.update({k: v for k, v in config.items() if v is not None})
+                sec = params.get("secrets")  # the manifest's secrets the user set (never logged, never shown)
+                self.secrets = {str(k): str(v) for k, v in sec.items() if v} if isinstance(sec, dict) else {}
                 self.data_dir = (ext.get("data_dir") or self.env.get("PERSONA_EXTENSION_DATA")
                                  or self.env.get("PERSONA_PLUGIN_DATA")
                                  or os.path.join(os.path.expanduser("~"), ".openmate", self.manifest["id"]))

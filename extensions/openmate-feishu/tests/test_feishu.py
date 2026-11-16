@@ -56,7 +56,7 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask", "inbox.read", "kb.read",
                                                 "todos.read"])
         self.assertEqual(perms["network"], ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com",
-                                            "larkoffice.com", "*.larkoffice.com"])
+                                            "larkoffice.com", "*.larkoffice.com", "config:starkmesh_url:http"])
         self.assertEqual(MANIFEST["host_integrations"], [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}])
 
     def test_configuration(self):
@@ -65,11 +65,14 @@ class ManifestTest(unittest.TestCase):
                                        "agent_machine", "agent_launcher", "agent_reply_header", "agent_ack_reaction",
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_header",
                                        "agent_reply_suffix",
-                                       "history_chats", "triage_rules", "lark_cli", "lark_cli_profile"])
+                                       "history_chats", "triage_rules", "lark_cli", "lark_cli_profile", "starkmesh_url"])
+        self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])
+        self.assertIn("config:starkmesh_url:http", MANIFEST["permissions"]["network"])
         self.assertNotIn("default", props["larkx_python"])
         self.assertEqual(config_defaults(MANIFEST).get("lark_cli_profile", ""), "", "lark-cli's default unless named")
 
         d = config_defaults(MANIFEST)
+        self.assertEqual((props["starkmesh_url"]["format"], d["starkmesh_url"]), ("uri", "http://127.0.0.1:18080"))
         self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"]),
                          (True, 20, "> 🤖 AI 代答 · {model} · {effort}"))
         self.assertEqual(d["larkx_commit"], "97ad48e69e34bd8c78ee30f795b7c3759dd81659")
@@ -92,7 +95,8 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
             "today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "today"),
             "chats": ("nav_page", "list", None), "chats-today": ("overview_card", None, "chats"),
-            "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar")})
+            "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar"),
+            "starkmesh": ("nav_page", "gauge", None)})
         self.assertTrue(all(1 <= len(u["title"]) <= 40 for u in ui.values()))
     def test_packaged_manifest_drops_source_only_fields(self):
         m = packaged_manifest(MANIFEST)

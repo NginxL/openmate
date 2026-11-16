@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.5.1",
+        "version": "0.6.0",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -105,6 +105,12 @@
               "title": "今天的日程",
               "placement": "overview_card",
               "opens": "calendar"
+            },
+            {
+              "id": "starkmesh",
+              "title": "StarkMesh",
+              "placement": "nav_page",
+              "icon": "gauge"
             }
           ]
         },
@@ -244,9 +250,24 @@
               "type": "string",
               "title": "lark-cli 配置档",
               "description": "lark-cli 的 --profile：你为 Persona 登录的那个飞书应用。留空用 lark-cli 的默认配置档。需要日历只读权限（calendar:calendar.event:read）。"
+            },
+            "starkmesh_url": {
+              "type": "string",
+              "format": "uri",
+              "title": "StarkMesh 地址",
+              "description": "StarkMesh 网关的地址（这台电脑上能访问到的）。StarkMesh 页和“今天”页的额度卡片从这里只读地读账号和用量。",
+              "default": "http://127.0.0.1:18080"
             }
           }
         },
+        "secrets": [
+          {
+            "name": "starkmesh_key",
+            "title": "StarkMesh 只读管理密钥",
+            "hint": "last4",
+            "description": "在 StarkMesh 后台 设置 › 管理密钥 新建，只勾读取权限：accounts.read、accounts.usage.read、accounts.stats.read、dashboard.read。不填就不显示 StarkMesh。"
+          }
+        ],
         "permissions": {
           "network": [
             "feishu.cn",
@@ -254,7 +275,8 @@
             "larksuite.com",
             "*.larksuite.com",
             "larkoffice.com",
-            "*.larkoffice.com"
+            "*.larkoffice.com",
+            "config:starkmesh_url:http"
           ],
           "hub": [
             "agents.control",
@@ -283,9 +305,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.5.1/openmate-feishu-0.5.1.tar.gz",
-          "sha256": "75ad7b7caa8d291bffd6b13dd3f3629a97191497856ee1840937c681c65d59e2",
-          "size": 122776
+          "url": "packages/openmate-feishu/0.6.0/openmate-feishu-0.6.0.tar.gz",
+          "sha256": "f8bf98f0b365cc3395954cbbf84a9a8ff2935514b55058ac52d2b4b90413a0e7",
+          "size": 127357
         }
       ]
     }
