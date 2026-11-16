@@ -241,6 +241,33 @@ class MappingTest(Base):
         junk = self.m(msg_type=16, content="[分享日程] 参与人数=0", content_data={"calendarEvent": "@@@"})
         self.assertEqual(junk.text, "[分享日程] 参与人数=0")
 
+    def test_a_newer_card_and_a_decoded_shared_event(self):
+        import base64 as _b64
+        import json as _json
+
+        def field(no, v):
+            v = v.encode("utf-8")
+            n, size = len(v), bytearray()
+            while True:
+                size.append((n & 0x7F) | (0x80 if n > 0x7F else 0))
+                n >>= 7
+                if not n:
+                    break
+            return bytes([no << 3 | 2]) + bytes(size) + v
+
+        body = _json.dumps({"elements": [{"tag": "markdown", "content": "示例流水线 构建失败"},
+                                         {"tag": "button", "text": {"content": "重试"}}]}, ensure_ascii=False)
+        entity = field(1, "plain_text") + field(2, "#FFFFFF") + field(3, "示例构建通知") + field(4, body) \
+            + field(5, "img_v3_0abc")
+        card = self.m(msg_type=14, content_data={"cardDesc": "", "universalCardEntity": _b64.b64encode(entity).decode()})
+        self.assertEqual(card.text, "示例构建通知\n示例流水线 构建失败")
+        start = 1763620200
+        shared = self.m(msg_type=16, content="[分享日程] 参与人数=2", content_data={"attendeesCount": 2, "calendarEvent": {
+            "summary": "示例周会", "startTime": str(start), "endTime": str(start + 3600), "location": {"name": "示例会议室"},
+            "key": "ad599ca0-3c78-479b-a8e7-ceb0523647fe"}})
+        self.assertTrue(shared.text.startswith("[分享日程] 示例周会 · 示例会议室 · "), shared.text)
+        self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(start)), shared.text)
+
     def test_merge_forward_names_its_senders(self):
         S.api_answers["chatters.PullChattersByIdsRequest"] = {
             "chatters": {"7003000000000000001": {"id": "7003000000000000001", "name": "示例同事丙"}}}

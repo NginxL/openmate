@@ -55,7 +55,7 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
-RENDER_VERSION = "2"
+RENDER_VERSION = "3"
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
 TREE_LIST_MOST = 8
@@ -68,6 +68,8 @@ _CARD_SKIP_TAGS = {"button", "action", "overflow", "select_static", "select_pers
                    "date_picker", "picker_time", "picker_datetime", "input", "img", "image", "hr", "checker"}
 _ID_LIKE = re.compile(r"^[0-9a-fA-F-]{8,}$|^\d+$|^https?://")
 _LEADING_ID = re.compile(r"^(\s*)(\d{15,20}):", re.M)
+_CJK = re.compile(r"[\u3400-\u9fff]")
+_ASCII_WORD = re.compile(r"^[A-Za-z0-9_.:#/@%+=-]+$")  # an identifier, a key, a colour or a path: not words
 CHAT_P2P = 1
 AT_TAG = 5
 PUSH_CMD = 6
@@ -709,6 +711,10 @@ class LarkXBackend(Backend):
                 lines += card_json_texts(json.loads(raw))
             except ValueError:
                 pass
+        if not any(str(x).strip() for x in lines):  # a newer card: its content is in a bytes field
+            for key in ("universalCardEntity", "openCardContent"):
+                words, _ = loose_texts(data.get(key), decode=True)
+                lines += words
         return clip_lines(lines, CARD_TEXT_MOST)
 
     def _named(self, text: str) -> str:
@@ -1302,25 +1308,74 @@ def _proto_strings(buf: bytes, out: List[str], times: List[int], depth: int = 0)
             _proto_strings(v, out, times, depth + 1)
 
 
-def share_calendar_text(data: dict) -> str:
-    """A shared calendar event: LarkAgentX keeps the event as bytes; its readable strings and times, best effort."""
-    raw = data.get("calendarEvent")
-    if not isinstance(raw, str) or not raw:
-        return ""
-    try:
-        buf = base64.b64decode(raw + "=" * (-len(raw) % 4))
-    except (ValueError, TypeError):
-        return ""
-    strings: List[str] = []
+def _wordy(s: str) -> bool:
+    """A string people read: not an id, a link, a key, a colour or a JSON text."""
+    t = s.strip()
+    if len(t) < 2 or _ID_LIKE.match(t) or t.startswith(("{", "[", "http")):
+        return False
+    return bool(_CJK.search(t)) or (" " in t and not _ASCII_WORD.match(t.replace(" ", "")))
+
+
+def loose_texts(value, decode: bool = False, depth: int = 0):
+    """Readable strings and epoch-second times in a value of unknown shape: a dict or list (decoded already), a JSON
+    text, or (decode) the base64 of a protobuf message. Best effort, in order, each string once."""
+    words: List[str] = []
     times: List[int] = []
-    _proto_strings(buf, strings, times)
-    words = []
-    for s in strings:
-        if len(s) < 2 or _ID_LIKE.match(s) or s in words or s.startswith(("{", "[")):
-            continue
-        words.append(s)
-        if len(words) == 3:
-            break
+
+    def add(s: str) -> None:
+        t = s.strip()
+        if t.startswith(("{", "[")):
+            try:
+                walk(json.loads(t), depth + 1)
+                return
+            except ValueError:
+                pass
+        if _wordy(t) and t not in words:
+            words.append(t)
+
+    def walk(v, d: int) -> None:
+        if d > 8 or len(words) > 60:
+            return
+        if isinstance(v, dict):
+            if str(v.get("tag") or "") in _CARD_SKIP_TAGS:
+                return
+            for k, x in v.items():
+                if k in _CARD_SKIP_KEYS:
+                    continue
+                if isinstance(x, int) and not isinstance(x, bool) and 1_500_000_000 <= x <= 2_500_000_000:
+                    times.append(x)
+                elif isinstance(x, str) and x.isdigit() and "time" in k.lower() and 1_500_000_000 <= int(x) <= 2_500_000_000:
+                    times.append(int(x))
+                else:
+                    walk(x, d + 1)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, d + 1)
+        elif isinstance(v, str):
+            add(v)
+
+    if decode and isinstance(value, str) and value and not value.lstrip().startswith(("{", "[")):
+        try:
+            buf = base64.b64decode(value + "=" * (-len(value) % 4))
+        except (ValueError, TypeError):
+            buf = b""
+        strings: List[str] = []
+        _proto_strings(buf, strings, times)
+        for x in strings:
+            add(x)
+    else:
+        walk(value, depth)
+    return words, times
+
+
+def share_calendar_text(data: dict) -> str:
+    """A shared calendar event: LarkAgentX keeps the event as bytes (or a decoded dict); its readable strings and
+    times, best effort."""
+    raw = data.get("calendarEvent")
+    if not raw:
+        return ""
+    words, times = loose_texts(raw, decode=isinstance(raw, str))
+    words = words[:3]
     if not words:
         return ""
     parts = [" · ".join(words)]
