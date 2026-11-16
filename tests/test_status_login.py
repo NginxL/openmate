@@ -209,6 +209,47 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(thing["last"], missed.id)
         self.assertEqual(thing["kind"], "mention")
 
+    def test_a_later_copy_renews_the_text_but_is_not_new(self):
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        m = h.world.make("chat_example_team", "user_example_a", "旧的读法", type="CARD")
+        store = h.app.store
+        self.assertEqual(len(store.add_messages([m], True)), 1)
+        m.text = "新的读法"
+        self.assertEqual(store.add_messages([m], True), [], "not a new message")
+        self.assertEqual(store.message("chat_example_team", m.id)["text"], "新的读法")
+        m.text = ""
+        store.add_messages([m], True)
+        self.assertEqual(store.message("chat_example_team", m.id)["text"], "新的读法", "an empty reading keeps the text")
+
+    def test_a_newer_reading_reads_such_chats_once_more(self):
+        h = Harness(self, config={"history_chats": 2})
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        store = h.app.store
+        self.assertEqual(store.meta_get("render_version"), "1", "a first history is read the current way")
+        # a chat outside the catch-up (quiet for 5 days) with a card read the old way
+        old = h.world.make("chat_example_old", "user_example_a", "卡片标题", type="CARD", ago=5 * 86400)
+        store.add_messages([old], True)
+        h.world.history["chat_example_old"][-1].text = "卡片标题\n卡片正文"
+        backend = h.app.backend
+        backend.render_version, backend.rerender_types = "2", ("CARD",)
+
+        def catch_up():
+            h.app._catchup_done.clear()
+            h.app._request_catch_up(h.app._gen)
+            wait_until(lambda: h.app._catchup_done.is_set(), what="a catch-up")
+
+        h.world.history_calls.clear()
+        catch_up()
+        self.assertIn(("chat_example_old", None, h.app.timing.rerender_messages), h.world.history_calls)
+        self.assertEqual(store.message("chat_example_old", old.id)["text"], "卡片标题\n卡片正文")
+        self.assertEqual(store.meta_get("render_version"), "2")
+        h.world.history_calls.clear()
+        catch_up()
+        self.assertNotIn("chat_example_old", {c for c, _, _ in h.world.history_calls}, "once")
+
     def test_a_link_up_during_a_catch_up_gets_its_own(self):
         h = Harness(self)
         h.sign_in()

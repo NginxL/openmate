@@ -187,6 +187,16 @@ class Store:
 
         self._tx(run)
 
+    def chats_with_types(self, types, since: float, limit: int) -> List[str]:
+        """Chats with a message of one of these types since then, the most recent first."""
+        types = [str(t).upper() for t in types]
+        if not types:
+            return []
+        rows = self._all(
+            "SELECT chat_id, MAX(at) AS last FROM messages WHERE type IN (%s) AND at >= ? GROUP BY chat_id "
+            "ORDER BY last DESC LIMIT ?" % ",".join("?" * len(types)), types + [since, limit])
+        return [r["chat_id"] for r in rows]
+
     def get_chat(self, chat_id: str) -> Optional[dict]:
         r = self._one("SELECT * FROM chats WHERE id = ?", (chat_id,))
         return _chat_row(r) if r else None
@@ -208,7 +218,8 @@ class Store:
     # ---- messages ----
 
     def add_messages(self, msgs: List[Message], from_history: bool, now: Optional[float] = None) -> List[dict]:
-        """Store messages not stored yet (by chat and id; a later copy is ignored). Answers the new rows."""
+        """Store messages not stored yet (by chat and id). A later copy only renews the text and type when it reads
+        otherwise (an edit, or a better reading by a newer version). Answers the new rows."""
         now = now or time.time()
 
         def run(db):
@@ -227,6 +238,9 @@ class Store:
                     ),
                 )
                 if cur.rowcount != 1:
+                    if m.text:
+                        db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ?",
+                                   (m.text, (m.type or "TEXT").upper(), m.chat_id, m.id, m.text))
                     continue
                 if (m.type or "").upper() != "SYSTEM":
                     db.execute(

@@ -1,7 +1,8 @@
 import json
 
 MSG_TYPE_NAMES = {0: "UNKNOWN", 2: "POST", 3: "FILE", 4: "TEXT", 5: "IMAGE", 6: "SYSTEM", 7: "AUDIO", 10: "STICKER",
-                  11: "MERGE_FORWARD", 14: "CARD", 15: "MEDIA", 9: "SHARE_GROUP_CHAT", 24: "TODO"}
+                  11: "MERGE_FORWARD", 12: "CALENDAR", 14: "CARD", 15: "MEDIA", 16: "SHARE_CALENDAR_EVENT",
+                  18: "GENERAL_CALENDAR", 9: "SHARE_GROUP_CHAT", 24: "TODO"}
 
 
 def enum_to_int(value):

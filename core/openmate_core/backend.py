@@ -165,6 +165,12 @@ class Backend(abc.ABC):
     #: seals them in the hub. Never write credentials anywhere yourself.
     on_credentials: Optional[Callable[[Dict], None]] = None
 
+    #: The version of how this backend reads messages into text. When it is newer than the one a store was filled
+    #: with, the core reads the recent chats with a message of `rerender_types` once more (a stored message's text
+    #: is renewed when it reads otherwise now).
+    render_version: str = "1"
+    rerender_types: Tuple[str, ...] = ()
+
     # sign-in
 
     @abc.abstractmethod

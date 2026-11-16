@@ -46,6 +46,9 @@ class Timing:
     catchup_chats: int = 20  # chats read again after each reconnect
     catchup_messages: int = 30
     initial_messages: int = 50
+    rerender_window: float = 14 * 86400.0  # a newer reading renews the chats with such messages this recent…
+    rerender_chats: int = 30  # …at most this many of them…
+    rerender_messages: int = 50  # …their latest messages
     agent_poll: float = 4.0  # how often a running /agent's chat is read
     agent_timeout: float = 4 * 3600.0
     agent_fresh: float = 600.0  # a request older than this is not taken

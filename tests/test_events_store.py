@@ -62,7 +62,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(self.store.add_messages([m], from_history=False)), 1)
         m2 = Message(id="m1", chat_id="c1", position=1, sender_id="u", text="改过的", at=time.time())
         self.assertEqual(self.store.add_messages([m2], from_history=True), [])
-        self.assertEqual(self.store.message("c1", "m1")["text"], "一")  # the first version stays
+        self.assertEqual(self.store.message("c1", "m1")["text"], "改过的")  # not new, but its text is renewed (an edit)
         # the same id in another chat is another message
         self.assertEqual(len(self.store.add_messages([Message(id="m1", chat_id="c2", position=1)], False)), 1)
 

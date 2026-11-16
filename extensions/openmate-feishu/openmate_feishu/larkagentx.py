@@ -22,6 +22,8 @@ a ticket or a proxy's password), a token, a cookie or a message body.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import queue
@@ -51,6 +53,21 @@ REF_PREFIX = "lx1"
 CORE_TYPES = {"MEDIA": "VIDEO", "SHARE_GROUP_CHAT": "SHARE_CHAT", "SHARE_USER_CARD": "SHARE_USER"}
 MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
+MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
+# message types whose text an older version read poorly: their chats are read again once (core: render_version)
+RENDER_VERSION = "2"
+RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
+CARD_TEXT_MOST = 4000
+TREE_LIST_MOST = 8
+# in a card's JSON: what is drawn as text, and what is not (buttons, pickers, styles, links, the other languages)
+_CARD_TEXT_KEYS = ("content", "text", "title", "subtitle", "plain_text", "lark_md", "label", "placeholder_text")
+_CARD_SKIP_KEYS = {"style", "styles", "color", "font", "action", "actions", "behaviors", "url", "multi_url", "href",
+                   "img_key", "image_key", "icon", "token", "payload", "value", "confirm", "extra", "config",
+                   "i18n_header", "i18n_elements", "en_us", "ja_jp", "fallback", "tag", "template", "id", "element_id"}
+_CARD_SKIP_TAGS = {"button", "action", "overflow", "select_static", "select_person", "multi_select_static",
+                   "date_picker", "picker_time", "picker_datetime", "input", "img", "image", "hr", "checker"}
+_ID_LIKE = re.compile(r"^[0-9a-fA-F-]{8,}$|^\d+$|^https?://")
+_LEADING_ID = re.compile(r"^(\s*)(\d{15,20}):", re.M)
 CHAT_P2P = 1
 AT_TAG = 5
 PUSH_CMD = 6
@@ -235,6 +252,9 @@ def parse_ref(ref: str) -> Optional[Tuple[str, str, str, str]]:
 
 class LarkXBackend(Backend):
     """Thread-safe: the session, the sign-in flows and the caches are behind one lock; network calls run outside it."""
+
+    render_version = RENDER_VERSION
+    rerender_types = RERENDER_TYPES
 
     # timings (tests shorten them)
     poll_timeout = 0.2  # one QrLogin.wait round: a single poll (interval ≥ timeout), then back to the caller
@@ -672,12 +692,48 @@ class LarkXBackend(Backend):
                 self._last_pos[chat_id] = known
         return max(known, FIRST_POSITION)
 
+    def _card_text(self, data: dict) -> str:
+        """A card: its header, description, rich text and the text of its JSON body (not its buttons or styles)."""
+        header = data.get("cardHeader") or {}
+        lines = [str(header.get("title") or header.get("mainTitle") or ""), str(header.get("subtitle") or ""),
+                 str(data.get("cardDesc") or "")]
+        rich = data.get("richtext") or data.get("richText")
+        if isinstance(rich, dict):
+            try:
+                lines.append(str(self.lx.decoders.extract_rich_text(rich) or ""))
+            except Exception:
+                pass
+        raw = data.get("jsonCard")
+        if isinstance(raw, str) and raw.strip().startswith(("{", "[")):
+            try:
+                lines += card_json_texts(json.loads(raw))
+            except ValueError:
+                pass
+        return clip_lines(lines, CARD_TEXT_MOST)
+
+    def _named(self, text: str) -> str:
+        """LarkAgentX's lines of a merged forward start with the sender's id: their names instead, where known."""
+        cache: Dict[str, str] = {}
+
+        def name(m) -> str:
+            uid = m.group(2)
+            if uid not in cache:
+                try:
+                    cache[uid] = self.user_name(uid) or uid
+                except Exception:
+                    cache[uid] = uid
+            return "%s%s:" % (m.group(1), cache[uid])
+
+        return _LEADING_ID.sub(name, text or "")
+
     def _rich_text(self, data: dict) -> str:
         return str(self.lx.decoders.extract_rich_text(data.get("richText") or {}) or data.get("text") or "")
 
     def _text(self, mt: int, name: str, data: Optional[dict], summary: str) -> str:
         if data is None:
             # not decoded: LarkAgentX's line is a placeholder or a decoding error; say what it is, nothing more
+            if mt == GENERAL_CALENDAR:
+                return "[日程邀请]（详情请在飞书里查看）"  # LarkAgentX hands over nothing of these
             return "" if mt in MEDIA_KINDS or mt == SYSTEM else "[不支持的消息：%s]" % name
         if mt == TEXT:
             return self._rich_text(data)
@@ -687,9 +743,13 @@ class LarkXBackend(Backend):
         if mt in MEDIA_KINDS:
             return ""  # the media and the core's placeholder say it
         if mt == CARD:
-            header = data.get("cardHeader") or {}
-            parts = [str(header.get("title") or header.get("mainTitle") or ""), str(data.get("cardDesc") or "")]
-            return "\n".join(p for p in parts if p)
+            return self._card_text(data)
+        if mt == CALENDAR:
+            return calendar_text(data.get("calendar")) or summary
+        if mt == SHARE_CALENDAR_EVENT:
+            return share_calendar_text(data) or summary
+        if mt == MERGE_FORWARD:
+            return self._named(summary)
         if mt == SYSTEM:
             texts = []
             for cv in (data.get("sysContentValues") or {}).values():
@@ -934,7 +994,12 @@ class LarkXBackend(Backend):
         except Exception:
             return ""
         chatters = resp.get("chatters") or {}
-        c = chatters.get(str(user_id)) or (next(iter(chatters.values())) if len(chatters) == 1 else None) or {}
+        c = chatters.get(str(user_id))
+        if c is None and len(chatters) == 1:  # keyed otherwise: the one answered, unless it says it is someone else
+            only = next(iter(chatters.values())) or {}
+            if isinstance(only, dict) and str(only.get("id") or user_id) == str(user_id):
+                c = only
+        c = c if isinstance(c, dict) else {}
         return str(c.get("name") or c.get("alias") or c.get("enUsName") or "")
 
     def media(self, ref: str, max_bytes: int) -> Tuple[str, bytes]:
@@ -1093,3 +1158,180 @@ def _never_connected(e: Exception) -> bool:
     reason = getattr(e.args[0], "reason", None) if e.args else None
     names = {type(x).__name__ for x in (reason, getattr(reason, "__cause__", None)) if x is not None}
     return bool(names & {"NewConnectionError", "NameResolutionError", "ConnectTimeoutError"})
+
+
+# ---------------------------------------------------------------- reading rich messages
+
+
+def clip_lines(lines: List[str], most: int) -> str:
+    """Non-empty lines, each once (a card says its title in its header and its body), at most `most` characters."""
+    out: List[str] = []
+    seen = set()
+    for line in lines:
+        t = _TAGS.sub("", str(line or "")).strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    text = "\n".join(out)
+    return text if len(text) <= most else text[: most - 1] + "…"
+
+
+def card_json_texts(node, out: Optional[List[str]] = None) -> List[str]:
+    """The text a card's JSON draws, in order: text-like fields, not buttons, pickers, styles or other languages."""
+    if out is None:
+        out = []
+    if isinstance(node, list):
+        for x in node:
+            card_json_texts(x, out)
+    elif isinstance(node, dict):
+        if str(node.get("tag") or "") in _CARD_SKIP_TAGS:
+            return out
+        for k, v in node.items():
+            if k in _CARD_SKIP_KEYS:
+                continue
+            if isinstance(v, str):
+                if k in _CARD_TEXT_KEYS and v.strip() and not _ID_LIKE.match(v.strip()):
+                    out.append(v)
+            else:
+                card_json_texts(v, out)
+    return out
+
+
+def _tree_text(block, eid: str, depth: int = 0) -> str:
+    """One element of a Feishu element tree ({element_ids, elements: {id: {property, child_ids}}}) as text."""
+    els = (block or {}).get("elements") or {}
+    el = els.get(eid) or {}
+    if depth > 8 or not isinstance(el, dict):
+        return ""
+    prop = el.get("property") or {}
+    own = str(prop.get("content") or "").strip() if isinstance(prop, dict) else ""
+    ids = [str(c) for c in el.get("child_ids") or []]
+    kids = [_tree_text(block, c, depth + 1) for c in ids]
+    if own and not any(kids):
+        return own
+    if len(ids) == 2 and ids[0].endswith("key") and kids[0] and kids[1] and not own:
+        return "%s：%s" % (kids[0], kids[1])  # a field's name and its value
+    parts = [t for t in ([own] + kids) if t]
+    if len(parts) > TREE_LIST_MOST:  # a long list (the attendees): the first ones and how many
+        parts = parts[:TREE_LIST_MOST] + ["等 %d 人" % len(parts)]
+    return "、".join(parts)
+
+
+def calendar_text(raw) -> str:
+    """A calendar card (an invitation, a change, a reminder): its title and fields as one line, not its buttons."""
+    if not isinstance(raw, str) or not raw.strip().startswith("{"):
+        return ""
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(d, dict):
+        return ""
+    parts = []
+    for name in ("title", "contents"):
+        block = d.get(name)
+        if isinstance(block, dict):
+            for eid in block.get("element_ids") or []:
+                t = _tree_text(block, eid)
+                if t:
+                    parts.append(t)
+    loc = str(d.get("location") or "").strip()
+    if loc and not any(loc in p for p in parts):
+        parts.append("地点：" + loc)
+    if not parts and d.get("summary"):
+        parts.append(str(d["summary"]))
+    return ("[日程] " + " · ".join(parts)) if parts else ""
+
+
+def _proto_fields(buf: bytes):
+    """(field, value) of a protobuf message without its schema: ints for varints, bytes for length-delimited."""
+    i, n = 0, len(buf)
+    while i < n:
+        key, i = _varint(buf, i)
+        if key is None:
+            return
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            v, i = _varint(buf, i)
+            if v is None:
+                return
+            yield field, v
+        elif wire == 2:
+            ln, i = _varint(buf, i)
+            if ln is None or i + ln > n:
+                return
+            yield field, buf[i:i + ln]
+            i += ln
+        elif wire == 1:
+            i += 8
+        elif wire == 5:
+            i += 4
+        else:
+            return
+
+
+def _varint(buf: bytes, i: int):
+    shift = v = 0
+    while i < len(buf) and shift < 70:
+        b = buf[i]
+        i += 1
+        v |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return v, i
+        shift += 7
+    return None, i
+
+
+def _proto_strings(buf: bytes, out: List[str], times: List[int], depth: int = 0) -> None:
+    """Readable strings and epoch-second times anywhere in a protobuf message (nested ones too)."""
+    if depth > 6 or len(out) > 40:
+        return
+    for _, v in _proto_fields(buf):
+        if isinstance(v, int):
+            if 1_500_000_000 <= v <= 2_500_000_000:
+                times.append(v)
+            continue
+        try:
+            s = v.decode("utf-8")
+        except UnicodeDecodeError:
+            s = None
+        if s is not None and s.isprintable() and s.strip():
+            out.append(s.strip())
+        elif len(v) > 1:
+            _proto_strings(v, out, times, depth + 1)
+
+
+def share_calendar_text(data: dict) -> str:
+    """A shared calendar event: LarkAgentX keeps the event as bytes; its readable strings and times, best effort."""
+    raw = data.get("calendarEvent")
+    if not isinstance(raw, str) or not raw:
+        return ""
+    try:
+        buf = base64.b64decode(raw + "=" * (-len(raw) % 4))
+    except (ValueError, TypeError):
+        return ""
+    strings: List[str] = []
+    times: List[int] = []
+    _proto_strings(buf, strings, times)
+    words = []
+    for s in strings:
+        if len(s) < 2 or _ID_LIKE.match(s) or s in words or s.startswith(("{", "[")):
+            continue
+        words.append(s)
+        if len(words) == 3:
+            break
+    if not words:
+        return ""
+    parts = [" · ".join(words)]
+    if times:
+        lo, hi = min(times), max(times)
+        stamp = time.strftime("%m-%d %H:%M", time.localtime(lo))
+        if hi > lo:
+            stamp += time.strftime("–%H:%M", time.localtime(hi)) if hi - lo < 86400 else time.strftime(" – %m-%d %H:%M", time.localtime(hi))
+        parts.append(stamp)
+    count = data.get("attendeesCount")
+    if isinstance(count, int) and count > 0:
+        parts.append("%d 人参与" % count)
+    return "[分享日程] " + " · ".join(parts)
+

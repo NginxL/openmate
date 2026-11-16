@@ -461,7 +461,8 @@ class ConnectorApp:
         try:
             t = self.timing
             done_now = set()
-            if self.store.meta_get("initial_history_done") != "1":
+            first = self.store.meta_get("initial_history_done") != "1"
+            if first:
                 n = _int(self.config.get("history_chats"), 20, 0, 50)
                 if n > 0:
                     chats = self.backend.recent_chats(n)
@@ -478,6 +479,18 @@ class ConnectorApp:
                 if c["id"] in done_now:
                     continue
                 self.ingest(self.backend.history(c["id"], None, t.catchup_messages), live=False)
+                done_now.add(c["id"])
+            # a newer backend reads some messages better: their recent chats once more, so the stored text is renewed
+            version = str(getattr(self.backend, "render_version", "") or "")
+            kinds = tuple(getattr(self.backend, "rerender_types", ()) or ())
+            if version and self.store.meta_get("render_version") != version:
+                if kinds and not first:  # a first history was just read this way
+                    for chat_id in self.store.chats_with_types(kinds, time.time() - t.rerender_window, t.rerender_chats):
+                        if gen != self._gen or self.link != "up":
+                            return
+                        if chat_id not in done_now:
+                            self.ingest(self.backend.history(chat_id, None, t.rerender_messages), live=False)
+                self.store.meta_set("render_version", version)
             self.last_sync = time.time()
             self.mark_changed("inbox", "chats")
         except BackendError as e:

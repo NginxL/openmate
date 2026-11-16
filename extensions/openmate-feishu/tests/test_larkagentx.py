@@ -145,6 +145,111 @@ class MappingTest(Base):
         self.assertEqual(self.m(msg_type=15, content_data={"key": "file_v3_v", "name": "a.mp4", "size": 9}).type, "VIDEO")
         self.assertIsNone(self.m(msg_id=""))
 
+    def test_card_body_and_not_its_buttons(self):
+        import json as _json
+
+        body = {"schema": "2.0",
+                "header": {"title": {"tag": "plain_text", "content": "示例告警"}},
+                "body": {"elements": [
+                    {"tag": "markdown", "content": "**服务** 示例服务 出现异常 <at id=7003></at>"},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": "影响：示例接口"},
+                     "fields": [{"text": {"tag": "lark_md", "content": "级别：P1"}}]},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "查看详情"}, "url": "https://example.com"},
+                    {"tag": "note", "elements": [{"tag": "plain_text", "content": "来自 示例平台"}]},
+                    {"tag": "img", "img_key": "img_v3_x", "alt": {"tag": "plain_text", "content": "图"}},
+                ]},
+                "i18n_elements": {"en_us": [{"tag": "markdown", "content": "English copy"}]}}
+        card = self.m(msg_type=14, content_data={"cardHeader": {"title": "示例告警"}, "cardDesc": "",
+                                                  "jsonCard": _json.dumps(body, ensure_ascii=False)})
+        self.assertEqual(card.text, "示例告警\n**服务** 示例服务 出现异常\n影响：示例接口\n级别：P1\n来自 示例平台")
+        self.assertNotIn("查看详情", card.text)
+        self.assertNotIn("English", card.text)
+        long = self.m(msg_type=14, content_data={"jsonCard": _json.dumps({"elements": [
+            {"tag": "markdown", "content": "行%d" % i * 50} for i in range(200)]})})
+        self.assertLessEqual(len(long.text), larkagentx.CARD_TEXT_MOST)
+        self.assertTrue(long.text.endswith("…"))
+        bad = self.m(msg_type=14, content_data={"cardHeader": {"title": "审批"}, "jsonCard": "{not json"})
+        self.assertEqual(bad.text, "审批")
+
+    def test_calendar_card(self):
+        import json as _json
+
+        cal = {"title": {"element_ids": ["title"], "elements": {"title": {"tag": 1, "property": {"content": "示例同事甲邀请你加入日程"}}}},
+               "contents": {"element_ids": ["summary", "time", "attendees"], "elements": {
+                   "summary": {"child_ids": ["summary_key", "summary_content"]},
+                   "summary_key": {"property": {"content": "主题"}},
+                   "summary_content": {"property": {"content": "示例评审会"}},
+                   "time": {"child_ids": ["time_key", "time_content"]},
+                   "time_key": {"property": {"content": "时间"}},
+                   "time_content": {"property": {"content": "2026年11月19日 14:30 - 15:30  (GMT+8)"}},
+                   "attendees": {"child_ids": ["attendees_key", "attendees_content"]},
+                   "attendees_key": {"property": {"content": "参与者"}},
+                   "attendees_content": {"child_ids": ["7001", "7002"]},
+                   "7001": {"property": {"content": "示例用户", "user_id": "7001"}},
+                   "7002": {"property": {"content": "示例同事甲", "user_id": "7002"}}}},
+               "actions": {"element_ids": ["actions"], "elements": {
+                   "actions": {"child_ids": ["accept"]}, "accept": {"property": {"content": "接受"}}}},
+               "summary": "示例评审会", "location": "示例会议室", "key": "k"}
+        m = self.m(msg_type=12, content="[日历] {...}", content_data={"calendar": _json.dumps(cal, ensure_ascii=False)})
+        self.assertEqual((m.type, m.text), ("CALENDAR", "[日程] 示例同事甲邀请你加入日程 · 主题：示例评审会 · "
+                                            "时间：2026年11月19日 14:30 - 15:30  (GMT+8) · 参与者：示例用户、示例同事甲 · 地点：示例会议室"))
+        self.assertNotIn("接受", m.text)
+        many = dict(cal)
+        many["contents"] = {"element_ids": ["attendees"], "elements": dict(
+            {"attendees": {"child_ids": ["attendees_key", "attendees_content"]},
+             "attendees_key": {"property": {"content": "参与者"}},
+             "attendees_content": {"child_ids": [str(i) for i in range(12)]}},
+            **{str(i): {"property": {"content": "人%d" % i}} for i in range(12)})}
+        self.assertIn("参与者：人0、人1、人2、人3、人4、人5、人6、人7、等 12 人",
+                      self.m(msg_type=12, content_data={"calendar": _json.dumps(many, ensure_ascii=False)}).text)
+        odd = self.m(msg_type=12, content="[日历] 原文", content_data={"calendar": "not json"})
+        self.assertEqual(odd.text, "[日历] 原文", "unreadable: LarkAgentX's line")
+        invite = self.m(msg_type=18, content="", content_data=None)
+        self.assertEqual((invite.type, invite.text), ("GENERAL_CALENDAR", "[日程邀请]（详情请在飞书里查看）"))
+
+    def test_shared_calendar_event(self):
+        import base64 as _b64
+
+        def vint(n):
+            out = bytearray()
+            while True:
+                b = n & 0x7F
+                n >>= 7
+                if n:
+                    out.append(b | 0x80)
+                else:
+                    out.append(b)
+                    return bytes(out)
+
+        def field(no, v):
+            if isinstance(v, int):
+                return vint(no << 3) + vint(v)
+            v = v.encode("utf-8") if isinstance(v, str) else v
+            return vint(no << 3 | 2) + vint(len(v)) + v
+
+        start = 1763620200  # 2026-11-20 14:30 +08:00
+        inner = field(1, "示例分享会") + field(2, "7095547010539421698") + field(3, start) + field(4, start + 3600) \
+            + field(5, "示例会议室")
+        event = field(1, "ad599ca0-3c78-479b-a8e7-ceb0523647fe") + field(2, inner)
+        m = self.m(msg_type=16, content="[分享日程] 参与人数=3",
+                   content_data={"calendarEvent": _b64.b64encode(event).decode(), "attendeesCount": 3})
+        self.assertTrue(m.text.startswith("[分享日程] 示例分享会 · 示例会议室 · "), m.text)
+        self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(start)), m.text)
+        self.assertTrue(m.text.endswith("3 人参与"))
+        empty = self.m(msg_type=16, content="[分享日程] 参与人数=0", content_data={"calendarEvent": "", "attendeesCount": 0})
+        self.assertEqual(empty.text, "[分享日程] 参与人数=0")
+        junk = self.m(msg_type=16, content="[分享日程] 参与人数=0", content_data={"calendarEvent": "@@@"})
+        self.assertEqual(junk.text, "[分享日程] 参与人数=0")
+
+    def test_merge_forward_names_its_senders(self):
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {
+            "chatters": {"7003000000000000001": {"id": "7003000000000000001", "name": "示例同事丙"}}}
+        line = "[合并转发] 示例群 共2条:\n  7003000000000000001: 你好\n  7003000000000000002: 好的"
+        m = self.m(msg_type=11, content=line, content_data={"messages": [], "groupChatName": "示例群"})
+        self.assertEqual(m.type, "MERGE_FORWARD")
+        self.assertIn("  示例同事丙: 你好", m.text)
+        self.assertIn("7003000000000000002: 好的", m.text, "unknown: the id stays")
+
     def test_media(self):
         img = self.m(msg_type=5, content="[图片] imageKey=img_v3_k", content_data={
             "imageV2": {"imageKey": "img_v3_k", "variants": [{"type": 2}, {"type": 1, "size": {"width": 640, "height": 480}}]}})
