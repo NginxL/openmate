@@ -2,6 +2,7 @@
 it, and a failed read keeps the last one."""
 
 import threading
+import time
 import unittest
 
 from harness import wait_until  # noqa: F401  (puts core on the path)
@@ -91,6 +92,19 @@ class FreshTest(unittest.TestCase):
         self.assertEqual((f.get(), self.src.n), ("v1", 1))
         self.src.fail = True
         self.make().warm()  # a failed first read is not raised from the background
+
+    def test_kept_warm_until_stopped(self):
+        f = self.make(spawn=None)
+        stop = threading.Event()
+        f.ahead = 0  # each get reads again (behind, in place below)
+        f.spawn = lambda fn: threading.Thread(target=fn, daemon=True).start()
+        f.warm(every=0.02, stop=stop)
+        wait_until(lambda: self.src.n >= 3, what="read again and again")
+        stop.set()
+        time.sleep(0.1)
+        n = self.src.n
+        time.sleep(0.1)
+        self.assertLessEqual(self.src.n, n + 1, "stopped")
 
     def test_ui_warms_each_page_once(self):
         calls = []

@@ -202,13 +202,17 @@ class Fresh:
         with self._mu:
             self._kept = (self.clock(), k, value)
 
-    def warm(self) -> None:
-        """Read now in the background, so that the first draw does not wait."""
+    def warm(self, every: float = 0.0, stop: Optional[threading.Event] = None) -> None:
+        """Read now in the background, so that the first draw does not wait; with every, keep reading that often (a
+        page opened after a long while then shows a read at most that old, and does not wait either)."""
         def run():
-            try:
-                self.get()
-            except Exception as e:
-                log.debug("%s: the first read failed (%s)", self.name, e.__class__.__name__)
+            while True:
+                try:
+                    self.get()
+                except Exception as e:
+                    log.debug("%s: a read failed (%s)", self.name, e.__class__.__name__)
+                if not every or (stop.wait(every) if stop is not None else time.sleep(every)):
+                    return
 
         self.spawn(run)
 

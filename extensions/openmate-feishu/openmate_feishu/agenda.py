@@ -27,6 +27,7 @@ CARD = "calendar-today"
 DAYS = 7
 AHEAD = 30.0  # older than this, read again in the background (the page shows the last read meanwhile)
 STALE = 900.0  # older than this, a draw waits for a new read
+KEEP = 300.0  # while running, read this often anyway, so that a draw after a long while does not wait
 TIMEOUT = 25
 REFRESH = 120
 LATER_MOST = 30
@@ -184,7 +185,7 @@ class Agenda:
         return self.cli.agenda(begin, begin + _dt.timedelta(days=DAYS))
 
     def warm(self) -> None:
-        self._fresh.warm()
+        self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
     def events(self) -> List[Event]:
         tz = self.app.tz

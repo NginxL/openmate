@@ -27,6 +27,7 @@ PAGE = "today"
 CARD = "today-card"
 AHEAD = 30.0  # older than this, read again in the background
 STALE = 600.0  # older than this, a draw waits for a new read
+KEEP = 300.0  # while running, read this often anyway
 WAIT = 8.0
 REFRESH = 120
 NEEDS_MOST = 12
@@ -60,7 +61,7 @@ class PersonaToday:
         return self.app.hub.request("GET", path, query=query, timeout=WAIT)
 
     def warm(self) -> None:
-        self._fresh.warm()
+        self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
     def read(self) -> dict:
         try:
