@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.6.2",
+        "version": "0.6.3",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -304,9 +304,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.6.2/openmate-feishu-0.6.2.tar.gz",
-          "sha256": "beaa342ae697588fa37e42661d3783f636b0ad564d23f906000e9be7c7143d36",
-          "size": 127815
+          "url": "packages/openmate-feishu/0.6.3/openmate-feishu-0.6.3.tar.gz",
+          "sha256": "d3d7a2d03f97df66845da3df67ed9b9d2f2d1f9edbb23d9ed555d01bf7abaef8",
+          "size": 127872
         }
       ]
     }

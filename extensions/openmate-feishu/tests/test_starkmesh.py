@@ -122,6 +122,9 @@ class StarkMeshTest(unittest.TestCase):
                          [("5 小时", "剩 0%", "danger"), ("7D", "剩 10%", "danger")], "over 100% used is 0% left")
         limited = [i for i, it in enumerate(accounts["items"]) if it.get("title") == "claude-limited"][0]
         self.assertEqual(accounts["items"][limited + 1]["detail"][:4], "剩 0%")
+        idle = {"id": 9, "name": "claude-idle", "platform": "anthropic", "type": "oauth", "status": "active", "schedulable": True}
+        snap = starkmesh.Snapshot([idle], {"9": {"five_hour": {"utilization": 0}, "seven_day": {"utilization": 40}}}, {}, NOW)
+        self.assertEqual([b["detail"] for b in page.account_bars(idle, snap)], ["剩 100% · 未开始", "剩 60% · 重置时间未知"])
 
     def test_read_only_with_the_key(self):
         page, gw = make()

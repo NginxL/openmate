@@ -286,7 +286,10 @@ class StarkMeshPage(Page):
             t = _ts(w.get("resets_at"))
             if not t and w.get("remaining_seconds"):
                 t = s.now + float(w["remaining_seconds"])
-            reset = _dt.datetime.fromtimestamp(t, self.app.tz).strftime("%m/%d %H:%M") if t else "重置时间未知"
+            if t:
+                reset = _dt.datetime.fromtimestamp(t, self.app.tz).strftime("%m/%d %H:%M")
+            else:  # a window with no reset time has not started: nothing used in it yet
+                reset = "未开始" if left >= 100.0 else "重置时间未知"
             out.append({"type": "progress", "key": "a:%s:%s" % (a.get("id"), key), "label": label,
                         "ratio": round(left / 100.0, 4), "detail": "剩 %d%% · %s" % (round(left), reset),
                         "tone": tone_of(left / 100.0)[1]})
