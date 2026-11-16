@@ -7,6 +7,8 @@ asks for (docs/extensions/extensions.md "Hub API: scopes"):
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
                     GET  /api/v1/sessions?machine_id=&session_id= (the session's status)
     kb.read         GET  /api/v1/kb/chats/{id}/context
+    inbox.read      GET  /api/v1/inbox (the 今天 page)
+    todos.read      GET  /api/v1/todos (the 今天 page)
     (none)          GET  /api/v1/health, the hub's one route without authentication: is the hub reachable now?
 
 The manager relays these to the hub. While its bus connection is down it answers 503 manager_offline (nothing was sent);

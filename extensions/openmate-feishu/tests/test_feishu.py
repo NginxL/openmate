@@ -53,7 +53,8 @@ class ManifestTest(unittest.TestCase):
 
     def test_permissions(self):
         perms = MANIFEST["permissions"]
-        self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask", "kb.read"])
+        self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask", "inbox.read", "kb.read",
+                                                "todos.read"])
         self.assertEqual(perms["network"], ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com",
                                             "larkoffice.com", "*.larkoffice.com"])
         self.assertEqual(MANIFEST["host_integrations"], [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}])
@@ -84,6 +85,7 @@ class ManifestTest(unittest.TestCase):
     def test_pages_and_cards(self):
         ui = {u["id"]: u for u in MANIFEST["contributes"]["ui"]}
         self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
+            "today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "today"),
             "chats": ("nav_page", "list", None), "chats-today": ("overview_card", None, "chats"),
             "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar")})
         self.assertTrue(all(1 <= len(u["title"]) <= 40 for u in ui.values()))

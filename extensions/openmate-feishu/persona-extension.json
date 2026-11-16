@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -33,6 +33,8 @@
       {"id": "matefeishu", "instructions": "assistant/instructions.md"}
     ],
     "ui": [
+      {"id": "today", "title": "今天", "placement": "nav_page", "icon": "bell"},
+      {"id": "today-card", "title": "今天", "placement": "overview_card", "opens": "today"},
       {"id": "chats", "title": "飞书", "placement": "nav_page", "icon": "list"},
       {"id": "chats-today", "title": "飞书今天", "placement": "overview_card", "opens": "chats"},
       {"id": "calendar", "title": "日程", "placement": "nav_page", "icon": "calendar"},
@@ -133,7 +135,7 @@
   },
   "permissions": {
     "network": ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com", "larkoffice.com", "*.larkoffice.com"],
-    "hub": ["agents.control", "agents.read", "assistant.ask", "kb.read"]
+    "hub": ["agents.control", "agents.read", "assistant.ask", "inbox.read", "kb.read", "todos.read"]
   },
   "host_integrations": [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}]
 }

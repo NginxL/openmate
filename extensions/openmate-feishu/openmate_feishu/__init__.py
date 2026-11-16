@@ -51,9 +51,15 @@ def platform(manifest_path: str = "") -> Platform:
 
 
 def _agenda_pages(app):
-    from . import agenda  # the calendar page and card (lark-cli, read-only)
+    # the calendar page and card (lark-cli, read-only) and the 今天 page and card, sharing one read of the calendar
+    from . import agenda, today
 
-    return agenda.pages(app)
+    shared = agenda.Agenda(app)
+    persona = today.PersonaToday(app)
+    return {
+        agenda.PAGE: agenda.CalendarPage(app, shared), agenda.CARD: agenda.CalendarPage(app, shared, card=True),
+        today.PAGE: today.TodayPage(app, shared, persona), today.CARD: today.TodayPage(app, shared, persona, card=True),
+    }
 
 
 def main() -> int:
