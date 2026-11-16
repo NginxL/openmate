@@ -653,6 +653,42 @@ class ReadTest(Base):
         self.assertEqual(self.b.user_name(ME), "示例用户")
         self.assertEqual(self.b.user_name(""), "")
 
+    def test_document_mentions(self):
+        d = {"status": "NEW", "docFeed": {"id": "f1", "title": "示例方案", "url": "https://example.feishu.cn/wiki/WikiTok1", "type": "WIKI"},
+             "docMessages": {
+                 "m1": {"id": "m1", "type": "MENTION", "fromId": "7003", "isAtMe": True, "createTime": "1763300000000",
+                        "content": "@示例用户 这一段要改吗？", "extra": '{"comment_id": "c9", "reply_id": "r1"}'},
+                 "m2": {"id": "m2", "type": "REPLY", "fromId": "7004", "isAtMe": True,
+                        "richText": {"elements": {"e1": {"property": {"text": {"content": "看下这里"}}}}},
+                        "extra": '{"data": {"commentId": "c10"}}'},
+                 "m3": {"id": "m3", "type": "COMMENT", "fromId": "7003", "isAtMe": False, "content": "not for me"},
+                 "m4": {"id": "m4", "type": "MENTION", "fromId": ME, "isAtMe": True, "content": "my own"},
+                 "m5": {"id": "m5", "type": "SHARE", "fromId": "7003", "isAtMe": True, "content": "a share"},
+                 "m6": {"id": "m6", "type": "MENTION", "fromId": "7005", "isAtMe": True, "content": "no extra"}}}
+        got = larkagentx.doc_mentions(d, ME)
+        self.assertEqual([(m.id, m.comment_id, m.from_id, m.text, m.kind) for m in got],
+                         [("m1", "c9", "7003", "@示例用户 这一段要改吗？", "mention"), ("m2", "c10", "7004", "看下这里", "reply"),
+                          ("m6", "", "7005", "no extra", "mention")])
+        self.assertEqual((got[0].doc_url, got[0].doc_title, got[0].at), ("https://example.feishu.cn/wiki/WikiTok1", "示例方案", 1763300000.0))
+        self.assertEqual(larkagentx.doc_mentions({"docMessages": d["docMessages"]}, ME), [], "no document: nothing")
+
+    def test_a_comment_reply_goes_through_lark_cli(self):
+        b = self.backend()
+        with self.assertRaises(larkagentx.BackendError):
+            b.reply_doc_comment("https://example.feishu.cn/docx/T", "c1", "好")  # no lark-cli on this backend
+
+        class CLI:
+            def __init__(self):
+                self.calls = []
+
+            def add_reply(self, url, cid, text):
+                self.calls.append((url, cid, text))
+                return "r9"
+
+        b.cli = CLI()
+        self.assertEqual(b.reply_doc_comment("https://example.feishu.cn/docx/T", "c1", "好"), "r9")
+        self.assertEqual(b.cli.calls, [("https://example.feishu.cn/docx/T", "c1", "好")])
+
     def test_a_reaction(self):
         S.api_answers["reactions.PutReactionRequest"] = {}
         self.b.react("500", "101", "THINKING")

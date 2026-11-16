@@ -204,6 +204,7 @@ class ConnectorApp:
             try:
                 self.backend = self._make_backend(self.config, self.data_dir)
                 self.backend.on_credentials = self._credentials_rotated
+                self.backend.on_doc_mention = self._doc_mention
             except BackendError as e:
                 self.setup_error = e.message
                 self.setup_kind = e.kind
@@ -336,6 +337,13 @@ class ConnectorApp:
             self.peer.notify("connector.changed", {"contribution": self.cid, "scope": scope})
         if scope == "inbox":
             self._ui().update_badge()
+
+    def _doc_mention(self, mention) -> None:
+        if self.agent is not None:
+            try:
+                self.agent.on_doc_mention(mention)
+            except Exception:
+                log.exception("a document mention was not taken")
 
     def _ui(self) -> "UI":
         with self.lock:

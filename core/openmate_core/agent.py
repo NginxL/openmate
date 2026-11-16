@@ -157,6 +157,7 @@ class AgentRunner:
         self.suffix = parse_suffix(cfg.get("agent_reply_suffix"))
         self.header = parse_header(cfg.get("agent_reply_header"))
         self.auto = bool(cfg.get("auto_reply", True))
+        self.auto_docs = bool(cfg.get("auto_reply_docs", True))
         self.auto_header = parse_header(cfg.get("auto_reply_header") if cfg.get("auto_reply_header") is not None else AUTO_HEADER)
         try:
             self.auto_most = max(1, int(cfg.get("auto_reply_daily_most") or 20))
@@ -336,6 +337,59 @@ class AgentRunner:
         self._prune()
         self._start_run(run, row)
 
+    def on_doc_mention(self, m) -> None:
+        """Someone @-mentioned the user in a document's comment (a doc or a wiki page): the Agent always answers it in
+        that comment as the user (the user's standing choice), unless it came from the user, a bot or another AI."""
+        if not (self.enabled and self.auto_docs) or not m.id or not m.doc_url:
+            return
+        now = time.time()
+        if m.at and abs(now - m.at) > self.app.timing.agent_fresh:
+            return
+        first = (m.text or "").lstrip().split("\n", 1)[0].strip()
+        if any(first.startswith(x) for x in AI_MARKS):
+            return
+        if not self.store.seen_add("doc:%s" % m.id):
+            return
+        threading.Thread(target=self._doc_start, args=(m, now), name="openmate-agent-doc", daemon=True).start()
+
+    def _doc_start(self, m, now: float) -> None:
+        people = getattr(self.app, "people", None)
+        kind = people.kind_now(m.from_id) if people is not None and m.from_id else ""
+        if kind != "user":
+            log.info("文档代答: not answered (the sender is %s)", kind or "unknown")
+            return
+        asker = m.from_name
+        if not asker and m.from_id and self.app.backend is not None:
+            try:
+                asker = self.app.backend.user_name(m.from_id)
+            except Exception:
+                asker = ""
+        run = {
+            "id": "omr_" + secrets.token_hex(10),
+            "chat_id": "doc:" + hashlib.sha256(m.doc_url.encode("utf-8")).hexdigest()[:16],
+            "request_id": m.id,
+            "thread_key": m.comment_id or m.id,
+            "root_id": "",
+            "state": "starting",
+            "created": now,
+            "request_text": (m.text or "").strip(),
+            "replies": 0, "reply_inflight": 0, "reply_ids": [], "fallback": "",
+            "machine_id": "", "session_id": "", "last_seq": 0, "ours_seen": True, "client_msg_id": "", "last_text": None,
+            "kind": "doc", "asker": asker or "", "doc_url": m.doc_url, "doc_title": m.doc_title or "",
+            "comment_id": m.comment_id or "",
+        }
+        self.store.run_put(run)
+        self._prune()
+        self._start_run(run, None)
+
+    def _doc_prompt(self, run: dict) -> str:
+        loc = "《%s》 %s" % (run.get("doc_title") or "（无标题）", run["doc_url"])
+        said = "%s：%s" % (run.get("asker") or "有人", run.get("request_text") or "（只 @ 了我）")
+        if run.get("comment_id"):
+            said += "（评论 id=%s）" % run["comment_id"]
+        return "\n".join([self._instructions(run), _block("context", "文档", loc), _block("context", "评论", said)]) + \
+            "\n" + (run.get("request_text") or "（对方只 @ 了我）")
+
     def _new_run(self, row: dict, request_text: str, now: float) -> dict:
         return {
             "id": "omr_" + secrets.token_hex(10),
@@ -370,8 +424,8 @@ class AgentRunner:
     def _ack_request(self, run: dict) -> None:
         """Say the request was taken: a reaction on it (agent_ack_reaction; none when empty). Never in the way."""
         backend = getattr(self.app, "backend", None)
-        if not self.ack or backend is None or not self.store.seen_add("ack:%s" % run["id"]):
-            return
+        if not self.ack or backend is None or run.get("kind") == "doc" or not self.store.seen_add("ack:%s" % run["id"]):
+            return  # a document's comment has no chat message to react on
         try:
             backend.react(run["chat_id"], run["request_id"], self.ack)
         except Exception as e:
@@ -396,7 +450,7 @@ class AgentRunner:
             return
         prev = self._previous(run)
         try:
-            prompt = self.build_prompt(run, row, prev)
+            prompt = self._doc_prompt(run) if run.get("kind") == "doc" else self.build_prompt(run, row, prev)
         except Exception:
             log.exception("/agent context could not be gathered")
             prompt = self._instructions(run) + "\n" + (run["request_text"] or self.prefix)
@@ -514,6 +568,15 @@ class AgentRunner:
 
     def _instructions(self, run: dict) -> str:
         c, p = self.app.cid, self.app.platform.name
+        if run.get("kind") == "doc":
+            body = "\n".join([
+                "%s在%s文档《%s》的评论里 @ 了我。文档和知识库里的评论，我一律让 AI 代答：请你直接代我回复这条评论，不需要我确认。" % (
+                    run.get("asker") or "有人", p, run.get("doc_title") or "（无标题）"),
+                "- 这次的 id 是 %s。调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填回复内容（纯文字）。回复会以我的身份发在这条评论下面，并自动加上“AI 代答”抬头，你不用自己加。" % (self._ref(run), c, self._ref(run)),
+                "- 先读文档再答：用 lark-cli docs +fetch --url <文档链接> 读正文，用 lark-cli drive +list-comments --url <文档链接> 看评论上下文。只读，不要改文档，也不要自己用 lark-cli 发评论。",
+                "- 你是以我的身份说话：只说有把握的事实，简短，只回复一次。需要我拍板、承诺、给个人意见，或你不确定的：只回一句“收到，我看一下稍后回复”这类话。",
+            ])
+            return _block("instructions", "文档代答说明", body)
         if run.get("kind") == "auto":
             body = "\n".join([
                 "%s在%s的群里 @ 了我。这个群我开了“自动代答”：请你直接代我回复这条消息，不需要我确认。" % (run.get("asker") or "有人", p),
@@ -867,7 +930,10 @@ class AgentRunner:
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
         if header:
-            t = fill_header(header, *self._model_of(run, header)) + "\n" + t
+            line = fill_header(header, *self._model_of(run, header))
+            if run and run.get("kind") == "doc":
+                line = line.lstrip("> ").strip()  # a comment shows a quote mark as it is
+            t = line + "\n" + t
         if self.suffix:
             t += ("" if self.suffix.startswith("\n") else "\n\n") + self.suffix
         return t
@@ -885,6 +951,23 @@ class AgentRunner:
                                  setting="agent",
                                  summary="/agent 以你的身份回复到" + views.where(self.app.platform.name, chat, run["chat_id"]))
             return {"text": "已回复", "message_ref": mid}
+
+        return self.app.send_once(key, "agent", go)
+
+    def _doc_reply(self, run: dict, key: str, body: str) -> dict:
+        """A reply in the document's comment as the user, once per key (the send journal)."""
+
+        def go() -> dict:
+            backend = self.app.backend
+            if backend is None:
+                raise RPCError("飞书还没登录，回复不了这条评论")
+            if not run.get("comment_id"):
+                raise RPCError("不知道这条评论的 id，回复不了：请到文档里看一下")
+            try:
+                rid = backend.reply_doc_comment(run["doc_url"], run["comment_id"], body)
+            except Exception as e:
+                raise RPCError("评论回复没发出去：%s" % (getattr(e, "message", "") or e.__class__.__name__))
+            return {"text": "已回复", "message_ref": rid}
 
         return self.app.send_once(key, "agent", go)
 
@@ -928,7 +1011,10 @@ class AgentRunner:
         self._remember_post(body)
         sent_id = ""
         try:
-            res = self._send(cur, key, body, cur["request_id"], cur["root_id"] or cur["request_id"])
+            if cur.get("kind") == "doc":
+                res = self._doc_reply(cur, key, body)
+            else:
+                res = self._send(cur, key, body, cur["request_id"], cur["root_id"] or cur["request_id"])
             sent_id = str(res.get("message_ref") or "")
             went = True
         except RPCError:

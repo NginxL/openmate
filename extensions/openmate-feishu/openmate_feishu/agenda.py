@@ -44,7 +44,8 @@ class CalendarError(Exception):
 
 
 class LarkCLI:
-    """lark-cli as the user installed it: `calendar +agenda` only."""
+    """lark-cli as the user installed it: `calendar +agenda` (a read), and `drive +add-reply` for 自动代答 in a
+    document's comment (a reply as the user, under a comment they were @-mentioned in)."""
 
     def __init__(self, config: dict, run: Callable = subprocess.run):
         self.setting = str(config.get("lark_cli") or "").strip()
@@ -71,6 +72,40 @@ class LarkCLI:
                 path = lines[-1] if lines and os.path.isabs(lines[-1]) else ""
         self._bin = path
         return path
+
+    def add_reply(self, doc_url: str, comment_id: str, text: str) -> str:
+        """Reply to a document's comment as the user; the reply's id ("" when lark-cli doesn't say)."""
+        b = self.bin()
+        if not b:
+            self._bin = None
+            raise CalendarError("没找到 lark-cli，回复不了文档评论", "missing")
+        if not doc_url or not comment_id or not text.strip():
+            raise CalendarError("缺文档链接、评论 id 或内容", "failed")
+        content = json.dumps([{"type": "text", "text": text}], ensure_ascii=False)
+        args = [b] + (["--profile", self.profile] if self.profile else []) + [
+            "drive", "+add-reply", "--as", "user", "--url", doc_url, "--comment-id", comment_id, "--content", content,
+            "--format", "json"]
+        env = dict(os.environ)
+        env["PATH"] = os.path.dirname(b) + os.pathsep + env.get("PATH", "")
+        try:
+            p = self._run(args, capture_output=True, text=True, timeout=TIMEOUT, env=env, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            raise CalendarError("lark-cli 回复评论超时了；回复可能已经发出，请到文档里看一下", "uncertain")
+        except OSError:
+            raise CalendarError("lark-cli 启动不了", "missing")
+        try:
+            d = json.loads(p.stdout or "{}")
+        except ValueError:
+            raise CalendarError("lark-cli 的回答看不懂（版本不对？）", "failed")
+        if not isinstance(d, dict) or not d.get("ok"):
+            err = d.get("error") if isinstance(d, dict) and isinstance(d.get("error"), dict) else {}
+            kind = "%s %s" % (err.get("type") or "", err.get("subtype") or "")
+            if "authorization" in kind or "scope" in kind or "login" in kind or "token" in kind:
+                raise CalendarError("还没授权回复文档评论：在这台电脑上运行 lark-cli%s auth login，按提示在飞书里确认" % (
+                    " --profile " + self.profile if self.profile else ""), "auth")
+            raise CalendarError("lark-cli 回复评论失败（%s）" % (kind.strip() or "原因不明"), "failed")
+        data = d.get("data") if isinstance(d.get("data"), dict) else {}
+        return str(data.get("reply_id") or data.get("id") or "")
 
     def agenda(self, start: _dt.datetime, end: _dt.datetime) -> List[dict]:
         b = self.bin()

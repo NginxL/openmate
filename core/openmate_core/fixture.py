@@ -46,6 +46,9 @@ class FixtureWorld:
         self.people.update(self.bots)
         self.kinds_fail = False  # people_kinds raises
         self.reactions: List[Tuple[str, str, str]] = []  # (chat, message, reaction) put by react
+        self.doc_replies: List[Tuple[str, str, str]] = []  # (doc url, comment id, text) by reply_doc_comment
+        self.doc_reply_fail = False
+        self.doc_listener: Optional[Callable] = None
         self.react_fail = False
         self.kinds_calls: List[List[str]] = []
         self.chats: Dict[str, Chat] = {}
@@ -136,6 +139,13 @@ class FixtureWorld:
             listener(m)
         return m
 
+    def mention_in_doc(self, mention) -> None:
+        """Someone @-mentions the user in a document's comment (handed to the live listener, if connected)."""
+        with self.lock:
+            listener = self.doc_listener
+        if listener is not None:
+            listener(mention)
+
     def drop(self) -> None:
         """End the current live connection (listen returns)."""
         self.drop_event.set()
@@ -204,6 +214,7 @@ class FixtureBackend(Backend):
             return
         with w.lock:
             w.listener = on_message
+            w.doc_listener = lambda m: self.on_doc_mention(m) if self.on_doc_mention is not None else None
         w.up_event.set()
         on_link("up", "")
         try:
@@ -215,6 +226,7 @@ class FixtureBackend(Backend):
         finally:
             with w.lock:
                 w.listener = None
+                w.doc_listener = None
             w.up_event.clear()
 
     # reads
@@ -259,6 +271,14 @@ class FixtureBackend(Backend):
         if c is None:
             raise BackendError("没有这个会话", "not_found")
         return c
+
+    def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
+        w = self.world
+        with w.lock:
+            if w.doc_reply_fail or not comment_id:
+                raise BackendError("这条评论回复不了", "unavailable")
+            w.doc_replies.append((doc_url, comment_id, text))
+            return "reply_%d" % len(w.doc_replies)
 
     def react(self, chat_id: str, message_id: str, reaction: str) -> None:
         w = self.world

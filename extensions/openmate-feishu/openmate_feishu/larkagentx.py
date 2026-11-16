@@ -35,8 +35,8 @@ import types
 from typing import Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, unquote, urlsplit
 
-from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, LoginDone, LoginQR, Media,
-                                   Message, Person, SendRejected)
+from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, DocMention, LoginDone, LoginQR,
+                                   Media, Message, Person, SendRejected)
 
 from . import launch, pin
 
@@ -73,6 +73,8 @@ _ASCII_WORD = re.compile(r"^[A-Za-z0-9_.:#/@%+=-]+$")  # an identifier, a key, a
 CHAT_P2P = 1
 AT_TAG = 5
 PUSH_CMD = 6
+PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
+DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
 
 FIRST_POSITION = 1  # LarkAgentX reads history from position 1 up
 HISTORY_ROUNDS = 4  # gaps (recalled messages) are filled by asking for older positions at most this often
@@ -166,7 +168,11 @@ def create(config: Dict, data_dir: str) -> Backend:
     pin.verify(commit)
     if proxy:
         use_proxy(proxy, os.environ)
-    return LarkXBackend(load_larkx(data_dir, region), region)
+    from .agenda import LarkCLI
+
+    b = LarkXBackend(load_larkx(data_dir, region), region)
+    b.cli = LarkCLI(config)
+    return b
 
 
 # ---------------------------------------------------------------- small helpers
@@ -211,6 +217,72 @@ def _seconds(v) -> float:
 def _id(v) -> str:
     s = str(v or "").strip()
     return "" if s in ("", "0") else s
+
+
+def doc_mentions(d: dict, me_id: str) -> List[DocMention]:
+    """The @-mentions of the user in a PushDocFeedRequest (as MessageToDict writes it): the document, who, what, and
+    the comment's id (DocMessage.extra, a JSON string, names it)."""
+    feed = d.get("docFeed") if isinstance(d.get("docFeed"), dict) else {}
+    url, title = str(feed.get("url") or ""), str(feed.get("title") or "")
+    out: List[DocMention] = []
+    for key, m in sorted((d.get("docMessages") or {}).items()):
+        if not isinstance(m, dict) or not m.get("isAtMe"):
+            continue
+        if str(m.get("type") or "") not in DOC_MENTION_TYPES:
+            continue
+        frm = _id(m.get("fromId"))
+        if not frm or frm == me_id or not url:
+            continue
+        extra: dict = {}
+        raw = m.get("extra")
+        if isinstance(raw, str) and raw.strip().startswith("{"):
+            try:
+                v = json.loads(raw)
+                extra = v if isinstance(v, dict) else {}
+            except ValueError:
+                extra = {}
+        cid = _find_key(extra, ("comment_id", "commentId", "commentID", "comment_id_str"))
+        text = str(m.get("content") or "").strip() or _plain(m.get("richText"))
+        at = _int(m.get("createTime") or m.get("updateTime"))
+        out.append(DocMention(id=_id(m.get("id")) or str(key), doc_url=url, doc_title=title, comment_id=cid, from_id=frm,
+                              text=text, kind=str(m.get("type") or "").lower(), at=at / 1000.0 if at > 10 ** 12 else float(at)))
+    return out
+
+
+def _find_key(d, names, depth: int = 0) -> str:
+    """The first value of one of names in a nested dict (a JSON's), as a string; "" when none."""
+    if not isinstance(d, dict) or depth > 4:
+        return ""
+    for n in names:
+        if d.get(n) not in (None, "", 0):
+            return str(d[n])
+    for v in d.values():
+        if isinstance(v, dict):
+            got = _find_key(v, names, depth + 1)
+            if got:
+                return got
+    return ""
+
+
+def _plain(rich) -> str:
+    """The text of a RichText as MessageToDict writes it: its elements' text properties, in order."""
+    out: List[str] = []
+
+    def walk(v, depth=0):
+        if depth > 8:
+            return
+        if isinstance(v, dict):
+            for k, x in v.items():
+                if k in ("text", "content") and isinstance(x, str):
+                    out.append(x)
+                else:
+                    walk(x, depth + 1)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+
+    walk(rich)
+    return "".join(out).strip()
 
 
 def chatter_kind(v) -> str:
@@ -291,6 +363,8 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
+        self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
+        self._doc_feeds_heard = False
 
     # ------------------------------------------------------------ the session
 
@@ -610,6 +684,9 @@ class LarkXBackend(Backend):
                 raise
             except Exception:
                 pass
+        if cmd == PUSH_DOC_FEED_CMD and packet.get("payload"):
+            inbox.put({"doc_feed": packet["payload"]})  # read off the loop
+            return
         if cmd != PUSH_CMD:
             return
         try:
@@ -628,6 +705,9 @@ class LarkXBackend(Backend):
             item = inbox.get()
             if item is None:
                 return
+            if "doc_feed" in item:
+                self._doc_feed(item["doc_feed"], me, client)
+                continue
             try:
                 msg = self._message(item, me.id, client)
             except Exception as e:
@@ -639,6 +719,46 @@ class LarkXBackend(Backend):
                 on_message(msg)
             except Exception as e:
                 log.warning("a pushed message was not taken (%s)", type(e).__name__)
+
+    # ------------------------------------------------------------ documents
+
+    def _doc_feed(self, payload: bytes, me: Account, client) -> None:
+        """A document's notices: an @-mention of the user in a comment goes to the core (on_doc_mention)."""
+        try:
+            from google.protobuf.json_format import MessageToDict
+            from larkx.proto import lark_all_pb2
+
+            req = lark_all_pb2.docs.PushDocFeedRequest()
+            req.ParseFromString(payload)
+            d = MessageToDict(req)
+        except Exception as e:
+            log.info("a document notice could not be decoded (%s)", type(e).__name__)
+            return
+        mentions = doc_mentions(d, me.id)
+        if not self._doc_feeds_heard:
+            self._doc_feeds_heard = True
+            log.info("document notices are heard on the live link")
+        if any(not m.comment_id for m in mentions):
+            note_shape("document notice (no comment id)", d)
+        for m in mentions:
+            if not m.from_name and m.from_id:
+                m.from_name = self._chatter_name(client, m.from_id)
+            cb = self.on_doc_mention
+            if cb is not None:
+                try:
+                    cb(m)
+                except Exception as e:
+                    log.warning("a document mention was not taken (%s)", type(e).__name__)
+
+    def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
+        if self.cli is None:
+            raise BackendError("没有 lark-cli，回复不了文档评论", "unsupported")
+        from .agenda import CalendarError
+
+        try:
+            return self.cli.add_reply(doc_url, comment_id, text)
+        except CalendarError as e:
+            raise BackendError(e.message, e.kind)
 
     # ------------------------------------------------------------ messages
 

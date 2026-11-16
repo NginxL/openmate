@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -118,6 +118,12 @@
         "type": "boolean",
         "title": "自动代答",
         "description": "在“飞书”页里开了自动代答的群，有人 @ 你时 AI 直接以你的身份回复，不用确认（要先打开 /agent）。私聊、机器人和 @所有人 不代答。",
+        "default": true
+      },
+      "auto_reply_docs": {
+        "type": "boolean",
+        "title": "文档评论代答",
+        "description": "有人在飞书文档或知识库的评论里 @ 你时，AI 直接以你的身份在那条评论下回复，不用确认（要先打开 /agent；用 lark-cli 发回复）。",
         "default": true
       },
       "auto_reply_daily_most": {

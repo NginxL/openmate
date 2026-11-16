@@ -77,6 +77,21 @@ class Chat:
 
 
 @dataclass
+class DocMention:
+    """Someone @-mentioned the user in a document's comment (a doc, a wiki page, a sheet…): once per notice id."""
+
+    id: str
+    doc_url: str
+    doc_title: str = ""
+    comment_id: str = ""
+    from_id: str = ""
+    from_name: str = ""
+    text: str = ""
+    kind: str = "mention"  # mention | comment | reply
+    at: float = 0.0
+
+
+@dataclass
 class Person:
     """A search hit: kind user (id is a user id) or group (id is a chat id)."""
 
@@ -165,6 +180,10 @@ class Backend(abc.ABC):
     #: seals them in the hub. Never write credentials anywhere yourself.
     on_credentials: Optional[Callable[[Dict], None]] = None
 
+    #: Set by the core: call it with a DocMention when the live link hears the user was @-mentioned in a document's
+    #: comment (from the listener's own thread; it returns at once).
+    on_doc_mention: Optional[Callable[["DocMention"], None]] = None
+
     #: The version of how this backend reads messages into text. When it is newer than the one a store was filled
     #: with, the core reads the recent chats with a message of `rerender_types` once more (a stored message's text
     #: is renewed when it reads otherwise now).
@@ -222,6 +241,11 @@ class Backend(abc.ABC):
     @abc.abstractmethod
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         """A person's display name ("" when unknown); chat_id when the name is per chat (an alias in a group)."""
+
+    def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
+        """Reply to a document's comment as the user; the reply's id. BackendError when it can't (no such comment, a
+        solved one, no rights)."""
+        raise BackendError("这个平台不支持回复文档评论", "unsupported")
 
     def react(self, chat_id: str, message_id: str, reaction: str) -> None:
         """Put a reaction (the service's emoji key, e.g. THINKING) on a message, as the account. BackendError when

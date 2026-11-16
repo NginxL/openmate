@@ -63,7 +63,8 @@ class ManifestTest(unittest.TestCase):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
                                        "agent_machine", "agent_launcher", "agent_reply_header", "agent_ack_reaction",
-                                       "auto_reply", "auto_reply_daily_most", "auto_reply_header", "agent_reply_suffix",
+                                       "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_header",
+                                       "agent_reply_suffix",
                                        "history_chats", "triage_rules", "lark_cli", "lark_cli_profile"])
         self.assertNotIn("default", props["larkx_python"])
         self.assertEqual(config_defaults(MANIFEST).get("lark_cli_profile", ""), "", "lark-cli's default unless named")

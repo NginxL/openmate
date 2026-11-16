@@ -193,6 +193,27 @@ class AgendaTest(unittest.TestCase):
         now[0] += 900
         self.assertIn("auth login", items(page.render({"ui_version": 6}))[0]["detail"], "too old: says why")
 
+    def test_a_comment_reply(self):
+        runner = Runner({"ok": True, "data": {"reply_id": "r7"}})
+        _, _, _, fake = pages(runner=runner)
+        cli = agenda.LarkCLI({"lark_cli": fake, "lark_cli_profile": "persona"}, run=runner)
+        self.assertEqual(cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "第一行\n第二行"), "r7")
+        args = runner.calls[-1][0]
+        self.assertEqual(args[:9], [fake, "--profile", "persona", "drive", "+add-reply", "--as", "user", "--url",
+                                    "https://example.feishu.cn/wiki/W1"])
+        self.assertEqual(args[9:11], ["--comment-id", "c1"])
+        self.assertEqual(json.loads(args[12]), [{"type": "text", "text": "第一行\n第二行"}])
+        runner.answer = {"ok": False, "error": {"type": "authorization", "subtype": "missing_scope"}}
+        with self.assertRaises(agenda.CalendarError) as e:
+            cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
+        self.assertEqual(e.exception.kind, "auth")
+        with self.assertRaises(agenda.CalendarError):
+            cli.add_reply("https://example.feishu.cn/wiki/W1", "", "好")
+        runner.raise_ = subprocess.TimeoutExpired("lark-cli", 25)
+        with self.assertRaises(agenda.CalendarError) as e:
+            cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
+        self.assertEqual(e.exception.kind, "uncertain")
+
     def test_read_once_a_minute(self):
         now = [NOW]
         page, card, runner, _ = pages(clock=lambda: now[0])
