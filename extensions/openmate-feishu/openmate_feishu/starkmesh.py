@@ -25,6 +25,8 @@ from openmate_core.ui import Fresh, Page, empty, row, stat, tile, when
 log = logging.getLogger("openmate.starkmesh")
 
 PAGE = "starkmesh"
+TITLE = "中转站 · StarkMesh"  # the sidebar says 中转站 (the 资产 group of the user's console), the page names the gateway
+CARD_TITLE = "中转站"
 EXAMPLE_URL = "http://127.0.0.1:18080"  # the gateway on this computer's tunnel; the user writes it (a network permission)
 WAIT = 10.0
 AHEAD = 30.0
@@ -32,6 +34,7 @@ STALE = 600.0
 KEEP = 300.0
 REFRESH = 120
 WINDOWS = (("five_hour", "5 小时"), ("seven_day", "本周"), ("seven_day_fable", "Fable 本周"))
+ACCOUNT_WINDOWS = (("five_hour", "5 小时"), ("seven_day", "7D"), ("seven_day_fable", "Fable 7D"))  # an account's bars
 PERMISSIONS = "accounts.read、accounts.usage.read、accounts.stats.read、dashboard.read"
 
 
@@ -270,11 +273,30 @@ class StarkMeshPage(Page):
                         "ratio": round(min(1.0, w["ratio"]), 4), "detail": "%d 个号里算%s" % (w["of"], reset), "tone": tone})
         return out
 
+    def account_bars(self, a: dict, s: Snapshot) -> List[dict]:
+        """An account's windows as the user's screenshot has them: what is left (not what is used), a bar, and when it
+        resets ("5 小时 ▬▬▬ 100% 11/16 15:40")."""
+        u = s.usage.get(str(a.get("id"))) or {}
+        out = []
+        for key, label in ACCOUNT_WINDOWS:
+            w = u.get(key)
+            if not isinstance(w, dict):
+                continue
+            left = max(0.0, min(100.0, 100.0 - float(w.get("utilization") or 0.0)))
+            t = _ts(w.get("resets_at"))
+            if not t and w.get("remaining_seconds"):
+                t = s.now + float(w["remaining_seconds"])
+            reset = _dt.datetime.fromtimestamp(t, self.app.tz).strftime("%m/%d %H:%M") if t else "重置时间未知"
+            out.append({"type": "progress", "key": "a:%s:%s" % (a.get("id"), key), "label": label,
+                        "ratio": round(left / 100.0, 4), "detail": "剩 %d%% · %s" % (round(left), reset),
+                        "tone": tone_of(left / 100.0)[1]})
+        return out
+
     def render(self, params: dict) -> dict:
         version = int(params.get("ui_version") or 1)
         s, problem = self._snapshot(version)
         if s is None:
-            return {"title": "StarkMesh", "sections": [{"items": [problem]}], "refresh_after": REFRESH}
+            return {"title": TITLE, "sections": [{"items": [problem]}], "refresh_after": REFRESH}
         st = s.stats
         errors = [a for a in s.accounts if state_of(a, s.now)[1] == "danger"]
         heads = [("服务", "%d/%d" % (len(s.ok), len(s.accounts)), "可用账号 / 全部", "power", "green" if not errors else "amber"),
@@ -300,16 +322,14 @@ class StarkMeshPage(Page):
         order = {"danger": 0, "caution": 1, "neutral": 2, "positive": 3}
         for a in sorted(s.accounts, key=lambda a: (order.get(state_of(a, s.now)[1], 9), str(a.get("name") or ""))):
             text, tone = state_of(a, s.now)
-            u = s.usage.get(str(a.get("id"))) or {}
-            parts = ["%s %d%%" % (lbl, round(float((u.get(k) or {}).get("utilization") or 0)))
-                     for k, lbl in (("five_hour", "5h"), ("seven_day", "周")) if isinstance(u.get(k), dict)]
             sub = " · ".join(x for x in (str(a.get("platform") or ""), str(a.get("type") or ""),
                                           str(a.get("error_message") or "")[:60]) if x)
-            rows.append(row(str(a.get("name") or a.get("id")), sub, " · ".join(parts), key="a:%s" % a.get("id"),
+            rows.append(row(str(a.get("name") or a.get("id")), sub, "", key="a:%s" % a.get("id"),
                             badge={"text": text, "tone": tone}))
+            rows += self.account_bars(a, s)
         accounts = {"title": "账号 · %d" % len(s.accounts), "items": rows or [empty("没有账号", "", version)]}
         updated = "数据读于 %s" % when(s.now, self.app.tz)
-        view = {"title": "StarkMesh", "refresh_after": REFRESH,
+        view = {"title": TITLE, "refresh_after": REFRESH,
                 "sections": [{"items": [head]}, quota, accounts, {"items": [{"type": "text", "style": "caption", "text": updated}]}]}
         if version >= 8:
             view["layout"] = "columns"
@@ -326,7 +346,7 @@ class StarkMeshPage(Page):
         try:
             s = self.mesh.read()
         except StarkMeshError as e:
-            return {"title": "StarkMesh", "items": [empty("StarkMesh 读不到", e.message, version)]}
+            return {"title": CARD_TITLE, "items": [empty("StarkMesh 读不到", e.message, version)]}
         parts = ["可用号 %d/%d" % (len(s.ok_claude), len(s.claude))]
         for key, label in WINDOWS[:2]:
             w = s.window(key)
@@ -339,9 +359,9 @@ class StarkMeshPage(Page):
                 items.append({"type": "grid", "max_columns": 3, "key": "sm:quota", "tiles": tiles})
         else:
             items += self.quota_bars(s)
-        sec: Dict[str, Any] = {"title": "StarkMesh", "items": items}
+        sec: Dict[str, Any] = {"title": CARD_TITLE, "items": items}
         if links and version < 8:
-            items.append(row("打开 StarkMesh ›", "", "", "go:starkmesh", key="link:starkmesh"))
+            items.append(row("打开中转站 ›", "", "", "go:starkmesh", key="link:starkmesh"))
         return sec
 
     def action(self, params: dict) -> dict:

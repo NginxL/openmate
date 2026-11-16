@@ -49,6 +49,9 @@ def stats(view):
 class ChatsPageTest(unittest.TestCase):
     def test_what_needs_me_and_a_chat_opened_from_it(self):
         h = signed_in(self)
+        # the seed's lines are minutes old: right after midnight they are yesterday's, so the chatter group gets one now
+        h.world.push("chat_example_chatter", "user_example_c", "早")
+        wait_until(lambda: "早" in str(h.app.store.messages_before("chat_example_chatter", None, 3)), what="stored")
         view = ui(h, "render", contribution="chats", state="", ui_version=6, placement="nav_page", size="full")
         self.assertEqual(view["title"], "飞书今天")
         self.assertEqual(view["refresh_after"], 60)

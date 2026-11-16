@@ -7,4 +7,4 @@ connector capabilities (status, tools, actions, events, inbox, archive, login, t
 Standard library only, Python 3.9 or newer.
 """
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"

@@ -103,10 +103,25 @@ class StarkMeshTest(unittest.TestCase):
         self.assertAlmostEqual(bars[2]["ratio"], 0.75)
         self.assertEqual(quota["footer"], "最近一次重置在 1 小时 49 分后")
         accounts = view["sections"][2]
-        self.assertEqual([(r["title"], r["badge"]["text"]) for r in accounts["items"]],
+        rows = [it for it in accounts["items"] if it["type"] == "row"]
+        self.assertEqual([(r["title"], r["badge"]["text"]) for r in rows],
                          [("openai-x", "出错"), ("claude-limited", "限流中"), ("claude-a", "可用"), ("claude-b", "可用"), ("claude-c", "可用")])
-        self.assertEqual(accounts["items"][2]["value"], "5h 20% · 周 10%")
-        self.assertIn("token expired", accounts["items"][0]["subtitle"])
+        self.assertIn("token expired", rows[0]["subtitle"])
+        self.assertNotIn("value", rows[2], "the bars say it")
+        # each account: its windows' bars under it, what is LEFT and when it resets
+        at = [i for i, it in enumerate(accounts["items"]) if it.get("title") == "claude-a"][0]
+        bars = accounts["items"][at + 1:at + 4]
+        reset = dt.datetime.fromtimestamp(NOW + 6540, TZ).strftime("%m/%d %H:%M")
+        self.assertEqual([(b["label"], b["detail"], b["tone"]) for b in bars],
+                         [("5 小时", "剩 80% · " + reset, "positive"),
+                          ("7D", "剩 90% · " + dt.datetime.fromtimestamp(NOW + 144000, TZ).strftime("%m/%d %H:%M"), "positive"),
+                          ("Fable 7D", "剩 100% · " + dt.datetime.fromtimestamp(NOW + 144000, TZ).strftime("%m/%d %H:%M"), "positive")])
+        self.assertAlmostEqual(bars[0]["ratio"], 0.8)
+        c = [i for i, it in enumerate(accounts["items"]) if it.get("title") == "claude-c"][0]
+        self.assertEqual([(b["label"], b["detail"].split(" · ")[0], b["tone"]) for b in accounts["items"][c + 1:c + 3]],
+                         [("5 小时", "剩 0%", "danger"), ("7D", "剩 10%", "danger")], "over 100% used is 0% left")
+        limited = [i for i, it in enumerate(accounts["items"]) if it.get("title") == "claude-limited"][0]
+        self.assertEqual(accounts["items"][limited + 1]["detail"][:4], "剩 0%")
 
     def test_read_only_with_the_key(self):
         page, gw = make()

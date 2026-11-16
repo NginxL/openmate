@@ -103,7 +103,8 @@ class ManifestTest(unittest.TestCase):
             "today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "today"),
             "chats": ("nav_page", "list", None), "chats-today": ("overview_card", None, "chats"),
             "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar"),
-            "starkmesh": ("nav_page", "gauge", None)})
+            "starkmesh": ("nav_page", "wallet", None)})
+        self.assertEqual(ui["starkmesh"]["title"], "中转站")
         self.assertTrue(all(1 <= len(u["title"]) <= 40 for u in ui.values()))
     def test_packaged_manifest_drops_source_only_fields(self):
         m = packaged_manifest(MANIFEST)

@@ -232,7 +232,7 @@ class TodayPage(Page):
             run = self.app.store.run_get(aid[4:]) if getattr(self.app, "store", None) is not None else None
             return {"open_url": run["doc_url"]} if run and run.get("doc_url") else {"toast": "这条评论的文档链接不在了"}
         if aid == "go:starkmesh":
-            return {"push": {"ui": "starkmesh", "title": "StarkMesh"}}
+            return {"push": {"ui": "starkmesh", "title": "中转站 · StarkMesh"}}
         if aid == "go:calendar":
             return {"push": {"ui": CALENDAR_PAGE, "title": "日程"}}
         if aid == "go:chats":
@@ -346,7 +346,7 @@ class Day:
         for t in self.chat_needs:
             mention = t["kind"] == "mention"
             chat_id = str((t.get("_chat") or {}).get("id") or t.get("thread") or "")
-            at = when(t.get("_at") or 0, self.page.app.tz) if t.get("_at") else ""
+            at = when(t.get("_at") or 0, self.page.app.tz, self.now.timestamp()) if t.get("_at") else ""
             out.append(row(t["title"], "%s：%s" % (t["sender"], t["preview"]), at,
                            "chat:" + chat_id if self.links and chat_id else "", key="chat:" + str(t.get("thread") or chat_id),
                            badge={"text": "@我" if mention else "私聊", "tone": "caution" if mention else "neutral"},
@@ -453,7 +453,7 @@ class Day:
         for chat, last in self.groups[:GROUPS_MOST]:
             rows.append(row(views.chat_name(chat, chat["id"]),
                             "%s：%s" % (views.sender_of(last, app.me_name()), views.text_of(last)),
-                            when(last.get("at") or 0, app.tz), "chat:" + chat["id"] if self.links else "",
+                            when(last.get("at") or 0, app.tz, self.now.timestamp()), "chat:" + chat["id"] if self.links else "",
                             key="group:" + chat["id"], **self._icon("chat", "indigo")))
         sec: Dict[str, Any] = {"title": "飞书今天", "items": [self._caption(line)]
                                + (rows or [empty("今天群里还没有新消息", "", self.version)])}
@@ -508,7 +508,7 @@ class Day:
                 chat = store.get_chat(r["chat_id"])
                 title, action = views.chat_name(chat, r["chat_id"]), ("chat:" + r["chat_id"]) if self.links else ""
             sub = "%s：%s" % (r.get("asker") or "有人", r.get("request_text") or "（只 @ 了你）")
-            rows.append(row(title, sub, when(r["created"], app.tz), action, key="auto:" + r["id"], badge=badge,
+            rows.append(row(title, sub, when(r["created"], app.tz, self.now.timestamp()), action, key="auto:" + r["id"], badge=badge,
                             **self._icon("robot", "purple")))
         answered = sum(1 for r in runs if int(r.get("replies") or 0) > 0)
         sec: Dict[str, Any] = {"title": "AI 代答 · %d" % len(runs),
