@@ -242,15 +242,25 @@ class ChatsToday:
             if thing["kind"] == "dm":
                 who = {chat.get("peer_id") or ""} if chat.get("peer_id") else {r.get("sender_id") for r in rows if not r.get("mine")}
             else:
-                who = {r.get("sender_id") for r in rows if r.get("at_me") and not r.get("mine")}
+                thing["_ats"] = [r for r in rows if r.get("at_me") and not r.get("mine")]
+                who = {r.get("sender_id") for r in thing["_ats"]}
             thing["_who"] = {w for w in who if w}
             out.append(thing)
         people = getattr(app, "people", None)
+        bots: set = set()
         if people is not None and out:
             bots = people.bots(set().union(*(t["_who"] for t in out)))
             kept = [t for t in out if not (t["_who"] and t["_who"] <= bots)]
             self.bots = len(out) - len(kept)
             out = kept
+        me = app.me_name()
+        for t in out:
+            # an @me says what asked for me, from whom and when, not the chat's last line (often a bot's)
+            ats = [r for r in t.get("_ats") or [] if r.get("sender_id") not in bots]
+            if ats:
+                r = ats[-1]
+                t["sender"], t["preview"] = views.sender_of(r, me), one_line(views.text_of(r), 200)
+                t["_at"] = r.get("at") or t["_at"]
         out.sort(key=lambda t: -t["_at"])
         return out
 

@@ -128,9 +128,15 @@ class BotsInTheChatsTest(unittest.TestCase):
         asked = [u for call in w.kinds_calls for u in call]
         self.assertIn("bot_example_notice", asked)
         self.assertEqual(len(asked), len(set(asked)), "each asked once")
-        # a person in a group @-mentioning me still counts, even where a bot did too
+        # a person in a group @-mentioning me still counts, even where a bot did too; the row says the person's @me,
+        # not the chat's last line
         w.push("chat_example_chatter", "user_example_c", "@示例用户 你怎么看？", at_me=True)
         wait_until(lambda: badges()[-1].get("text") == "3", what="a person's @me counts")
+        w.push("chat_example_chatter", "bot_example_notice", "今日排行榜已更新")
+        wait_until(lambda: "今日排行榜" in str(h.app.store.messages_before("chat_example_chatter", None, 5)), what="stored")
+        need = [s for s in page()["sections"] if s.get("title") == "需要我"][0]["items"]
+        chatter = [r for r in need if r["title"] == "示例闲聊群"][0]
+        self.assertEqual(chatter["subtitle"], "示例同事丙：@示例用户 你怎么看？")
         time.sleep(0.1)
 
 
