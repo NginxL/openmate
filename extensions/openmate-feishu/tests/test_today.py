@@ -41,9 +41,11 @@ class Chats:
     def needs(self):
         return self._needs
 
+    bots = 0
+
     def counts(self, needs):
         return {"mentions": sum(1 for t in needs if t["kind"] == "mention"), "dms": sum(1 for t in needs if t["kind"] == "dm"),
-                "messages": 120, "chats": 9}
+                "messages": 120, "chats": 9, "bots": self.bots}
 
     def active_groups(self):
         return self._groups
@@ -128,6 +130,12 @@ class TodayTest(unittest.TestCase):
         self.assertEqual(texts(todos), ["未完成 2 · 今天到期 1"])
         self.assertEqual([r["title"] for r in rows(todos)], ["下周的事"], "the one waiting for a decision is in 需要我")
         self.assertTrue(all(t == 8.0 for _, _, t in hub.calls), "short waits")
+
+    def test_bot_notices_are_counted_apart(self):
+        page, _, _ = make()
+        page.chats.bots = 7
+        feishu = section(page.render({"ui_version": 6}), "飞书今天")
+        self.assertEqual(texts(feishu), ["@我 1 · 私聊 1 · 今天收到 120 条，9 个会话 · 机器人通知 7"])
 
     def test_links_open_pages_on_top(self):
         page, _, _ = make()

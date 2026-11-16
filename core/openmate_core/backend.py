@@ -223,6 +223,11 @@ class Backend(abc.ABC):
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         """A person's display name ("" when unknown); chat_id when the name is per chat (an alias in a group)."""
 
+    def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        """Which of these are programs ("bot": bots and AI assistants) and which people ("user"), for those the service
+        can tell; {} when it cannot. Read-only; the core asks in the background, at most 50 at a time."""
+        return {}
+
     @abc.abstractmethod
     def media(self, ref: str, max_bytes: int) -> Tuple[str, bytes]:
         """(mime, bytes) of a media ref; BackendError(kind="too_large") when it is bigger than max_bytes."""

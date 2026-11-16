@@ -24,6 +24,7 @@ from .ui import UI
 from .backend import Account, BackendError, Chat, CredentialsExpired, Message, SendRejected
 from .events import Changed
 from .hub import HubAPI
+from .people import People
 from .platform import Platform, Timing
 from .store import Store
 from .textutil import rfc3339, zone
@@ -105,6 +106,7 @@ class ConnectorApp:
         self._names: Dict[str, str] = {}
         self.changed: Optional[Changed] = None
         self.agent: Optional[AgentRunner] = None
+        self.people: Optional[People] = None  # who is a bot (made at the start, with the store)
         self._methods = {
             "status": self.m_status,
             "tools.list": lambda p: {"tools": toolmod.read_tools(self)},
@@ -207,6 +209,7 @@ class ConnectorApp:
                 self.setup_kind = e.kind
                 log.warning("backend not available: %s", e.kind)
             self.agent = AgentRunner(self)
+            self.people = People(self)
             creds = self._load_credentials()
             if creds is not None:
                 self._credentials = creds

@@ -213,6 +213,16 @@ def _id(v) -> str:
     return "" if s in ("", "0") else s
 
 
+def chatter_kind(v) -> str:
+    """A Chatter's type (ChatterType: USER 1, BOT 2, AI 3; a name or a number): "user", "bot" or "" (unknown)."""
+    s = str(v if v is not None else "").strip().upper()
+    if s in ("BOT", "AI", "2", "3"):
+        return "bot"
+    if s in ("USER", "1"):
+        return "user"
+    return ""
+
+
 def sniff_image(data: bytes) -> str:
     """The image type data starts with ("" when it is not a picture this recognises)."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -1003,6 +1013,22 @@ class LarkXBackend(Backend):
         with self._lock:
             self._names[key] = (now + (NAME_TTL if name else NAME_MISS_TTL), name)
         return name
+
+    def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        ids = [i for i in (_id(u) for u in user_ids) if i]
+        if not ids:
+            return {}
+        client, _ = self._signed_in()
+        resp = client.api("chatters.PullChattersByIdsRequest", {"chatterIds": ids}) or {}
+        out: Dict[str, str] = {}
+        for key, c in (resp.get("chatters") or {}).items():
+            if not isinstance(c, dict):
+                continue
+            cid = _id(c.get("id")) or _id(key)
+            kind = chatter_kind(c.get("type"))
+            if cid in ids and kind:
+                out[cid] = kind
+        return out
 
     def _chatter_name(self, client, user_id: str) -> str:
         try:

@@ -653,6 +653,20 @@ class ReadTest(Base):
         self.assertEqual(self.b.user_name(ME), "示例用户")
         self.assertEqual(self.b.user_name(""), "")
 
+    def test_who_is_a_bot(self):
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {
+            "7003": {"id": "7003", "name": "示例同事丙", "type": "USER"},
+            "8001": {"id": "8001", "name": "示例通知机器人", "type": "BOT"},
+            "8002": {"name": "示例智能助手", "type": 3},
+            "8003": {"id": "8003", "name": "说不清的"},
+            "9999": {"id": "9999", "type": "BOT"}}}
+        kinds = self.b.people_kinds(["7003", "8001", "8002", "8003", "0", ""])
+        self.assertEqual(kinds, {"7003": "user", "8001": "bot", "8002": "bot"}, "only those asked, only known types")
+        self.assertEqual(S.api_calls[-1], ("chatters.PullChattersByIdsRequest", {"chatterIds": ["7003", "8001", "8002", "8003"]}))
+        self.assertEqual(self.b.people_kinds([]), {})
+        self.assertEqual([larkagentx.chatter_kind(v) for v in ("USER", 1, "bot", 2, "AI", "3", 0, None, "UNKNOWN_CHATTER")],
+                         ["user", "user", "bot", "bot", "bot", "bot", "", "", ""])
+
     def test_media(self):
         b = self.b
         png = b"\x89PNG\r\n\x1a\n" + b"\0" * 20

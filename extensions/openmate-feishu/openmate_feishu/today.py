@@ -365,6 +365,8 @@ class Day:
     def feishu_card(self) -> dict:
         app, c = self.page.app, self.counts
         line = "@我 %d · 私聊 %d · 今天收到 %d 条，%d 个会话" % (c["mentions"], c["dms"], c["messages"], c["chats"])
+        if c.get("bots"):
+            line += " · 机器人通知 %d" % c["bots"]
         rows = []
         for chat, last in self.groups[:GROUPS_MOST]:
             rows.append(row(views.chat_name(chat, chat["id"]),

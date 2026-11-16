@@ -42,6 +42,10 @@ class FixtureWorld:
             "user_example_b": "示例同事乙",
             "user_example_c": "示例同事丙",
         }
+        self.bots: Dict[str, str] = {"bot_example_notice": "示例通知机器人"}  # programs: people_kinds says "bot"
+        self.people.update(self.bots)
+        self.kinds_fail = False  # people_kinds raises
+        self.kinds_calls: List[List[str]] = []
         self.chats: Dict[str, Chat] = {}
         self.history: Dict[str, List[Message]] = {}
         self._ids = 0
@@ -253,6 +257,14 @@ class FixtureBackend(Backend):
         if c is None:
             raise BackendError("没有这个会话", "not_found")
         return c
+
+    def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        w = self.world
+        with w.lock:
+            w.kinds_calls.append(list(user_ids))
+            if w.kinds_fail:
+                raise BackendError("暂时读不到", "unavailable")
+            return {u: ("bot" if u in w.bots else "user") for u in user_ids if u in w.people or u == w.me.id}
 
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         if user_id == self.world.me.id:

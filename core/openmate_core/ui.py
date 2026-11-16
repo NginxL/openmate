@@ -220,9 +220,11 @@ class ChatsToday:
         self.app = app
 
     def needs(self) -> List[dict]:
-        """Direct chats and @me the user has not answered (the inbox's rule), newest first."""
+        """Direct chats and @me the user has not answered (the inbox's rule), newest first. A bot's (People) are
+        notices: left out, and counted in self.bots."""
         app = self.app
         out = []
+        self.bots = 0
         if app.store is None:
             return out
         for chat in app.store.chats_since(time.time() - app.timing.inbox_window, app.timing.inbox_most):
@@ -233,7 +235,18 @@ class ChatsToday:
                 continue
             thing["_at"] = max((r.get("at") or 0) for r in rows) if rows else 0
             thing["_chat"] = chat
+            if thing["kind"] == "dm":
+                who = {chat.get("peer_id") or ""} if chat.get("peer_id") else {r.get("sender_id") for r in rows if not r.get("mine")}
+            else:
+                who = {r.get("sender_id") for r in rows if r.get("at_me") and not r.get("mine")}
+            thing["_who"] = {w for w in who if w}
             out.append(thing)
+        people = getattr(app, "people", None)
+        if people is not None and out:
+            bots = people.bots(set().union(*(t["_who"] for t in out)))
+            kept = [t for t in out if not (t["_who"] and t["_who"] <= bots)]
+            self.bots = len(out) - len(kept)
+            out = kept
         out.sort(key=lambda t: -t["_at"])
         return out
 
@@ -242,7 +255,8 @@ class ChatsToday:
         start = day_start(app.tz)
         today = app.store.count_since(start) if app.store is not None else {"messages": 0, "chats": 0}
         return {"needs": len(needs), "mentions": sum(1 for t in needs if t["kind"] == "mention"),
-                "dms": sum(1 for t in needs if t["kind"] == "dm"), "messages": today["messages"], "chats": today["chats"]}
+                "dms": sum(1 for t in needs if t["kind"] == "dm"), "messages": today["messages"], "chats": today["chats"],
+                "bots": getattr(self, "bots", 0)}
 
     def active_groups(self) -> List[dict]:
         app = self.app
@@ -283,7 +297,8 @@ class ChatsPage(Page):
         return {}
 
     def _summary(self, c: Dict[str, int], version: int) -> dict:
-        stats = [stat("需要我", c["needs"], tone="caution" if c["needs"] else ""), stat("@我", c["mentions"]),
+        stats = [stat("需要我", c["needs"], "机器人通知 %d 条不算在内" % c["bots"] if c.get("bots") else "",
+                      tone="caution" if c["needs"] else ""), stat("@我", c["mentions"]),
                  stat("私聊未回", c["dms"]), stat("今天收到", c["messages"], "%d 个会话" % c["chats"])]
         if version >= 2:
             return {"type": "stat_grid", "stats": stats[:3] if self.card else stats}

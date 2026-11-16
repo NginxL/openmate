@@ -77,6 +77,8 @@ _SCHEMA = [
         data TEXT NOT NULL DEFAULT '{}')""",
     "CREATE INDEX IF NOT EXISTS runs_thread ON runs (chat_id, thread_key)",
     "CREATE TABLE IF NOT EXISTS seen (key TEXT PRIMARY KEY, at REAL NOT NULL)",
+    # who is a program: kind "bot" (bots and AI assistants) or "user", as the service told it (Backend.people_kinds)
+    "CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, kind TEXT NOT NULL, checked REAL NOT NULL)",
 ]
 
 _MESSAGE_COLUMNS = (
@@ -186,6 +188,24 @@ class Store:
             )
 
         self._tx(run)
+
+    def people_kinds(self, ids: Iterable[str]) -> Dict[str, str]:
+        """{id: "bot" | "user"} of those of ids the service told about."""
+        ids = sorted({str(i) for i in ids if i})
+        out: Dict[str, str] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            rows = self._all("SELECT id, kind FROM people WHERE id IN (%s)" % ",".join("?" * len(part)), part)
+            out.update({r["id"]: r["kind"] for r in rows})
+        return out
+
+    def set_people_kinds(self, kinds: Dict[str, str], now: Optional[float] = None) -> None:
+        now = now or time.time()
+        rows = [(str(i), k, now) for i, k in kinds.items() if i and k in ("bot", "user")]
+        if rows:
+            self._tx(lambda db: db.executemany(
+                "INSERT INTO people (id, kind, checked) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, checked = excluded.checked", rows))
 
     def count_since(self, since: float) -> dict:
         """Other people's messages since then (not system lines), and in how many chats."""
