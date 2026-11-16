@@ -268,6 +268,15 @@ class MappingTest(Base):
         self.assertTrue(shared.text.startswith("[分享日程] 示例周会 · 示例会议室 · "), shared.text)
         self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(start)), shared.text)
 
+    def test_a_card_read_as_nothing_logs_its_shape_not_its_content(self):
+        with self.assertLogs("openmate.larkx", "INFO") as logs:
+            self.m(msg_type=14, content_data={"cardDesc": "", "mystery": {"secret": "不要写进日志", "n": 3}, "list": [1, 2]})
+            self.m(msg_type=14, content_data={"cardDesc": "", "mystery": {"secret": "另一条", "n": 4}, "list": [5, 6]})
+        out = "\n".join(logs.output)
+        self.assertEqual(out.count("read as nothing"), 1, "once per shape")
+        self.assertIn("mystery:{n:int,secret:str~1}", out)
+        self.assertNotIn("不要写进日志", out)
+
     def test_merge_forward_names_its_senders(self):
         S.api_answers["chatters.PullChattersByIdsRequest"] = {
             "chatters": {"7003000000000000001": {"id": "7003000000000000001", "name": "示例同事丙"}}}

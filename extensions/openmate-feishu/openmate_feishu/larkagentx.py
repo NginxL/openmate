@@ -55,7 +55,7 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
-RENDER_VERSION = "3"
+RENDER_VERSION = "4"
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
 TREE_LIST_MOST = 8
@@ -658,7 +658,7 @@ class LarkXBackend(Backend):
         return Message(
             id=msg_id, chat_id=chat_id, position=self._position(chat_id, d.get("position"), client),
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),
-            text=self._text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
+            text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
             media=self._media_of(mt, data, chat_id, msg_id))
 
@@ -734,6 +734,12 @@ class LarkXBackend(Backend):
 
     def _rich_text(self, data: dict) -> str:
         return str(self.lx.decoders.extract_rich_text(data.get("richText") or {}) or data.get("text") or "")
+
+    def _read_text(self, mt: int, name: str, data: Optional[dict], summary: str) -> str:
+        text = self._text(mt, name, data, summary)
+        if mt in (CARD, SHARE_CALENDAR_EVENT) and data is not None and (not text or text == summary):
+            note_shape(name, data)
+        return text
 
     def _text(self, mt: int, name: str, data: Optional[dict], summary: str) -> str:
         if data is None:
@@ -1389,4 +1395,31 @@ def share_calendar_text(data: dict) -> str:
     if isinstance(count, int) and count > 0:
         parts.append("%d 人参与" % count)
     return "[分享日程] " + " · ".join(parts)
+
+
+_SHAPES_SEEN: Set[str] = set()
+
+
+def shape_of(value, depth: int = 0) -> str:
+    """The shape of a decoded value, never its content: keys, types and sizes."""
+    if depth > 3:
+        return "…"
+    if isinstance(value, dict):
+        return "{" + ",".join("%s:%s" % (k, shape_of(v, depth + 1)) for k, v in sorted(value.items())[:24]) + "}"
+    if isinstance(value, list):
+        return "[%d×%s]" % (len(value), shape_of(value[0], depth + 1) if value else "")
+    if isinstance(value, str):
+        kind = "json" if value.lstrip().startswith(("{", "[")) else "str"
+        return "%s~%d" % (kind, len(str(len(value))) if value else 0)  # its length's order only: one shape for many
+    return type(value).__name__
+
+
+def note_shape(name: str, data: dict) -> None:
+    """A message read as nothing: its decoded shape in the log, once per shape (to learn where its text is)."""
+    shape = shape_of(data)
+    key = name + shape
+    if key in _SHAPES_SEEN or len(_SHAPES_SEEN) > 200:
+        return
+    _SHAPES_SEEN.add(key)
+    log.info("a %s message read as nothing; its shape: %s", name, shape[:1500])
 
