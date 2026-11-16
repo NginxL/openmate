@@ -15,6 +15,7 @@ log = logging.getLogger("openmate.people")
 
 BATCH = 50
 RETRY = 600.0  # one the service could not tell about is asked again after this long
+RETRY_ERROR = 30.0  # after a failed read (not signed in yet, the network): sooner
 
 
 class People:
@@ -25,7 +26,7 @@ class People:
         self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="openmate-people", daemon=True).start())
         self._mu = threading.Lock()
         self._want: Set[str] = set()
-        self._failed: Dict[str, float] = {}
+        self._next: Dict[str, float] = {}  # not asked about again before then
         self._running = False
 
     def _can(self) -> bool:
@@ -49,7 +50,7 @@ class People:
             return
         now = self.clock()
         with self._mu:
-            self._want |= {i for i in ids if i not in self._failed or now - self._failed[i] >= RETRY}
+            self._want |= {i for i in ids if now >= self._next.get(i, now)}
             if not self._want or self._running:
                 return
             self._running = True
@@ -65,11 +66,12 @@ class People:
                     self._running = False  # the ones left are asked about with the next draw
                     break
                 self._want.difference_update(batch)
+            wait = RETRY
             try:
                 kinds = app.backend.people_kinds(batch) or {}
             except Exception as e:
-                log.info("who is a bot could not be read (%s); asked again later", e.__class__.__name__)
-                kinds = {}
+                log.info("who is a bot could not be read (%s); asked again in %ds", e.__class__.__name__, RETRY_ERROR)
+                kinds, wait = {}, RETRY_ERROR
             kinds = {i: k for i, k in kinds.items() if i in batch and k in ("bot", "user")}
             if kinds and app.store is not None:
                 app.store.set_people_kinds(kinds)
@@ -78,6 +80,6 @@ class People:
             with self._mu:
                 for i in batch:
                     if i not in kinds:
-                        self._failed[i] = now
+                        self._next[i] = now + wait
         if told:
             app.mark_changed("inbox")  # the badge and the pages count them again

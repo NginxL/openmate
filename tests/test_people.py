@@ -9,7 +9,7 @@ import unittest
 
 from harness import Harness, wait_until
 from openmate_core.backend import Backend, Chat
-from openmate_core.people import BATCH, RETRY, People
+from openmate_core.people import BATCH, RETRY, RETRY_ERROR, People
 from openmate_core.store import Store
 
 
@@ -68,18 +68,24 @@ class PeopleTest(unittest.TestCase):
         people.bots(["p%03d" % i for i in range(BATCH + 5)])
         self.assertEqual([len(c) for c in backend.calls], [BATCH, 5])
 
-    def test_a_failure_or_an_unknown_answer_is_asked_again_later(self):
-        backend = Asking({"u1": "user"}, fail=True)
+    def test_a_failure_is_asked_again_soon_an_unknown_answer_later(self):
+        backend = Asking({"u1": "user"}, fail=True)  # e.g. right after the start, before the sign-in is restored
         people, app = self.make(backend)
         people.bots(["u1", "mystery"])
         people.bots(["u1", "mystery"])
         self.assertEqual(len(backend.calls), 1, "not again at once")
         self.assertEqual(self.changed, [])
         backend.fail = False
-        self.now[0] += RETRY
+        self.now[0] += RETRY_ERROR
         people.bots(["u1", "mystery"])
-        self.assertEqual(backend.calls[-1], ["mystery", "u1"])
+        self.assertEqual(backend.calls[-1], ["mystery", "u1"], "soon after a failed read")
         self.assertEqual(app.store.people_kinds(["u1", "mystery"]), {"u1": "user"})
+        self.now[0] += RETRY_ERROR
+        people.bots(["mystery"])
+        self.assertEqual(len(backend.calls), 2, "the service could not tell: not again before RETRY")
+        self.now[0] += RETRY
+        people.bots(["mystery"])
+        self.assertEqual(backend.calls[-1], ["mystery"])
 
     def test_not_signed_in_or_a_service_that_cannot_tell(self):
         backend = Asking({"b1": "bot"})
