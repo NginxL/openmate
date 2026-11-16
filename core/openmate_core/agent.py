@@ -8,6 +8,11 @@ and answers with <connector>_agent_reply, bound to this request by its id. A req
 goes on in that conversation. If the turn ends without a reply through the tool, the latest answer is posted once
 instead (never both). /stop, /停止 or /停 in the thread (or quoting the request) stops it. Runs are kept in the store,
 so a restart goes on waiting for the running ones.
+
+The hub is reached over a network that drops now and then. A request waits for it (`agent_hub_wait`), and a start that
+failed on the way is tried again. A new conversation has no idempotency key, so a start that may have reached the hub
+is tried again under a new request id (`<run id>.<try>`): a conversation the lost start may have opened can then never
+reply into the chat, so the user never gets two answers.
 """
 
 from __future__ import annotations
@@ -249,8 +254,12 @@ class AgentRunner:
             log.exception("/agent start failed")
             self._fail(run["id"], "没能启动 Agent：扩展内部错误")
 
+    @staticmethod
+    def _ref(run: dict) -> str:
+        """The request id the Agent replies with: the run's id, then `<id>.<try>` for each start tried again."""
+        return run.get("ref") or run["id"]
+
     def _start(self, run: dict, row: dict) -> None:
-        app = self.app
         if not self.hub.available:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
@@ -260,25 +269,50 @@ class AgentRunner:
         except Exception:
             log.exception("/agent context could not be gathered")
             prompt = self._instructions(run) + "\n" + (run["request_text"] or self.prefix)
-        if self._state(run["id"]) == "stopped":
-            return
-        try:
-            if prev is not None:
-                mid, sid = prev["machine_id"], prev["session_id"]
-                self._supersede(prev["id"], run["id"])
-                baseline = self._latest_seq(mid, sid)
-                cmid = "openmate-" + run["id"]
-                self.hub.send_message(mid, sid, prompt, cmid)
-                fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
-                          "ours_seen": False, "continued": prev["id"]}
-            else:
-                sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher)
-                fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
-                          "ours_seen": True}
-        except HubError as e:
-            log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-            self._fail(run["id"], "没能启动 Agent：%s" % (e.message or "hub 拒绝了请求"))
-            return
+        t = self.app.timing
+        deadline = time.time() + t.agent_hub_wait
+        cmid = "openmate-" + run["id"]
+        baseline: Optional[int] = None
+        if prev is not None:
+            self._supersede(prev["id"], run["id"])
+        tries = 1
+        while True:
+            if self._state(run["id"]) == "stopped":
+                return
+            if not self._hub_up(run["id"], deadline):
+                if self._state(run["id"]) != "stopped":
+                    self._fail(run["id"], "这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复，这个 /agent 请求没有开始处理。"
+                                          "网络恢复后请重新发送。" % _span(t.agent_hub_wait))
+                return
+            try:
+                if prev is not None:
+                    mid, sid = prev["machine_id"], prev["session_id"]
+                    if baseline is None:
+                        baseline = self._latest_seq(mid, sid)
+                    self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
+                    fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
+                              "ours_seen": False, "continued": prev["id"]}
+                else:
+                    sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher)
+                    fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
+                              "ours_seen": True}
+                break
+            except HubError as e:
+                log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
+                if not e.unreachable:
+                    self._fail(run["id"], "没能启动 Agent：%s" % (e.message or "hub 拒绝了请求"))
+                    return
+                if prev is None and not e.unsent:
+                    # it may have reached the hub and opened a conversation: start again under a new request id
+                    if tries >= t.agent_start_tries:
+                        self._fail(run["id"], "没能启动 Agent：这台电脑和 Persona 之间的网络不稳定，试了 %d 次都没成功，请稍后重新发送。"
+                                   % tries)
+                        return
+                    tries += 1
+                    old = self._ref(run)
+                    run = self._retry_as(run["id"], "%s.%d" % (run["id"], tries)) or run
+                    prompt = prompt.replace(old, self._ref(run))
+                self._stop.wait(min(t.agent_hub_probe, max(0.0, deadline - time.time())))
         stopped = False
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"]) or run
@@ -294,8 +328,35 @@ class AgentRunner:
             except HubError:
                 pass
             return
-        log.info("/agent request started (%s)", "continued" if prev is not None else "new conversation")
+        log.info("/agent request started (%s%s)", "continued" if prev is not None else "new conversation",
+                 ", try %d" % tries if tries > 1 else "")
         self._wake.set()
+
+    def _hub_up(self, run_id: str, deadline: float) -> bool:
+        """Wait until the hub answers; False when it did not by the deadline, or the request was stopped meanwhile."""
+        t = self.app.timing
+        while True:
+            if self._state(run_id) == "stopped" or self._stop.is_set():
+                return False
+            try:
+                self.hub.health(timeout=max(1.0, min(10.0, deadline - time.time())))
+                return True
+            except HubError as e:
+                if not e.unreachable:
+                    return True  # it answered: whatever it said, the start's own answer will tell
+            left = deadline - time.time()
+            if left <= 0:
+                return False
+            self._stop.wait(min(t.agent_hub_probe, left))
+
+    def _retry_as(self, run_id: str, ref: str) -> Optional[dict]:
+        with self._lock(run_id):
+            cur = self.store.run_get(run_id)
+            if cur is None:
+                return None
+            cur["ref"] = ref
+            self.store.run_put(cur)
+            return cur
 
     def _supersede(self, prev_id: str, run_id: str) -> None:
         """A newer request goes on in the same conversation: the turn's end is the newer one's to answer, so the older
@@ -318,7 +379,7 @@ class AgentRunner:
         c, p = self.app.cid, self.app.platform.name
         body = "\n".join([
             "我在%s里发了一条 /agent 请求，请你替我处理。" % p,
-            "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份发到这个话题里，并自动加上 AI 代答标记，你不用自己加。" % (run["id"], c, run["id"]),
+            "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份发到这个话题里，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run)),
             "- 回复以我的名义发出：只写已经做完的事和查到的事实；还没做的写成建议，不要替我答应任何事。",
             "- 可以多次调用 %s_agent_reply 发进度，但只发有意义的进展和最终结果。" % c,
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
@@ -616,9 +677,11 @@ class AgentRunner:
 
     def reply_tool(self, request: str, text: str) -> str:
         """<connector>_agent_reply: only the run this request id names, and only while it may still reply."""
-        run = self.store.run_get(request)
+        run = self.store.run_get(request.split(".", 1)[0])
         if run is None:
             raise RPCError("没有这个 /agent 请求：request 不对，或者已经过期")
+        if request != self._ref(run):
+            raise RPCError("这个 /agent 请求已经交给另一个会话处理了，这里不用再回复")
         if run["state"] in ("stopped", "failed"):
             raise RPCError("这个 /agent 请求已经停止了，不再回复")
         if time.time() - run["created"] > self.app.timing.agent_keep:
@@ -706,13 +769,16 @@ class AgentRunner:
                     except HubError:
                         pass
                     already = before not in ACTIVE
+                elif e.unreachable:  # replies are refused from now on all the same: the chat side has stopped
+                    failed = "网络不稳，没能通知 Persona，那边的会话可能还在运行；它不会再回复到这里"
+                    already = False
                 else:
                     failed = e.message or "hub 没有回答"
                     already = False
         else:
             already = before not in ACTIVE
         if failed:
-            text = "没能停止：%s" % failed
+            text = ("已停止回复：%s" if before in ACTIVE else "没能停止：%s") % failed
         elif already:
             text = "已经结束了"
         else:

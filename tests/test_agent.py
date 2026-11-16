@@ -487,6 +487,136 @@ class TimeoutRestartTest(unittest.TestCase):
         self.assertEqual(h2.app.store.run_get("omr_" + "0" * 20)["state"], "failed")
 
 
+class NetworkTest(unittest.TestCase):
+    """The hub is reached over a network that drops now and then (the manager's relay answers 503 manager_offline
+    while its bus is down, 502 hub_unreachable when a request breaks on the way)."""
+
+    def test_a_request_waits_while_the_manager_is_offline(self):
+        h = agent(self)
+        h.http.offline = 4
+        m = ask(h, "/agent 网络断了一会儿")
+        run = running(h, m)
+        self.assertEqual(len(h.http.starts()), 1)
+        self.assertNotIn("ref", run)
+        self.assertEqual(replies(h), [])
+        h.tool("agent_reply", request=run["id"], text="回来了")
+        self.assertEqual([s["text"] for s in replies(h)], ["回来了\n\n" + SUFFIX])
+
+    def test_it_gives_up_when_the_hub_stays_away(self):
+        h = agent(self, timing=fast(agent_hub_wait=0.3))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 一直断着")
+        wait_until(lambda: replies(h), what="the explanation")
+        text = replies(h)[0]["text"]
+        self.assertIn("网络断了", text)
+        self.assertIn("重新发送", text)
+        self.assertEqual(h.http.starts(), [])
+        self.assertEqual(run_of(h, m)["state"], "failed")
+
+    def test_a_start_whose_answer_was_lost_goes_on_under_a_new_id(self):
+        h = agent(self)
+        h.http.lost_starts = 1
+        m = ask(h, "/agent 回答丢了")
+        run = running(h, m)
+        starts = h.http.starts()
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(run["ref"], run["id"] + ".2")
+        self.assertIn('"%s"' % run["id"], starts[0]["body"]["prompt"])
+        self.assertIn('"%s.2"' % run["id"], starts[1]["body"]["prompt"])
+        self.assertEqual(run["session_id"], "sess-2")
+        # the conversation the lost start opened can never answer into the chat
+        for stale in (run["id"], run["id"] + ".3"):
+            with self.assertRaises(HubSideError) as e:
+                h.tool("agent_reply", request=stale, text="第一个会话的回答")
+            self.assertIn("另一个会话", e.exception.message)
+        h.tool("agent_reply", request=run["id"] + ".2", text="第二个会话的回答")
+        self.assertEqual([s["text"] for s in replies(h)], ["第二个会话的回答\n\n" + SUFFIX])
+        # and its turn's end is not ours to answer
+        h.http.add("sess-1", "assistant", "text", "孤儿会话的回答")
+        h.http.end_turn("sess-1")
+        time.sleep(0.2)
+        self.assertEqual(len(replies(h)), 1)
+
+    def test_lost_starts_are_tried_three_times(self):
+        h = agent(self)
+        h.http.lost_starts = 10
+        m = ask(h, "/agent 一直丢")
+        wait_until(lambda: replies(h), what="the explanation")
+        self.assertIn("试了 3 次", replies(h)[0]["text"])
+        self.assertEqual(len(h.http.starts()), 3)
+        run = run_of(h, m)
+        self.assertEqual((run["state"], run["ref"]), ("failed", run["id"] + ".3"))
+
+    def test_a_continuation_whose_answer_was_lost_is_sent_once(self):
+        h = agent(self)
+        first = ask(h, "/agent 第一个问题")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+        h.http.add(sid, "assistant", "text", "第一个回答")
+        h.http.end_turn(sid)
+        wait_until(lambda: replies(h), what="first answer")
+        h.http.lost_sends = 1
+        second = ask(h, "/agent 接着问", root_id=first.id)
+        run2 = running(h, second)
+        posts = h.http.posts("/api/v1/sessions/mac-example/%s/messages" % sid)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual({p["body"]["client_msg_id"] for p in posts}, {"openmate-" + run2["id"]})
+        typed = [it for it in h.http.sessions[sid]["items"] if it.get("client_msg_id")]
+        self.assertEqual(len(typed), 1)
+        self.assertEqual(len(h.http.starts()), 1)
+        self.assertNotIn("ref", run2)
+
+    def test_stop_while_it_waits_for_the_hub(self):
+        h = agent(self)
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 等网络")
+        run_of(h, m)
+        ask(h, "/stop", root_id=m.id)
+        wait_until(lambda: replies(h), what="stopped")
+        self.assertEqual(replies(h)[0]["text"], "已停止\n\n" + SUFFIX)
+        h.http.offline = 0
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+        self.assertEqual(run_of(h, m)["state"], "stopped")
+        self.assertEqual(len(replies(h)), 1)
+
+    def test_stop_that_cannot_reach_the_hub_still_stops_the_replies(self):
+        h = agent(self)
+        m = ask(h, "/agent 停不下来")
+        run = running(h, m)
+        h.http.offline = 10 ** 6
+        ask(h, "/stop", root_id=m.id)
+        wait_until(lambda: replies(h), what="the answer")
+        self.assertIn("已停止回复", replies(h)[0]["text"])
+        with self.assertRaises(HubSideError):
+            h.tool("agent_reply", request=run["id"], text="还想回")
+
+    def test_the_hubs_refusals_are_not_retried_and_words_come_in_chinese(self):
+        h = agent(self)
+        h.http.start_fail = 400
+        ask(h, "/agent 你好")
+        wait_until(lambda: replies(h), what="the explanation")
+        self.assertEqual(len(h.http.starts()), 1)
+        self.assertEqual(h.http.starts()[0].get("lang"), "zh-CN")
+
+    def test_errors_tell_what_may_have_been_sent(self):
+        import socket
+        from openmate_core.hub import HubAPI, HubError
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()  # nothing listens there
+        with self.assertRaises(HubError) as e:
+            HubAPI("http://127.0.0.1:%d" % port, "t").health(timeout=2)
+        self.assertTrue(e.exception.unsent)
+        self.assertTrue(e.exception.unreachable)
+        for code, unsent, unreachable in (("manager_offline", True, True), ("hub_unreachable", False, True),
+                                          ("network", False, True), ("", False, False), ("bad_request", False, False)):
+            err = HubError(502, "x", code)
+            self.assertEqual((err.unsent, err.unreachable), (unsent, unreachable), code)
+
+
 class SettingsAndFailuresTest(unittest.TestCase):
     def test_suffix_settings(self):
         from openmate_core.agent import parse_suffix

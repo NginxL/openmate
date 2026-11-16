@@ -35,7 +35,8 @@ TOKEN = "pext_test_token"
 
 def fast(**kw) -> Timing:
     base = dict(debounce=0.15, backoff_min=0.05, backoff_max=0.2, stable_after=0.3, login_wait=3.0, agent_poll=0.05,
-                agent_timeout=60.0, secrets_retry=0.05, sent_retry=(0.05, 0.05, 0.05))
+                agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, secrets_retry=0.05,
+                sent_retry=(0.05, 0.05, 0.05))
     base.update(kw)
     return Timing(**base)
 
@@ -190,6 +191,9 @@ class FakeHubHTTP:
         self.full: Dict[str, str] = {}  # item id → full text
         self.stop_status: Dict[str, int] = {}  # session id → HTTP status for …/stop
         self.start_fail: Optional[int] = None
+        self.offline = 0  # the next this many requests (any route) get the manager's 503 manager_offline
+        self.lost_starts = 0  # the next this many conversation starts open a conversation, but the answer is lost (502)
+        self.lost_sends = 0  # the next this many messages are typed, but the answer is lost (502)
         self._n = itertools.count(1)
         hub = self
 
@@ -213,7 +217,7 @@ class FakeHubHTTP:
                 if n:
                     body = json.loads(self.rfile.read(n))
                 rec = {"method": method, "path": urllib.parse.unquote(u.path), "query": query, "body": body,
-                       "auth": self.headers.get("Authorization")}
+                       "auth": self.headers.get("Authorization"), "lang": self.headers.get("Accept-Language")}
                 with hub.lock:
                     hub.requests.append(rec)
                 if rec["auth"] != "Bearer " + hub.token:
@@ -265,6 +269,12 @@ class FakeHubHTTP:
     def route(self, method: str, parts: List[str], query: dict, body: Any):
         p = "/" + "/".join(parts)
         with self.lock:
+            if self.offline > 0:
+                self.offline -= 1
+                return 503, {"error": "the manager is not connected to the hub right now: try again shortly",
+                             "code": "manager_offline"}
+            if method == "GET" and p == "/api/v1/health":
+                return 200, {"ok": True}
             if method == "POST" and p == "/api/v1/assistant/conversations":
                 if self.start_fail:
                     return self.start_fail, {"error": "refused"}
@@ -273,6 +283,9 @@ class FakeHubHTTP:
                 self.sessions[sid] = {"machine": mid, "items": [], "reporter": bool((body or {}).get("report_tasks")),
                                       "working": True, "stopped": False}
                 self.add(sid, "user", "text", (body or {}).get("prompt") or "")
+                if self.lost_starts > 0:
+                    self.lost_starts -= 1
+                    return 502, {"error": "the manager could not reach the hub", "code": "hub_unreachable"}
                 return 200, {"session": {"machine_id": mid, "session_id": sid, "title": ""}}
             if method == "POST" and len(parts) == 6 and parts[:3] == ["api", "v1", "assistant"] and parts[5] == "stop":
                 sid = parts[4]
@@ -293,10 +306,16 @@ class FakeHubHTTP:
                 rest = parts[5:]
                 if method == "POST" and rest == ["messages"]:
                     kw = {}
-                    if (body or {}).get("client_msg_id"):
-                        kw["client_msg_id"] = body["client_msg_id"]
+                    cmid = (body or {}).get("client_msg_id")
+                    if cmid:
+                        kw["client_msg_id"] = cmid
+                        if any(it.get("client_msg_id") == cmid for it in s["items"]):
+                            return 200, {"ok": True}  # the hub sends each client_msg_id once
                     s["working"] = True
                     self.add(sid, "user", "text", (body or {}).get("text") or "", **kw)
+                    if self.lost_sends > 0:
+                        self.lost_sends -= 1
+                        return 502, {"error": "the manager could not reach the hub", "code": "hub_unreachable"}
                     return 200, {"ok": True}
                 if method == "POST" and rest == ["interrupt"]:
                     s["working"] = False

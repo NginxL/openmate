@@ -6,11 +6,16 @@ asks for (docs/extensions/extensions.md "Hub API: scopes"):
     agents.control  POST /api/v1/sessions/{mid}/{sid}/messages, …/interrupt
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full
     kb.read         GET  /api/v1/kb/chats/{id}/context
+    (none)          GET  /api/v1/health, the hub's one route without authentication: is the hub reachable now?
+
+The manager relays these to the hub. While its bus connection is down it answers 503 manager_offline (nothing was sent);
+when the request to the hub breaks it answers 502 hub_unreachable, and the hub may or may not have got it.
 """
 
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,12 +24,31 @@ from typing import Any, Dict, Optional
 _LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
+# Codes for failures on this side of the relay (status 0): the connection was refused, so nothing was sent; or it
+# broke or timed out after it was made, so the request may have arrived.
+NOT_CONNECTED = "not_connected"
+NETWORK = "network"
+
+UNSENT = ("manager_offline", NOT_CONNECTED)
+UNREACHABLE = UNSENT + ("hub_unreachable", NETWORK)
+
+
 class HubError(Exception):
     def __init__(self, status: int, message: str, code: str = ""):
         super().__init__(message)
         self.status = status
         self.message = message
         self.code = code
+
+    @property
+    def unreachable(self) -> bool:
+        """The hub could not be reached (a network failure, not the hub's answer)."""
+        return self.code in UNREACHABLE
+
+    @property
+    def unsent(self) -> bool:
+        """It surely never reached the hub: sending it again cannot do it twice."""
+        return self.code in UNSENT
 
 
 class HubAPI:
@@ -50,7 +74,8 @@ class HubAPI:
         if query:
             url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         data = None
-        headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
+        # the hub words its errors in the request's language; they are shown in the chat
+        headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json", "Accept-Language": "zh-CN"}
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -76,7 +101,9 @@ class HubAPI:
                 pass
             raise HubError(e.code, message or ("hub 回答 HTTP %d" % e.code), code)
         except (urllib.error.URLError, OSError) as e:
-            raise HubError(0, "连不上 Persona hub（%s）" % type(e).__name__)
+            cause = getattr(e, "reason", e) if isinstance(e, urllib.error.URLError) else e
+            refused = isinstance(cause, (ConnectionRefusedError, socket.gaierror))  # not connected: nothing was sent
+            raise HubError(0, "连不上 Persona hub（%s）" % type(cause).__name__, NOT_CONNECTED if refused else NETWORK)
         if not raw:
             return {}
         try:
@@ -85,6 +112,10 @@ class HubAPI:
             raise HubError(0, "hub 的回答不是 JSON")
 
     # ---- the routes ----
+
+    def health(self, timeout: float = 10.0) -> None:
+        """Raises HubError unless the hub answers now."""
+        self.request("GET", "/api/v1/health", timeout=timeout)
 
     def start_conversation(self, prompt: str, purpose: str, report_tasks: bool, machine_id: str = "", launcher: str = "") -> dict:
         body: Dict[str, Any] = {"prompt": prompt, "purpose": purpose, "report_tasks": bool(report_tasks)}
