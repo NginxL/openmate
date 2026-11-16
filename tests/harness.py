@@ -193,6 +193,8 @@ class FakeHubHTTP:
         self.start_fail: Optional[int] = None
         self.offline = 0  # the next this many requests (any route) get the manager's 503 manager_offline
         self.lost_starts = 0  # the next this many conversation starts open a conversation, but the answer is lost (502)
+        self.lost_code = "hub_unreachable"  # … with this code (the relay's, or the hub's node_unreachable)
+        self.machine_offline = 0  # the next this many starts find the machine offline (503, nothing ran)
         self.lost_sends = 0  # the next this many messages are typed, but the answer is lost (502)
         self._n = itertools.count(1)
         hub = self
@@ -278,6 +280,10 @@ class FakeHubHTTP:
             if method == "POST" and p == "/api/v1/assistant/conversations":
                 if self.start_fail:
                     return self.start_fail, {"error": "refused"}
+                if self.machine_offline > 0:
+                    self.machine_offline -= 1
+                    return 503, {"error": "示例电脑离线了", "code": "node_unreachable", "retryable": True,
+                                 "delivered": "none"}
                 sid = "sess-%d" % next(self._n)
                 mid = (body or {}).get("machine_id") or "mac-example"
                 self.sessions[sid] = {"machine": mid, "items": [], "reporter": bool((body or {}).get("report_tasks")),
@@ -285,7 +291,7 @@ class FakeHubHTTP:
                 self.add(sid, "user", "text", (body or {}).get("prompt") or "")
                 if self.lost_starts > 0:
                     self.lost_starts -= 1
-                    return 502, {"error": "the manager could not reach the hub", "code": "hub_unreachable"}
+                    return 502, {"error": "the manager could not reach the hub", "code": self.lost_code}
                 return 200, {"session": {"machine_id": mid, "session_id": sid, "title": ""}}
             if method == "POST" and len(parts) == 6 and parts[:3] == ["api", "v1", "assistant"] and parts[5] == "stop":
                 sid = parts[4]

@@ -153,8 +153,12 @@ class AgentRunner:
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop polling; the store closes next, so wait (a little) for a poll under way."""
         self._stop.set()
         self._wake.set()
+        th = self._thread
+        if th is not None and th is not threading.current_thread():
+            th.join(3.0)
 
     def _prune(self, force: bool = False) -> None:
         now = time.time()
@@ -277,10 +281,12 @@ class AgentRunner:
             self._supersede(prev["id"], run["id"])
         tries = 1
         while True:
+            if self._stop.is_set():  # shutting down: the next start tells the user to send it again
+                return
             if self._state(run["id"]) == "stopped":
                 return
             if not self._hub_up(run["id"], deadline):
-                if self._state(run["id"]) != "stopped":
+                if not self._stop.is_set() and self._state(run["id"]) != "stopped":
                     self._fail(run["id"], "这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复，这个 /agent 请求没有开始处理。"
                                           "网络恢复后请重新发送。" % _span(t.agent_hub_wait))
                 return
@@ -299,8 +305,12 @@ class AgentRunner:
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if not e.unreachable:
+                if not e.transient:
                     self._fail(run["id"], "没能启动 Agent：%s" % (e.message or "hub 拒绝了请求"))
+                    return
+                if time.time() >= deadline:
+                    self._fail(run["id"], "没能启动 Agent：%s。等了 %s 还是不行，请稍后重新发送。"
+                               % (_hub_words(e), _span(t.agent_hub_wait)))
                     return
                 if prev is None and not e.unsent:
                     # it may have reached the hub and opened a conversation: start again under a new request id
@@ -336,7 +346,7 @@ class AgentRunner:
         """Wait until the hub answers; False when it did not by the deadline, or the request was stopped meanwhile."""
         t = self.app.timing
         while True:
-            if self._state(run_id) == "stopped" or self._stop.is_set():
+            if self._stop.is_set() or self._state(run_id) == "stopped":
                 return False
             try:
                 self.hub.health(timeout=max(1.0, min(10.0, deadline - time.time())))
@@ -519,6 +529,8 @@ class AgentRunner:
             if self._stop.is_set():
                 return
             for run in self.store.runs_in_state(["running"]):
+                if self._stop.is_set():
+                    return
                 try:
                     self._poll(run)
                 except HubError as e:
@@ -785,6 +797,12 @@ class AgentRunner:
             text = "已停止" + ("：" + "、".join(tasks) if tasks else "")
         self._post_once(cur, "agent-stop:%s:%s" % (row["chat_id"], row["id"]), text, reply_to=row["id"],
                         root=row.get("root_id") or "")
+
+
+def _hub_words(e: HubError) -> str:
+    if e.unreachable:  # the relay's own words are English and say nothing more
+        return "这台电脑和 Persona 之间的网络断了"
+    return (e.message or "hub 没有回答").rstrip("。.")
 
 
 def _interrupted(text: str) -> bool:

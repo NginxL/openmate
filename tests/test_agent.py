@@ -566,6 +566,52 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(len(h.http.starts()), 1)
         self.assertNotIn("ref", run2)
 
+    def test_a_start_waits_for_the_machine_to_come_back(self):
+        h = agent(self)
+        h.http.machine_offline = 3
+        m = ask(h, "/agent 电脑刚醒")
+        run = running(h, m)
+        self.assertEqual(len(h.http.starts()), 4)
+        self.assertEqual(len(h.http.sessions), 1)
+        self.assertNotIn("ref", run)
+        self.assertEqual(replies(h), [])
+
+    def test_it_gives_up_when_the_machine_stays_offline(self):
+        h = agent(self, timing=fast(agent_hub_wait=0.3))
+        h.http.machine_offline = 10 ** 6
+        m = ask(h, "/agent 电脑一直离线")
+        wait_until(lambda: replies(h), what="the explanation")
+        time.sleep(0.2)
+        texts = [x["text"] for x in replies(h)]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("示例电脑离线了", texts[0])
+        self.assertIn("请稍后重新发送", texts[0])
+        self.assertEqual(h.http.sessions, {})
+        self.assertEqual(run_of(h, m)["state"], "failed")
+
+    def test_a_start_the_machine_may_have_run_goes_on_under_a_new_id(self):
+        h = agent(self)
+        h.http.lost_starts, h.http.lost_code = 1, "node_unreachable"
+        m = ask(h, "/agent 电脑那边断了")
+        run = running(h, m)
+        self.assertEqual(len(h.http.starts()), 2)
+        self.assertEqual(run["ref"], run["id"] + ".2")
+
+    def test_a_restart_while_it_waits_asks_to_send_it_again(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 等着等着重启了")
+        run_of(h, m)
+        time.sleep(0.2)
+        h.http.offline = 0
+        h2 = h.restart()
+        h2.wait_ok()
+        wait_until(lambda: replies(h2), what="the notice")
+        self.assertIn("重新发送", replies(h2)[0]["text"])
+        time.sleep(0.3)
+        self.assertEqual(h2.http.starts(), [])
+        self.assertEqual(run_of(h2, m)["state"], "failed")
+
     def test_stop_while_it_waits_for_the_hub(self):
         h = agent(self)
         h.http.offline = 10 ** 6
@@ -614,7 +660,14 @@ class NetworkTest(unittest.TestCase):
         for code, unsent, unreachable in (("manager_offline", True, True), ("hub_unreachable", False, True),
                                           ("network", False, True), ("", False, False), ("bad_request", False, False)):
             err = HubError(502, "x", code)
-            self.assertEqual((err.unsent, err.unreachable), (unsent, unreachable), code)
+            self.assertEqual((err.unsent, err.unreachable, err.transient), (unsent, unreachable, unreachable), code)
+        # the hub's own answers about the machine
+        offline = HubError(503, "离线", "node_unreachable", retryable=True, delivered="none")
+        self.assertEqual((offline.unsent, offline.unreachable, offline.transient), (True, False, True))
+        broke = HubError(502, "断了", "node_unreachable")
+        self.assertEqual((broke.unsent, broke.transient), (False, True))
+        missing = HubError(409, "没装 Claude Code", "claude_missing", retryable=False, delivered="none")
+        self.assertEqual((missing.unsent, missing.transient), (False, False))
 
 
 class SettingsAndFailuresTest(unittest.TestCase):

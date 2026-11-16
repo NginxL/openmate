@@ -30,15 +30,20 @@ NOT_CONNECTED = "not_connected"
 NETWORK = "network"
 
 UNSENT = ("manager_offline", NOT_CONNECTED)
-UNREACHABLE = UNSENT + ("hub_unreachable", NETWORK)
+UNREACHABLE = UNSENT + ("hub_unreachable", NETWORK)  # the hub itself was not reached
+# The hub's answers for a call to a machine that broke or timed out on the way (apierr.Call): it may have run.
+MACHINE_UNSURE = ("node_unreachable", "timeout")
 
 
 class HubError(Exception):
-    def __init__(self, status: int, message: str, code: str = ""):
+    def __init__(self, status: int, message: str, code: str = "", retryable: Optional[bool] = None,
+                 delivered: str = ""):
         super().__init__(message)
         self.status = status
         self.message = message
         self.code = code
+        self.retryable = retryable  # the hub's "retryable" and "delivered" ("none": nothing ran), when it said them
+        self.delivered = delivered
 
     @property
     def unreachable(self) -> bool:
@@ -47,8 +52,15 @@ class HubError(Exception):
 
     @property
     def unsent(self) -> bool:
-        """It surely never reached the hub: sending it again cannot do it twice."""
-        return self.code in UNSENT
+        """Nothing ran: it never reached the hub, or the hub says nothing ran and it may be tried again (the machine
+        is offline). Sending it again cannot do it twice."""
+        return self.code in UNSENT or (self.delivered == "none" and self.retryable is True)
+
+    @property
+    def transient(self) -> bool:
+        """A network failure on the way (to the hub, or from the hub to the machine): it may work a little later.
+        Unless unsent, it may also have run."""
+        return self.unsent or self.unreachable or (self.code in MACHINE_UNSURE and self.status >= 500)
 
 
 class HubAPI:
@@ -91,15 +103,18 @@ class HubAPI:
                 pass
             finally:
                 e.close()
-            message, code = "", ""
+            message, code, retryable, delivered = "", "", None, ""
             try:
                 doc = json.loads(raw or b"{}")
                 if isinstance(doc, dict):
                     message = str(doc.get("error") or doc.get("message") or "")
                     code = str(doc.get("code") or "")
+                    if isinstance(doc.get("retryable"), bool):
+                        retryable = doc["retryable"]
+                    delivered = str(doc.get("delivered") or "")
             except ValueError:
                 pass
-            raise HubError(e.code, message or ("hub 回答 HTTP %d" % e.code), code)
+            raise HubError(e.code, message or ("hub 回答 HTTP %d" % e.code), code, retryable, delivered)
         except (urllib.error.URLError, OSError) as e:
             cause = getattr(e, "reason", e) if isinstance(e, urllib.error.URLError) else e
             refused = isinstance(cause, (ConnectionRefusedError, socket.gaierror))  # not connected: nothing was sent
