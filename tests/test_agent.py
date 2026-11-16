@@ -660,6 +660,28 @@ class NetworkTest(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual([x["text"] for x in replies(h)], ["工具回复\n\n" + SUFFIX])
 
+    def test_an_offline_session_ends_a_run_that_replied_but_not_one_that_did_not(self):
+        h = agent(self)
+        m1 = ask(h, "/agent 回复过")
+        r1 = running(h, m1)
+        m2 = ask(h, "/agent 还没回复", chat="chat_example_dm_a")
+        r2 = running(h, m2)
+        h.tool("agent_reply", request=r1["id"], text="回复了")
+        h.http.add(r2["session_id"], "assistant", "text", "写到一半")
+        with h.http.lock:
+            for r in (r1, r2):
+                h.http.sessions[r["session_id"]]["offline"] = True
+        wait_until(lambda: h.app.store.run_get(r1["id"])["state"] == "done", what="the replied run done")
+        time.sleep(0.4)
+        self.assertEqual(h.app.store.run_get(r2["id"])["state"], "running", "a dropped machine's half answer waits")
+        self.assertEqual([x["text"] for x in replies(h)], ["回复了\n\n" + SUFFIX])
+        with h.http.lock:
+            h.http.sessions[r2["session_id"]]["offline"] = False
+            h.http.sessions[r2["session_id"]]["working"] = False
+        wait_until(lambda: h.app.store.run_get(r2["id"])["state"] == "done", what="the second run done")
+        h.tool("agent_reply", request=r1["id"], text="后来的进展")  # a finished run still takes replies
+        self.assertEqual(len(replies(h)), 3)
+
     def test_a_done_status_before_the_answer_is_not_the_end(self):
         h = agent(self)
         m = ask(h, "/agent 还没开口")

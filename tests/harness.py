@@ -320,9 +320,9 @@ class FakeHubHTTP:
                 s = self.sessions.get(sid or "")
                 if s is None or s["machine"] != mid:
                     return 200, {"sessions": [], "total": 0, "has_more": False}
-                status = "working" if s["working"] else "done"
-                return 200, {"sessions": [{"session_id": sid, "machine_id": mid, "status": status,
-                                           "state": "working" if s["working"] else "unread"}],
+                status = "offline" if s.get("offline") else "working" if s["working"] else "done"
+                state = {"offline": "offline", "working": "working"}.get(status, "unread")
+                return 200, {"sessions": [{"session_id": sid, "machine_id": mid, "status": status, "state": state}],
                              "total": 1, "has_more": False}
             if len(parts) >= 6 and parts[:3] == ["api", "v1", "sessions"]:
                 mid, sid = parts[3], parts[4]

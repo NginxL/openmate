@@ -622,7 +622,14 @@ class AgentRunner:
         except HubError as e:
             log.info("/agent session status: HTTP %s", e.status)
             return False
-        return bool(row) and (row.get("status") in ("done", "idle") or row.get("state") in ("unread", "idle"))
+        if not row:
+            return False
+        if row.get("status") in ("done", "idle") or row.get("state") in ("unread", "idle"):
+            return True
+        # offline: no live agent, the conversation closed, or its machine dropped off for a while. With a reply sent
+        # nothing is posted at the end, so it ends (a later reply through the tool still goes out); without one it
+        # waits, so that a dropped machine's half-written answer is never posted as the answer.
+        return bool(run.get("replies")) and row.get("status") == "offline"
 
     def _turn_ended(self, run_id: str) -> None:
         with self._lock(run_id):
