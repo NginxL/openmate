@@ -199,6 +199,25 @@ class TodayTest(unittest.TestCase):
         self.assertEqual([r["title"] for r in rows(view["sections"][0])][:2], ["修复登录问题", "示例告警"])
         self.assertIn("已处理 2", texts(view["sections"][0])[0])
 
+    def test_what_ai_answered_today(self):
+        page, _, _ = make()
+        store = page.app.store
+        base = {"request_id": "m1", "thread_key": "m1", "root_id": "", "created": NOW - 600, "replies": 1,
+                "request_text": "接口什么时候好？", "asker": "示例同事乙"}
+        store.run_put(dict(base, id="omr_a", chat_id="g1", state="done", kind="auto"))
+        store.run_put(dict(base, id="omr_b", chat_id="doc:tok", state="failed", kind="doc", replies=0, created=NOW - 300,
+                           doc_title="示例方案", doc_url="https://example.feishu.cn/docx/tok", request_text="这里要改吗？"))
+        store.run_put(dict(base, id="omr_c", chat_id="g1", state="done", request_id="m9"))  # an /agent run: not here
+        view = page.render({"ui_version": 6})
+        sec = section(view, "AI 代答 · 2")
+        self.assertEqual(texts(sec), ["今天代答 1 次，没有代答 1 次"])
+        self.assertEqual([(r["title"], r["badge"]["text"]) for r in rows(sec)], [("示例方案", "没有代答"), ("g1", "已代答")], "a chat the store lacks: its id")
+        self.assertEqual(rows(sec)[0]["subtitle"], "示例同事乙：这里要改吗？")
+        self.assertEqual(page.action({"action": {"id": rows(sec)[0]["action"]["id"]}}), {"open_url": "https://example.feishu.cn/docx/tok"})
+        v8 = page.render({"ui_version": 8})
+        card = [s for s in v8["sections"] if s.get("title", "").startswith("AI 代答")][0]
+        self.assertEqual((card["icon"], card["link"]["title"]), ("robot", "设置"))
+
     def test_bot_notices_are_counted_apart(self):
         page, _, _ = make()
         page.chats.bots = 7

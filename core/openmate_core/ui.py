@@ -25,6 +25,7 @@ CHATS_PAGE = "chats"
 CHATS_CARD = "chats-today"
 NEEDS_MOST = 30
 GROUPS_MOST = 10
+AUTOREPLY_ROWS = 20  # groups offered for 自动代答 (the marked ones always)
 SLOW_RENDER = 0.3
 THREAD_LINES = 30
 REFRESH = 60
@@ -347,7 +348,58 @@ class ChatsPage(Page):
         if aid.startswith("undone:chat:"):
             self.data.undismiss(aid[len("undone:chat:"):])
             return {"toast": "已恢复", "view": here()}
+        if aid == "autoreply" or aid.startswith("autoreply:"):
+            changes = {}
+            for name, v in (params.get("values") or {}).items():  # a switch: {"auto:<chat>": "true" | "false"}
+                if str(name).startswith("auto:"):
+                    changes[str(name)[5:]] = str(v).lower() in ("true", "1", "on")
+            if aid.startswith("autoreply:"):  # an app without switches: autoreply:on:<chat> / autoreply:off:<chat>
+                _, how, chat_id = aid.split(":", 2)
+                changes[chat_id] = how == "on"
+            for chat_id, on in changes.items():
+                if self.app.store.get_chat(chat_id) is not None:
+                    self.app.store.autoreply_set(chat_id, on)
+            if not changes:
+                return {}
+            on = any(changes.values())
+            return {"toast": "已开启自动代答：有人 @ 你时 AI 直接代你回复" if on else "已关闭自动代答", "view": here()}
         return {}
+
+    def _autoreply(self, version: int) -> Optional[dict]:
+        """The groups the user can mark for 自动代答 (the ones marked, then the groups active this week), each a
+        switch (UI version 6) or a row that turns it on or off."""
+        app = self.app
+        marked = app.store.autoreply_chats()
+        seen, chats = set(), []
+        for cid in marked:
+            c = app.store.get_chat(cid)
+            if c is not None:
+                chats.append(c)
+                seen.add(cid)
+        for c in app.store.chats_since(time.time() - 7 * 86400, 60):
+            if c["id"] not in seen and views.chat_kind(c) != "dm" and len(chats) < AUTOREPLY_ROWS:
+                chats.append(c)
+                seen.add(c["id"])
+        if not chats:
+            return None
+        agent = getattr(app, "agent", None)
+        most = getattr(agent, "auto_most", 20)
+        rows = []
+        for c in chats:
+            on = c["id"] in marked
+            used = agent.auto_used(c["id"]) if agent is not None and on else 0
+            sub = ("开着 · 今天代答 %d 次" % used) if on else "关着"
+            if version >= 6:
+                r = row(views.chat_name(c, c["id"]), sub, "", key="auto:" + c["id"])
+                r["control"] = {"kind": "switch", "name": "auto:" + c["id"], "on": on, "action": {"id": "autoreply"}}
+            else:
+                r = row(views.chat_name(c, c["id"]), sub, "关掉" if on else "开启",
+                        "autoreply:%s:%s" % ("off" if on else "on", c["id"]), key="auto:" + c["id"])
+            rows.append(r)
+        enabled = bool(getattr(agent, "enabled", False) and getattr(agent, "auto", False))
+        footer = ("开着的群里有人 @ 你，AI 直接以你的身份回复，不用你确认；每个群每天最多 %d 次。私聊、机器人和 @所有人 不代答。" % most
+                  if enabled else "自动代答没有生效：要先在 设置 › 连接器 里打开 /agent 和“自动代答”。")
+        return {"title": "自动代答", "items": rows, "footer": footer}
 
     def _summary(self, c: Dict[str, int], version: int) -> dict:
         stats = [stat("需要我", c["needs"], "机器人通知 %d 条不算在内" % c["bots"] if c.get("bots") else "",
@@ -391,6 +443,9 @@ class ChatsPage(Page):
             if done:
                 sections.append({"title": "已标记处理完", "items": done,
                                  "footer": "有新消息会自动回到“需要我”；要提前放回，在这一行的菜单里选“恢复”"})
+            auto = self._autoreply(version)
+            if auto is not None:
+                sections.append(auto)
         view: Dict[str, Any] = {"sections": sections, "refresh_after": REFRESH, "state": ""}
         if not self.card:
             view["title"] = "%s今天" % p
@@ -549,6 +604,10 @@ def check_view(view: dict, compact: bool = False) -> List[str]:
                         keys.add(t["key"])
             if item.get("icon_color") is not None and item["icon_color"] not in COLORS:
                 problems.append("%s: icon_color %r" % (where, item["icon_color"]))
+            ctl = item.get("control")
+            if ctl is not None and (ctl.get("kind") not in ("switch", "slider", "stepper") or not ctl.get("name")
+                                    or not (ctl.get("action") or {}).get("id") or not item.get("key")):
+                problems.append(where + ": a control needs a kind, a name, an action, and the row a key")
             acts = item.get("actions")
             if acts is not None:
                 if not isinstance(acts, list) or not 1 <= len(acts) <= 4 or sum(1 for a in acts if a.get("swipe")) > 2 \

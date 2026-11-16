@@ -38,7 +38,10 @@ DEFAULT_PREFIX = "/agent"
 DEFAULT_SUFFIX = "> 🤖 AI 代答，仅供参考"  # the end mark before 0.4: none by default now, still recognized
 KNOWN_SUFFIXES = ("🤖 AI 代答，仅供参考", "🤖")
 DEFAULT_HEADER = "> 🤖 AI 回复 · {model} · {effort}"
+AUTO_HEADER = "> 🤖 AI 代答 · {model} · {effort}"
 HEADER_MARK = "🤖 AI 回复"
+AI_MARKS = ("🤖 AI 回复", "🤖 AI 代答", "🤖 AI")  # a line that starts so is an AI's: never answered by ours
+QUIET_KINDS = ("auto", "doc")  # runs nobody asked for in the chat: only the Agent's own replies go out there
 DEFAULT_ACK = "THINKING"  # the reaction that says a request was taken (Feishu's 🤔)
 STOP_WORDS = ("/stop", "/停止", "/停")
 ACTIVE = ("starting", "running")
@@ -153,6 +156,12 @@ class AgentRunner:
         self.launcher = str(cfg.get("agent_launcher") or "").strip()
         self.suffix = parse_suffix(cfg.get("agent_reply_suffix"))
         self.header = parse_header(cfg.get("agent_reply_header"))
+        self.auto = bool(cfg.get("auto_reply", True))
+        self.auto_header = parse_header(cfg.get("auto_reply_header") if cfg.get("auto_reply_header") is not None else AUTO_HEADER)
+        try:
+            self.auto_most = max(1, int(cfg.get("auto_reply_daily_most") or 20))
+        except (TypeError, ValueError):
+            self.auto_most = 20
         ack = cfg.get("agent_ack_reaction")
         self.ack = DEFAULT_ACK if ack is None else str(ack).strip()
         self.purpose = getattr(app.platform, "agent_purpose", "") or ""
@@ -233,10 +242,11 @@ class AgentRunner:
             self._posted[self._digest(body)] = time.time()
 
     def _header_marks(self) -> List[str]:
-        marks = [HEADER_MARK]
-        lead = self.header.split("{", 1)[0].strip(" ·>") if self.header else ""
-        if lead:
-            marks.append(lead)
+        marks = list(AI_MARKS[:2])
+        for h in (self.header, self.auto_header):
+            lead = h.split("{", 1)[0].strip(" ·>") if h else ""
+            if lead:
+                marks.append(lead)
         return marks
 
     def is_agent_text(self, text: str) -> bool:
@@ -249,7 +259,10 @@ class AgentRunner:
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
-        if not row.get("mine") or row.get("from_history") or views.is_system(row):
+        if row.get("from_history") or views.is_system(row):
+            return
+        if not row.get("mine"):
+            self._maybe_auto(row)
             return
         text = row.get("text") or ""
         if not text.strip():
@@ -272,7 +285,59 @@ class AgentRunner:
             return
         if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
             return
-        run = {
+        run = self._new_run(row, req, now)
+        self.store.run_put(run)
+        self._prune()
+        threading.Thread(target=self._start_run, args=(run, row), name="openmate-agent-start", daemon=True).start()
+
+    # ---------------------------------------------------------------- 自动代答
+
+    def auto_used(self, chat_id: str, now: Optional[float] = None) -> int:
+        since = (now or time.time()) - 86400
+        return sum(1 for r in self.store.runs_in_chat(chat_id, 200) if r.get("kind") == "auto" and r["created"] >= since)
+
+    def _maybe_auto(self, row: dict) -> None:
+        """Someone @-mentioned the user in a group they marked for 自动代答: the Agent answers it as the user, with no
+        confirmation (the user's standing choice). Never a direct chat, a bot, @all alone, another AI's reply, or past
+        the group's daily most."""
+        if not (self.enabled and self.auto) or not row.get("at_me"):
+            return
+        chat_id = row["chat_id"]
+        chat = self.store.get_chat(chat_id)
+        if chat is None or views.chat_kind(chat) == "dm" or chat_id not in self.store.autoreply_chats():
+            return
+        now = time.time()
+        if row.get("at") and abs(now - row["at"]) > self.app.timing.agent_fresh:
+            return
+        text = row.get("text") or ""
+        first = text.lstrip().split("\n", 1)[0].lstrip("> ").strip()
+        if self.is_agent_text(text) or any(first.startswith(m) for m in AI_MARKS):
+            return
+        if not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
+            return
+        threading.Thread(target=self._auto_start, args=(row, text, now), name="openmate-agent-auto", daemon=True).start()
+
+    def _auto_start(self, row: dict, text: str, now: float) -> None:
+        chat_id = row["chat_id"]
+        # answering as the user never guesses who asked: a person, as the service says it now; a bot or "can't tell" is left
+        people = getattr(self.app, "people", None)
+        sender = row.get("sender_id") or ""
+        kind = people.kind_now(sender) if people is not None and sender else ""
+        if kind != "user":
+            log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
+            return
+        if self.auto_used(chat_id, now) >= self.auto_most:
+            log.info("自动代答: the group's daily most (%d) is reached; left for the user", self.auto_most)
+            return
+        run = self._new_run(row, strip_leading_mentions(text).strip(), now)
+        run["kind"] = "auto"
+        run["asker"] = row.get("sender_name") or ""
+        self.store.run_put(run)
+        self._prune()
+        self._start_run(run, row)
+
+    def _new_run(self, row: dict, request_text: str, now: float) -> dict:
+        return {
             "id": "omr_" + secrets.token_hex(10),
             "chat_id": row["chat_id"],
             "request_id": row["id"],
@@ -280,7 +345,7 @@ class AgentRunner:
             "root_id": row.get("root_id") or "",
             "state": "starting",
             "created": now,
-            "request_text": req,
+            "request_text": request_text,
             "replies": 0,
             "reply_inflight": 0,
             "reply_ids": [],
@@ -292,9 +357,6 @@ class AgentRunner:
             "client_msg_id": "",
             "last_text": None,
         }
-        self.store.run_put(run)
-        self._prune()
-        threading.Thread(target=self._start_run, args=(run, row), name="openmate-agent-start", daemon=True).start()
 
     # ---------------------------------------------------------------- starting
 
@@ -452,6 +514,15 @@ class AgentRunner:
 
     def _instructions(self, run: dict) -> str:
         c, p = self.app.cid, self.app.platform.name
+        if run.get("kind") == "auto":
+            body = "\n".join([
+                "%s在%s的群里 @ 了我。这个群我开了“自动代答”：请你直接代我回复这条消息，不需要我确认。" % (run.get("asker") or "有人", p),
+                "- 这次的 id 是 %s。调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填回复内容。回复会以我的身份发到群里，引用对方那条消息，并自动加上“AI 代答”抬头，你不用自己加。" % (self._ref(run), c, self._ref(run)),
+                "- 你是以我的身份说话：只说有把握的事实，简短，像我平时在群里回复一样，只回复一次。",
+                "- 需要我拍板、承诺、给个人意见，或涉及敏感信息、你不确定的事：只回一句“收到，我看一下稍后回复你”这类话，不要替我答应任何事。",
+                "- 不要用 %s_send 发别的消息。下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c, c),
+            ])
+            return _block("instructions", "自动代答说明", body)
         body = "\n".join([
             "我在%s里发了一条 /agent 请求，请你替我处理。" % p,
             "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份发到这个话题里，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run)),
@@ -505,7 +576,7 @@ class AgentRunner:
         sources = [row.get("text") or ""] + ([quoted.get("text") or ""] if quoted else []) + [r.get("text") or "" for r in rows[-10:]]
         for title_d, url, body in self._doc_blocks(sources):
             tail.append(_block("doc", title_d, body, url))
-        sentence = run["request_text"] or self.prefix
+        sentence = run["request_text"] or ("（对方只 @ 了我）" if run.get("kind") == "auto" else self.prefix)
         fixed = sum(len(b) + 1 for b in blocks + tail) + len(sentence) + 200
         budget = max(2000, PROMPT_MOST - fixed)
         kept: List[str] = []
@@ -749,11 +820,12 @@ class AgentRunner:
 
     # ---------------------------------------------------------------- sending as the user
 
-    def _model_of(self, run: Optional[dict]) -> tuple:
+    def _model_of(self, run: Optional[dict], header: str = "") -> tuple:
         """(model, effort) of the run's session, as the hub lists it; kept on the run once known. A session just
         started is listed before its model is (the node reports it with the first answer): asked again for up to
         agent_model_wait, and never kept empty."""
-        if not run or not self.header or "{" not in self.header:
+        header = header or self.header
+        if not run or not header or "{" not in header:
             return "", ""
         if run.get("model"):
             return run["model"], run.get("effort") or ""
@@ -793,8 +865,9 @@ class AgentRunner:
         marks = self._header_marks()
         while t and any(t.split("\n", 1)[0].lstrip("> ").strip().startswith(m) for m in marks):
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
-        if self.header:
-            t = fill_header(self.header, *self._model_of(run)) + "\n" + t
+        header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
+        if header:
+            t = fill_header(header, *self._model_of(run, header)) + "\n" + t
         if self.suffix:
             t += ("" if self.suffix.startswith("\n") else "\n\n") + self.suffix
         return t
@@ -817,7 +890,11 @@ class AgentRunner:
 
     def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "") -> str:
         """Send text (with the header / end mark) into the run's chat once per key; the new message's id, "" when it
-        failed."""
+        failed. A run nobody asked for in the chat (自动代答, a document's comment) says nothing there of its own: a
+        failure, a stop or a timeout is the user's to see in the app, never a line in someone else's group."""
+        if run.get("kind") in QUIET_KINDS:
+            log.info("%s %s: nothing posted for %s", run.get("kind"), run["id"], key.split(":", 1)[0])
+            return ""
         body = self.with_suffix(text, run)
         self._remember_post(body)
         try:

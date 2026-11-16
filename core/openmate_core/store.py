@@ -81,6 +81,8 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, kind TEXT NOT NULL, checked REAL NOT NULL)",
     # what the user marked 处理完: hidden while it is still the same (version: its last message, its update time)
     "CREATE TABLE IF NOT EXISTS dismissed (key TEXT PRIMARY KEY, version TEXT NOT NULL, at REAL NOT NULL)",
+    # groups the user marked for 自动代答: an @me there is answered by the Agent as the user, with no confirmation
+    "CREATE TABLE IF NOT EXISTS autoreply (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
 ]
 
 _MESSAGE_COLUMNS = (
@@ -463,6 +465,19 @@ class Store:
     def runs_in_chat(self, chat_id: str, limit: int = 50) -> List[dict]:
         rows = self._all("SELECT * FROM runs WHERE chat_id = ? ORDER BY created DESC LIMIT ?", (chat_id, limit))
         return [self._run_row(r) for r in rows]
+
+    def runs_since(self, since: float, limit: int = 50) -> List[dict]:
+        rows = self._all("SELECT * FROM runs WHERE created >= ? ORDER BY created DESC LIMIT ?", (since, limit))
+        return [self._run_row(r) for r in rows]
+
+    def autoreply_chats(self) -> List[str]:
+        return [r["chat_id"] for r in self._all("SELECT chat_id FROM autoreply ORDER BY at")]
+
+    def autoreply_set(self, chat_id: str, on: bool, now: Optional[float] = None) -> None:
+        if on:
+            self._tx(lambda db: db.execute("INSERT OR IGNORE INTO autoreply (chat_id, at) VALUES (?, ?)", (chat_id, now or time.time())))
+        else:
+            self._tx(lambda db: db.execute("DELETE FROM autoreply WHERE chat_id = ?", (chat_id,)))
 
     def runs_prune(self, before: float, keep: int) -> None:
         def run(db):

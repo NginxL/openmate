@@ -45,6 +45,28 @@ class People:
             self._ask(unknown)
         return {i for i, k in known.items() if k == "bot"}
 
+    def kind_now(self, user_id: str) -> str:
+        """"bot", "user", or "" when the service cannot tell now: the store's answer, else the service's, asked here
+        (for a choice that must not guess, such as answering as the user)."""
+        store = getattr(self.app, "store", None)
+        if not user_id or store is None:
+            return ""
+        known = store.people_kinds([user_id]).get(user_id)
+        if known:
+            return known
+        if not self._can() or not self.app.signed_in:
+            return ""
+        try:
+            kinds = self.app.backend.people_kinds([user_id]) or {}
+        except Exception as e:
+            log.info("who is a bot could not be read now (%s)", e.__class__.__name__)
+            return ""
+        kind = kinds.get(user_id, "")
+        if kind in ("bot", "user"):
+            store.set_people_kinds({user_id: kind})
+            return kind
+        return ""
+
     def _ask(self, ids: Set[str]) -> None:
         if not self._can():
             return

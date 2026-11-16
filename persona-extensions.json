@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.4.1",
+        "version": "0.5.0",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -187,6 +187,27 @@
               "default": "THINKING",
               "maxLength": 40
             },
+            "auto_reply": {
+              "type": "boolean",
+              "title": "自动代答",
+              "description": "在“飞书”页里开了自动代答的群，有人 @ 你时 AI 直接以你的身份回复，不用确认（要先打开 /agent）。私聊、机器人和 @所有人 不代答。",
+              "default": true
+            },
+            "auto_reply_daily_most": {
+              "type": "integer",
+              "title": "每个群每天最多代答",
+              "description": "超过后当天不再代答，留给你自己回复。",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "auto_reply_header": {
+              "type": "string",
+              "title": "代答抬头",
+              "description": "自动代答回复的第一行，{model} 和 {effort} 换成回答它的模型和思考强度。留空表示不加。",
+              "default": "> 🤖 AI 代答 · {model} · {effort}",
+              "maxLength": 200
+            },
             "agent_reply_suffix": {
               "type": "string",
               "title": "AI 代答标记",
@@ -256,9 +277,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.4.1/openmate-feishu-0.4.1.tar.gz",
-          "sha256": "c0d49721fec564cfe496ab4a1d038a70195e511ae4ec2c45a21a8431892d19b4",
-          "size": 115401
+          "url": "packages/openmate-feishu/0.5.0/openmate-feishu-0.5.0.tar.gz",
+          "sha256": "a331513148c68ddbe567f3d32dd57ff36df85f544385fb4f9e4e9a77d097dca8",
+          "size": 119071
         }
       ]
     }

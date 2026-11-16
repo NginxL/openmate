@@ -227,6 +227,9 @@ class TodayPage(Page):
         if aid.startswith("chat:"):
             chat_id = aid[5:]
             return {"push": {"ui": CHATS_PAGE, "state": state_text({"chat": chat_id}), "title": self._chat_title(chat_id)}}
+        if aid.startswith("doc:"):
+            run = self.app.store.run_get(aid[4:]) if getattr(self.app, "store", None) is not None else None
+            return {"open_url": run["doc_url"]} if run and run.get("doc_url") else {"toast": "这条评论的文档链接不在了"}
         if aid == "go:calendar":
             return {"push": {"ui": CALENDAR_PAGE, "title": "日程"}}
         if aid == "go:chats":
@@ -377,6 +380,9 @@ class Day:
 
     def full(self) -> dict:
         sections = [self.needs_card(), self.calendar_card(), self.feishu_card(), self.agents_card()]
+        auto = self.auto_card()
+        if auto is not None:
+            sections.append(auto)
         todos = self.todos_card()
         if todos is not None:
             sections.append(todos)
@@ -462,6 +468,41 @@ class Day:
         if len(p["working"]) > WORK_MOST:
             sec["footer"] = "还有 %d 个" % (len(p["working"]) - WORK_MOST)
         return self._card(sec, "robot", "teal")
+
+    def auto_card(self) -> Optional[dict]:
+        """What the Agent answered as the user today without being asked each time (自动代答 in a marked group, a
+        document's comment): to look over."""
+        store = getattr(self.page.app, "store", None)
+        if store is None:
+            return None
+        since = day_start(self.page.app.tz, self.now.timestamp())
+        runs = [r for r in store.runs_since(since, 100) if r.get("kind") in ("auto", "doc")]
+        if not runs:
+            return None
+        app = self.page.app
+        rows = []
+        for r in runs[:WORK_MOST]:
+            replied = int(r.get("replies") or 0) > 0
+            if replied:
+                badge = {"text": "已代答", "tone": "positive"}
+            elif r["state"] in ("starting", "running"):
+                badge = {"text": "进行中", "tone": "neutral"}
+            else:
+                badge = {"text": "没有代答", "tone": "caution"}
+            if r.get("kind") == "doc":
+                title, action = str(r.get("doc_title") or "云文档评论"), ("doc:" + r["id"]) if r.get("doc_url") else ""
+            else:
+                chat = store.get_chat(r["chat_id"])
+                title, action = views.chat_name(chat, r["chat_id"]), ("chat:" + r["chat_id"]) if self.links else ""
+            sub = "%s：%s" % (r.get("asker") or "有人", r.get("request_text") or "（只 @ 了你）")
+            rows.append(row(title, sub, when(r["created"], app.tz), action, key="auto:" + r["id"], badge=badge,
+                            **self._icon("robot", "purple")))
+        answered = sum(1 for r in runs if int(r.get("replies") or 0) > 0)
+        sec: Dict[str, Any] = {"title": "AI 代答 · %d" % len(runs),
+                               "items": [self._caption("今天代答 %d 次，没有代答 %d 次" % (answered, len(runs) - answered))] + rows}
+        if len(runs) > WORK_MOST:
+            sec["footer"] = "还有 %d 次" % (len(runs) - WORK_MOST)
+        return self._card(sec, "robot", "purple", ("设置", "go:chats"))
 
     def todos_card(self) -> Optional[dict]:
         if not self.todos:
