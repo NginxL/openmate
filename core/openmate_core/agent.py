@@ -750,19 +750,29 @@ class AgentRunner:
     # ---------------------------------------------------------------- sending as the user
 
     def _model_of(self, run: Optional[dict]) -> tuple:
-        """(model, effort) of the run's session, as the hub lists it; asked once and kept on the run."""
+        """(model, effort) of the run's session, as the hub lists it; kept on the run once known. A session just
+        started is listed before its model is (the node reports it with the first answer): asked again for up to
+        agent_model_wait, and never kept empty."""
         if not run or not self.header or "{" not in self.header:
             return "", ""
-        if "model" in run:
-            return run.get("model") or "", run.get("effort") or ""
+        if run.get("model"):
+            return run["model"], run.get("effort") or ""
         mid, sid = run.get("machine_id") or "", run.get("session_id") or ""
         if not mid or not sid:
             return "", ""
-        try:
-            srow = self.hub.session_row(mid, sid) or {}
-        except Exception:
+        deadline = time.monotonic() + self.app.timing.agent_model_wait
+        model = effort = ""
+        while True:
+            try:
+                srow = self.hub.session_row(mid, sid) or {}
+                model, effort = str(srow.get("model") or ""), str(srow.get("effort") or "")
+            except Exception:
+                pass
+            if model or time.monotonic() >= deadline or self._stop.is_set():
+                break
+            self._stop.wait(min(self.app.timing.agent_model_wait / 4, max(0.05, deadline - time.monotonic())))
+        if not model:
             return "", ""  # asked again with the next message
-        model, effort = str(srow.get("model") or ""), str(srow.get("effort") or "")
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur is not None:

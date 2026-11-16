@@ -36,7 +36,7 @@ TOKEN = "pext_test_token"
 def fast(**kw) -> Timing:
     base = dict(debounce=0.15, backoff_min=0.05, backoff_max=0.2, stable_after=0.3, login_wait=3.0, agent_poll=0.05,
                 agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, agent_settle=0.1, secrets_retry=0.05,
-                sent_retry=(0.05, 0.05, 0.05), warm_pages=False)
+                sent_retry=(0.05, 0.05, 0.05), warm_pages=False, agent_model_wait=1.0)
     base.update(kw)
     return Timing(**base)
 
@@ -190,6 +190,7 @@ class FakeHubHTTP:
         self.lock = threading.RLock()
         self.requests: List[dict] = []
         self.sessions: Dict[str, dict] = {}
+        self.model_late = 0  # the session list leaves the model out of this many answers
         self.kb: Dict[str, dict] = {}
         self.full: Dict[str, str] = {}  # item id → full text
         self.stop_status: Dict[str, int] = {}  # session id → HTTP status for …/stop
@@ -325,8 +326,11 @@ class FakeHubHTTP:
                     return 200, {"sessions": [], "total": 0, "has_more": False}
                 status = "offline" if s.get("offline") else "working" if s["working"] else "done"
                 state = {"offline": "offline", "working": "working"}.get(status, "unread")
-                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state,
-                       "model": s.get("model", "claude-opus-5-5"), "effort": s.get("effort", "xhigh")}
+                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state}
+                if self.model_late > 0:  # a session just started is listed before its model
+                    self.model_late -= 1
+                else:
+                    row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"))
                 if s.get("background"):
                     row.update(background_working=True, state="working")
                 return 200, {"sessions": [row],

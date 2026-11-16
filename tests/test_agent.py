@@ -870,6 +870,24 @@ class DefaultsTest(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(len(h.http.starts()), 1)
 
+    def test_a_model_listed_late_is_waited_for_and_never_kept_empty(self):
+        h = self.make()
+        msg = ask(h, "/agent 新会话")
+        run = running(h, msg)
+        h.http.model_late = 2  # the hub lists the new session twice before it knows its model
+        h.tool("agent_reply", request=run["id"], text="第一条")
+        self.assertEqual(h.sent()[-1]["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n第一条")
+        h2 = self.make(agent_reply_suffix="")
+        msg = ask(h2, "/agent 一直不知道模型")
+        run = running(h2, msg)
+        h2.http.model_late = 1000
+        h2.tool("agent_reply", request=run["id"], text="先发出去")
+        self.assertEqual(h2.sent()[-1]["text"], "> 🤖 AI 回复\n先发出去", "after agent_model_wait, without it")
+        self.assertFalse(h2.app.store.run_get(run["id"]).get("model"), "not kept empty")
+        h2.http.model_late = 0
+        h2.tool("agent_reply", request=run["id"], text="第二条")
+        self.assertEqual(h2.sent()[-1]["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n第二条", "asked again")
+
     def test_settings_and_a_refused_reaction(self):
         h = self.make(agent_ack_reaction="OnIt", agent_reply_header="—— {model}（{effort}）", agent_reply_suffix=SUFFIX)
         h.world.react_fail = True
