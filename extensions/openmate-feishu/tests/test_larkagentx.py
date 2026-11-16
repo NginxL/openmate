@@ -236,6 +236,8 @@ class MappingTest(Base):
         self.assertTrue(m.text.startswith("[分享日程] 示例分享会 · 示例会议室 · "), m.text)
         self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(start)), m.text)
         self.assertTrue(m.text.endswith("3 人参与"))
+        as_bytes = self.m(msg_type=16, content="[分享日程] 参与人数=3", content_data={"calendarEvent": event, "attendeesCount": 3})
+        self.assertEqual(as_bytes.text, m.text, "LarkAgentX hands the bytes over as they are")
         empty = self.m(msg_type=16, content="[分享日程] 参与人数=0", content_data={"calendarEvent": "", "attendeesCount": 0})
         self.assertEqual(empty.text, "[分享日程] 参与人数=0")
         junk = self.m(msg_type=16, content="[分享日程] 参与人数=0", content_data={"calendarEvent": "@@@"})
@@ -268,10 +270,16 @@ class MappingTest(Base):
         self.assertTrue(shared.text.startswith("[分享日程] 示例周会 · 示例会议室 · "), shared.text)
         self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(start)), shared.text)
 
+    def test_a_card_with_nothing_handed_over_still_says_it_is_a_card(self):
+        self.assertEqual(self.m(msg_type=14, content_data={}).text, "[卡片]（内容请在飞书里查看）")
+        linked = self.m(msg_type=14, content_data={"actionUrl": "https://example.com/x", "richtext": {"elements": {}}})
+        self.assertEqual(linked.text, "[卡片] https://example.com/x")
+        self.assertEqual(self.m(msg_type=14, content_data={"actionUrl": "lark://x"}).text, "[卡片]（内容请在飞书里查看）")
+
     def test_a_card_read_as_nothing_logs_its_shape_not_its_content(self):
         with self.assertLogs("openmate.larkx", "INFO") as logs:
-            self.m(msg_type=14, content_data={"cardDesc": "", "mystery": {"secret": "不要写进日志", "n": 3}, "list": [1, 2]})
-            self.m(msg_type=14, content_data={"cardDesc": "", "mystery": {"secret": "另一条", "n": 4}, "list": [5, 6]})
+            self.m(msg_type=16, content="[分享日程]", content_data={"mystery": {"secret": "不要写进日志", "n": 3}, "list": [1, 2]})
+            self.m(msg_type=16, content="[分享日程]", content_data={"mystery": {"secret": "另一条", "n": 4}, "list": [5, 6]})
         out = "\n".join(logs.output)
         self.assertEqual(out.count("read as nothing"), 1, "once per shape")
         self.assertIn("mystery:{n:int,secret:str~1}", out)

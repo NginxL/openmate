@@ -91,8 +91,11 @@ class StdioHub:
 
     def _send(self, obj: dict) -> None:
         with self._wl:
-            self._w.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
-            self._w.flush()
+            try:
+                self._w.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+                self._w.flush()
+            except (ValueError, OSError):  # the program's side closed (a test ending): nobody to answer
+                pass
 
     def _read(self) -> None:
         for line in self._r:

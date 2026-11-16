@@ -55,7 +55,7 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
-RENDER_VERSION = "4"
+RENDER_VERSION = "5"
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
 TREE_LIST_MOST = 8
@@ -715,7 +715,11 @@ class LarkXBackend(Backend):
             for key in ("universalCardEntity", "openCardContent"):
                 words, _ = loose_texts(data.get(key), decode=True)
                 lines += words
-        return clip_lines(lines, CARD_TEXT_MOST)
+        text = clip_lines(lines, CARD_TEXT_MOST)
+        if not text:  # LarkAgentX handed over nothing of it (or only its link): say it is there
+            url = str(data.get("actionUrl") or "").strip()
+            text = "[卡片] " + url if url.startswith("https://") else "[卡片]（内容请在飞书里查看）"
+        return text
 
     def _named(self, text: str) -> str:
         """LarkAgentX's lines of a merged forward start with the sender's id: their names instead, where known."""
@@ -1360,11 +1364,16 @@ def loose_texts(value, decode: bool = False, depth: int = 0):
         elif isinstance(v, str):
             add(v)
 
-    if decode and isinstance(value, str) and value and not value.lstrip().startswith(("{", "[")):
+    if decode and isinstance(value, (bytes, bytearray)):
+        buf = bytes(value)  # LarkAgentX hands some bytes fields over as they are
+    elif decode and isinstance(value, str) and value and not value.lstrip().startswith(("{", "[")):
         try:
             buf = base64.b64decode(value + "=" * (-len(value) % 4))
         except (ValueError, TypeError):
             buf = b""
+    else:
+        buf = None
+    if buf is not None:
         strings: List[str] = []
         _proto_strings(buf, strings, times)
         for x in strings:
@@ -1380,7 +1389,7 @@ def share_calendar_text(data: dict) -> str:
     raw = data.get("calendarEvent")
     if not raw:
         return ""
-    words, times = loose_texts(raw, decode=isinstance(raw, str))
+    words, times = loose_texts(raw, decode=isinstance(raw, (str, bytes, bytearray)))
     words = words[:3]
     if not words:
         return ""
