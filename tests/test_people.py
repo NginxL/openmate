@@ -119,10 +119,16 @@ class BotsInTheChatsTest(unittest.TestCase):
         def page():
             return h.hub.request("ui.render", {"contribution": "chats", "state": "", "ui_version": 6})
 
-        wait_until(lambda: badges() and badges()[-1].get("text") == "2", timeout=15, what="the bot's two left out of the badge")
-        view = page()
+        # the seed already makes the badge "2": wait for the page to have seen the bot's lines and told them apart
+        def needs_now():
+            v = page()
+            head = v["sections"][0]["items"][0]["stats"][0]
+            return v if head.get("detail") == "机器人通知 2 条不算在内" else None
+
+        view = wait_until(needs_now, timeout=15, what="the bot's two told apart")
         need = [s for s in view["sections"] if s.get("title") == "需要我"][0]["items"]
         self.assertEqual([r["title"] for r in need], ["示例同事甲", "示例项目群"])
+        wait_until(lambda: badges() and badges()[-1].get("text") == "2", timeout=15, what="the badge without them")
         head = view["sections"][0]["items"][0]["stats"][0]
         self.assertEqual((head["value"], head["detail"]), ("2", "机器人通知 2 条不算在内"))
         asked = [u for call in w.kinds_calls for u in call]
