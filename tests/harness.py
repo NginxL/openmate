@@ -325,7 +325,8 @@ class FakeHubHTTP:
                     return 200, {"sessions": [], "total": 0, "has_more": False}
                 status = "offline" if s.get("offline") else "working" if s["working"] else "done"
                 state = {"offline": "offline", "working": "working"}.get(status, "unread")
-                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state}
+                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state,
+                       "model": s.get("model", "claude-opus-5-5"), "effort": s.get("effort", "xhigh")}
                 if s.get("background"):
                     row.update(background_working=True, state="working")
                 return 200, {"sessions": [row],

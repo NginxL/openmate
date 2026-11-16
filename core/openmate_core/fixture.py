@@ -45,6 +45,8 @@ class FixtureWorld:
         self.bots: Dict[str, str] = {"bot_example_notice": "示例通知机器人"}  # programs: people_kinds says "bot"
         self.people.update(self.bots)
         self.kinds_fail = False  # people_kinds raises
+        self.reactions: List[Tuple[str, str, str]] = []  # (chat, message, reaction) put by react
+        self.react_fail = False
         self.kinds_calls: List[List[str]] = []
         self.chats: Dict[str, Chat] = {}
         self.history: Dict[str, List[Message]] = {}
@@ -257,6 +259,13 @@ class FixtureBackend(Backend):
         if c is None:
             raise BackendError("没有这个会话", "not_found")
         return c
+
+    def react(self, chat_id: str, message_id: str, reaction: str) -> None:
+        w = self.world
+        with w.lock:
+            if w.react_fail:
+                raise BackendError("表情回应失败", "unavailable")
+            w.reactions.append((chat_id, message_id, reaction))
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         w = self.world

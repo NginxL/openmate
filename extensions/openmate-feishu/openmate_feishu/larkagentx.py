@@ -1014,6 +1014,16 @@ class LarkXBackend(Backend):
             self._names[key] = (now + (NAME_TTL if name else NAME_MISS_TTL), name)
         return name
 
+    def react(self, chat_id: str, message_id: str, reaction: str) -> None:
+        client, _ = self._signed_in()
+        mid = _id(message_id)
+        if not mid or not reaction:
+            raise BackendError("没有要回应的消息", "not_found")
+        try:
+            client.api("reactions.PutReactionRequest", {"messageId": mid, "reactionType": reaction})
+        except Exception as e:  # the service's words stay out of the user's sight; the kind is enough
+            raise BackendError("飞书没有接受这个表情回应（%s）" % e.__class__.__name__, "unavailable")
+
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         ids = [i for i in (_id(u) for u in user_ids) if i]
         if not ids:

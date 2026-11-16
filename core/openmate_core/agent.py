@@ -35,8 +35,11 @@ from .wire import RPCError
 log = logging.getLogger("openmate.agent")
 
 DEFAULT_PREFIX = "/agent"
-DEFAULT_SUFFIX = "> 🤖 AI 代答，仅供参考"
+DEFAULT_SUFFIX = "> 🤖 AI 代答，仅供参考"  # the end mark before 0.4: none by default now, still recognized
 KNOWN_SUFFIXES = ("🤖 AI 代答，仅供参考", "🤖")
+DEFAULT_HEADER = "> 🤖 AI 回复 · {model} · {effort}"
+HEADER_MARK = "🤖 AI 回复"
+DEFAULT_ACK = "THINKING"  # the reaction that says a request was taken (Feishu's 🤔)
 STOP_WORDS = ("/stop", "/停止", "/停")
 ACTIVE = ("starting", "running")
 PROMPT_MOST = 30000
@@ -57,15 +60,53 @@ def valid_prefix(v) -> str:
 
 
 def parse_suffix(v) -> str:
-    """The reply suffix: the default when unset or empty, none for a single space, a literal \\n is a newline."""
-    if v is None:
-        return DEFAULT_SUFFIX
-    s = str(v)
-    if s == " ":
+    """The reply's end mark: none when unset, empty or a single space; a literal \\n is a newline."""
+    s = "" if v is None else str(v)
+    if not s.strip():
         return ""
-    if s == "":
-        return DEFAULT_SUFFIX
     return s.replace("\\n", "\n")
+
+
+def parse_header(v) -> str:
+    """The reply's first line, {model} and {effort} filled in: the default when unset, none for empty or a space."""
+    if v is None:
+        return DEFAULT_HEADER
+    s = str(v)
+    return "" if not s.strip() else s.replace("\\n", " ")
+
+
+def model_label(model: str) -> str:
+    """A model id as people say it: claude-opus-5-5 → Claude Opus 5.5, gpt-6-1-sol → GPT-6.1 Sol."""
+    m = re.sub(r"\[(\w+)\]$", "", (model or "").strip())
+    one_m = (model or "").strip().endswith("[1m]")
+    parts = [p for p in m.split("-") if p]
+    if not parts:
+        return ""
+    if re.fullmatch(r"\d{8}", parts[-1]):  # a date stamp
+        parts = parts[:-1]
+    family, rest = parts[0], parts[1:]
+    nums = [p for p in rest if p.isdigit()]  # the version, wherever it sits (claude-opus-5-5, gpt-6-1-sol)
+    words = [p for p in rest if not p.isdigit()]
+    version = ".".join(nums)
+    names = " ".join(w if w.isupper() else w.capitalize() for w in words)
+    if family.lower() == "gpt":
+        out = "GPT-" + version + (" " + names if names else "") if version else "GPT " + names
+    else:
+        # the version where the id has it: claude-opus-5-5 → Claude Opus 5.5, gemini-3-pro → Gemini 3 Pro
+        first_num = next((i for i, p in enumerate(rest) if p.isdigit()), len(rest))
+        first_word = next((i for i, p in enumerate(rest) if not p.isdigit()), len(rest))
+        known = family.lower() in ("claude", "gemini", "grok", "llama", "qwen", "deepseek", "kimi", "glm")
+        fam = family.capitalize() if known else family
+        middle = (version, names) if first_num < first_word else (names, version)
+        out = " ".join(x for x in (fam,) + middle if x)
+    return out + (" 1M" if one_m else "")
+
+
+def fill_header(template: str, model: str, effort: str) -> str:
+    """The header with what is known; a part left empty takes its " · " with it."""
+    out = template.replace("{model}", model_label(model)).replace("{effort}", (effort or "").strip())
+    out = re.sub(r"(\s*·\s*)+(?=\s*(·|$))", "", out)  # empty parts
+    return re.sub(r"\s+$", "", out)
 
 
 def match_prefix(body: str, prefix: str) -> Optional[str]:
@@ -111,6 +152,9 @@ class AgentRunner:
         self.machine = str(cfg.get("agent_machine") or "").strip()
         self.launcher = str(cfg.get("agent_launcher") or "").strip()
         self.suffix = parse_suffix(cfg.get("agent_reply_suffix"))
+        self.header = parse_header(cfg.get("agent_reply_header"))
+        ack = cfg.get("agent_ack_reaction")
+        self.ack = DEFAULT_ACK if ack is None else str(ack).strip()
         self.purpose = getattr(app.platform, "agent_purpose", "") or ""
         self._mu = threading.Lock()
         self._run_locks: Dict[str, threading.RLock] = {}
@@ -188,12 +232,20 @@ class AgentRunner:
         with self._mu:
             self._posted[self._digest(body)] = time.time()
 
+    def _header_marks(self) -> List[str]:
+        marks = [HEADER_MARK]
+        lead = self.header.split("{", 1)[0].strip(" ·>") if self.header else ""
+        if lead:
+            marks.append(lead)
+        return marks
+
     def is_agent_text(self, text: str) -> bool:
         t = (text or "").rstrip()
         for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
             if s and t.endswith(s):
                 return True
-        return False
+        first = t.lstrip().split("\n", 1)[0].lstrip("> ").strip()
+        return any(first.startswith(m) for m in self._header_marks())
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
@@ -253,7 +305,18 @@ class AgentRunner:
                 return r
         return None
 
+    def _ack_request(self, run: dict) -> None:
+        """Say the request was taken: a reaction on it (agent_ack_reaction; none when empty). Never in the way."""
+        backend = getattr(self.app, "backend", None)
+        if not self.ack or backend is None or not self.store.seen_add("ack:%s" % run["id"]):
+            return
+        try:
+            backend.react(run["chat_id"], run["request_id"], self.ack)
+        except Exception as e:
+            log.info("the /agent request's reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+
     def _start_run(self, run: dict, row: dict) -> None:
+        self._ack_request(run)
         try:
             self._start(run, row)
         except Exception:
@@ -686,17 +749,45 @@ class AgentRunner:
 
     # ---------------------------------------------------------------- sending as the user
 
-    def with_suffix(self, text: str) -> str:
-        t = (text or "").rstrip()
-        if not self.suffix:
-            return t
+    def _model_of(self, run: Optional[dict]) -> tuple:
+        """(model, effort) of the run's session, as the hub lists it; asked once and kept on the run."""
+        if not run or not self.header or "{" not in self.header:
+            return "", ""
+        if "model" in run:
+            return run.get("model") or "", run.get("effort") or ""
+        mid, sid = run.get("machine_id") or "", run.get("session_id") or ""
+        if not mid or not sid:
+            return "", ""
+        try:
+            srow = self.hub.session_row(mid, sid) or {}
+        except Exception:
+            return "", ""  # asked again with the next message
+        model, effort = str(srow.get("model") or ""), str(srow.get("effort") or "")
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"])
+            if cur is not None:
+                cur["model"], cur["effort"] = model, effort
+                self.store.run_put(cur)
+        run["model"], run["effort"] = model, effort
+        return model, effort
+
+    def with_suffix(self, text: str, run: Optional[dict] = None) -> str:
+        """The message as it goes out: the header line on top (the model and effort that answered), the end mark if
+        one is set. A mark the Agent wrote itself is not doubled."""
+        t = (text or "").strip()
         for s in {self.suffix.strip(), DEFAULT_SUFFIX, KNOWN_SUFFIXES[0]}:
-            while s and t.endswith(s):  # the Agent wrote the mark itself: keep one
+            while s and t.endswith(s):
                 t = t[: -len(s)].rstrip()
                 if t.endswith(">"):
                     t = t[:-1].rstrip()
-        sep = "" if self.suffix.startswith("\n") else "\n\n"
-        return t + sep + self.suffix
+        marks = self._header_marks()
+        while t and any(t.split("\n", 1)[0].lstrip("> ").strip().startswith(m) for m in marks):
+            t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
+        if self.header:
+            t = fill_header(self.header, *self._model_of(run)) + "\n" + t
+        if self.suffix:
+            t += ("" if self.suffix.startswith("\n") else "\n\n") + self.suffix
+        return t
 
     def _send(self, run: dict, key: str, body: str, reply_to: str, root: str) -> dict:
         """Send body into the run's chat as the user, once per key (the send journal). Nobody confirms these sends
@@ -715,8 +806,9 @@ class AgentRunner:
         return self.app.send_once(key, "agent", go)
 
     def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "") -> str:
-        """Send text (with the suffix) into the run's chat once per key; the new message's id, "" when it failed."""
-        body = self.with_suffix(text)
+        """Send text (with the header / end mark) into the run's chat once per key; the new message's id, "" when it
+        failed."""
+        body = self.with_suffix(text, run)
         self._remember_post(body)
         try:
             res = self._send(run, key, body, reply_to, root)
@@ -745,7 +837,7 @@ class AgentRunner:
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
-        body = self.with_suffix(text)
+        body = self.with_suffix(text, cur)
         self._remember_post(body)
         sent_id = ""
         try:

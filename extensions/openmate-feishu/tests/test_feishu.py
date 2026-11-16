@@ -62,8 +62,8 @@ class ManifestTest(unittest.TestCase):
     def test_configuration(self):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
-                                       "agent_machine", "agent_launcher", "agent_reply_suffix", "history_chats",
-                                       "triage_rules", "lark_cli", "lark_cli_profile"])
+                                       "agent_machine", "agent_launcher", "agent_reply_header", "agent_ack_reaction",
+                                       "agent_reply_suffix", "history_chats", "triage_rules", "lark_cli", "lark_cli_profile"])
         self.assertNotIn("default", props["larkx_python"])
         self.assertEqual(config_defaults(MANIFEST).get("lark_cli_profile", ""), "", "lark-cli's default unless named")
 
@@ -74,7 +74,8 @@ class ManifestTest(unittest.TestCase):
         self.assertIs(d["agent"], False)
         self.assertEqual(props["agent_machine"]["format"], "machine")
         self.assertEqual(props["agent_launcher"]["format"], "launcher")
-        self.assertEqual(d["agent_reply_suffix"], "> 🤖 AI 代答，仅供参考")
+        self.assertEqual((d["agent_reply_header"], d["agent_ack_reaction"], d["agent_reply_suffix"]),
+                         ("> 🤖 AI 回复 · {model} · {effort}", "THINKING", ""))
         self.assertEqual((props["history_chats"]["minimum"], props["history_chats"]["maximum"], d["history_chats"]), (0, 50, 20))
         self.assertLessEqual(props["triage_rules"]["maxLength"], 4000)
         self.assertIn("http://", props["http_proxy"]["description"])

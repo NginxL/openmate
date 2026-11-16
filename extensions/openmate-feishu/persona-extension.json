@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -100,11 +100,25 @@
         "title": "/agent 用哪个启动器",
         "description": "不设置就用 Persona 里“Lark /agent”的模型设置。"
       },
+      "agent_reply_header": {
+        "type": "string",
+        "title": "AI 回复抬头",
+        "description": "每条 /agent 回复的第一行，{model} 和 {effort} 换成回答它的模型和思考强度。留空表示不加。",
+        "default": "> 🤖 AI 回复 · {model} · {effort}",
+        "maxLength": 200
+      },
+      "agent_ack_reaction": {
+        "type": "string",
+        "title": "接单表情",
+        "description": "收到 /agent 请求时在那条消息上点的表情（飞书表情代号，如 THINKING、OnIt、OK）。留空表示不点。",
+        "default": "THINKING",
+        "maxLength": 40
+      },
       "agent_reply_suffix": {
         "type": "string",
         "title": "AI 代答标记",
-        "description": "加在每条 /agent 回复末尾。写 \\n 表示换行；只写一个空格表示不加。",
-        "default": "> 🤖 AI 代答，仅供参考",
+        "description": "加在每条 /agent 回复末尾，例如“> 🤖 AI 代答，仅供参考”。写 \\n 表示换行；留空表示不加。",
+        "default": "",
         "maxLength": 200
       },
       "history_chats": {

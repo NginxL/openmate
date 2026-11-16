@@ -223,6 +223,11 @@ class Backend(abc.ABC):
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         """A person's display name ("" when unknown); chat_id when the name is per chat (an alias in a group)."""
 
+    def react(self, chat_id: str, message_id: str, reaction: str) -> None:
+        """Put a reaction (the service's emoji key, e.g. THINKING) on a message, as the account. BackendError when
+        the service has none or refused it. The core uses it to say a /agent request was taken."""
+        raise BackendError("这个平台不支持表情回应", "unsupported")
+
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         """Which of these are programs ("bot": bots and AI assistants) and which people ("user"), for those the service
         can tell; {} when it cannot. Read-only; the core asks in the background, at most 50 at a time."""

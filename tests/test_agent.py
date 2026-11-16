@@ -12,7 +12,8 @@ RUN_ID = re.compile(r"omr_[0-9a-f]{20}")
 
 
 def agent(test, timing=None, **cfg):
-    config = {"agent": True}
+    # these tests check the end mark (the style before 0.4); DefaultsTest checks today's: a header, a reaction
+    config = {"agent": True, "agent_reply_suffix": SUFFIX, "agent_reply_header": " ", "agent_ack_reaction": ""}
     config.update(cfg)
     h = Harness(test, config=config, timing=timing)
     h.sign_in()
@@ -788,9 +789,10 @@ class SettingsAndFailuresTest(unittest.TestCase):
     def test_suffix_settings(self):
         from openmate_core.agent import parse_suffix
 
-        self.assertEqual(parse_suffix(None), SUFFIX)
-        self.assertEqual(parse_suffix(""), SUFFIX)
+        self.assertEqual(parse_suffix(None), "", "no end mark unless one is set")
+        self.assertEqual(parse_suffix(""), "")
         self.assertEqual(parse_suffix(" "), "")
+        self.assertEqual(parse_suffix(SUFFIX), SUFFIX)
         self.assertEqual(parse_suffix("\\n—— AI"), "\n—— AI")
         h = agent(self, agent_reply_suffix=" ")
         m = ask(h, "/agent 不要标记")
@@ -812,8 +814,8 @@ class SettingsAndFailuresTest(unittest.TestCase):
         h = Harness(self, config={"agent": True}, hub_url="")
         h.sign_in()
         m = ask(h, "/agent 你好")
-        wait_until(lambda: replies(h), what="the explanation")
-        self.assertIn("Persona hub", replies(h)[0]["text"])
+        said = wait_until(lambda: [x for x in h.sent() if "Persona hub" in x["text"]], what="the explanation")
+        self.assertTrue(said[0]["text"].startswith("> 🤖 AI 回复\n"), "the header, without a model: no session yet")
         self.assertEqual(run_of(h, m)["state"], "failed")
 
     def test_start_refused(self):
@@ -838,6 +840,59 @@ class SettingsAndFailuresTest(unittest.TestCase):
         self.assertIsNotNone(store.run_get("active"), "a running request is never pruned")
         self.assertLessEqual(store.run_count(), 201)
         self.assertIsNotNone(store.run_get("r005"))
+
+
+class DefaultsTest(unittest.TestCase):
+    """Today's defaults: a 🤔 on the request when it is taken, and the answer under a header naming the model."""
+
+    def make(self, **cfg):
+        config = {"agent": True}
+        config.update(cfg)
+        h = Harness(self, config=config)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        return h
+
+    def test_taken_with_a_reaction_and_answered_under_the_models_name(self):
+        h = self.make()
+        msg = ask(h, "/agent 帮我总结一下")
+        wait_until(lambda: h.world.reactions, what="the reaction")
+        self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "THINKING")])
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="> 🤖 AI 回复 · 别的模型\n总结如下：一切正常。")
+        sent = h.sent()[-1]
+        self.assertEqual(sent["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n总结如下：一切正常。", "its own header is not doubled")
+        self.assertEqual((sent["reply_to"], sent["root"]), (msg.id, msg.id), "quoting the request")
+        self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "THINKING")], "once")
+        self.assertTrue(h.app.agent.is_agent_text(sent["text"]))
+        # a reply starting with the header never starts another request
+        h.world.push("chat_example_team", "me", "> 🤖 AI 回复 · Claude Opus 5.5\n/agent 再来一次")
+        time.sleep(0.3)
+        self.assertEqual(len(h.http.starts()), 1)
+
+    def test_settings_and_a_refused_reaction(self):
+        h = self.make(agent_ack_reaction="OnIt", agent_reply_header="—— {model}（{effort}）", agent_reply_suffix=SUFFIX)
+        h.world.react_fail = True
+        msg = ask(h, "/agent 写个周报")
+        run = running(h, msg)  # a refused reaction never holds the request
+        h.tool("agent_reply", request=run["id"], text="周报写好了")
+        self.assertEqual(h.sent()[-1]["text"], "—— Claude Opus 5.5（xhigh）\n周报写好了\n\n" + SUFFIX)
+        self.assertEqual(h.world.reactions, [])
+        h2 = self.make(agent_ack_reaction="", agent_reply_header="")
+        msg = ask(h2, "/agent 不要表情")
+        run = running(h2, msg)
+        h2.tool("agent_reply", request=run["id"], text="好")
+        self.assertEqual((h2.sent()[-1]["text"], h2.world.reactions), ("好", []))
+
+    def test_labels(self):
+        from openmate_core.agent import fill_header, model_label
+
+        self.assertEqual([model_label(m) for m in ("claude-opus-5-5", "gpt-6-1-sol", "gpt-6-astra", "claude-sonnet-5-5[1m]",
+                                                    "claude-haiku-5-5-20261001", "gemini-3-pro", "")],
+                         ["Claude Opus 5.5", "GPT-6.1 Sol", "GPT-6 Astra", "Claude Sonnet 5.5 1M", "Claude Haiku 5.5",
+                          "Gemini 3 Pro", ""])
+        self.assertEqual(fill_header("> 🤖 AI 回复 · {model} · {effort}", "", ""), "> 🤖 AI 回复", "unknown parts go")
+        self.assertEqual(fill_header("> 🤖 AI 回复 · {model} · {effort}", "gpt-6-astra", ""), "> 🤖 AI 回复 · GPT-6 Astra")
 
 
 if __name__ == "__main__":

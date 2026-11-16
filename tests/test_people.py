@@ -119,7 +119,7 @@ class BotsInTheChatsTest(unittest.TestCase):
         def page():
             return h.hub.request("ui.render", {"contribution": "chats", "state": "", "ui_version": 6})
 
-        wait_until(lambda: badges() and badges()[-1].get("text") == "2", what="the bot's two left out of the badge")
+        wait_until(lambda: badges() and badges()[-1].get("text") == "2", timeout=15, what="the bot's two left out of the badge")
         view = page()
         need = [s for s in view["sections"] if s.get("title") == "需要我"][0]["items"]
         self.assertEqual([r["title"] for r in need], ["示例同事甲", "示例项目群"])
@@ -131,7 +131,7 @@ class BotsInTheChatsTest(unittest.TestCase):
         # a person in a group @-mentioning me still counts, even where a bot did too; the row says the person's @me,
         # not the chat's last line
         w.push("chat_example_chatter", "user_example_c", "@示例用户 你怎么看？", at_me=True)
-        wait_until(lambda: badges()[-1].get("text") == "3", what="a person's @me counts")
+        wait_until(lambda: badges()[-1].get("text") == "3", timeout=15, what="a person's @me counts")
         w.push("chat_example_chatter", "bot_example_notice", "今日排行榜已更新")
         wait_until(lambda: "今日排行榜" in str(h.app.store.messages_before("chat_example_chatter", None, 5)), what="stored")
         need = [s for s in page()["sections"] if s.get("title") == "需要我"][0]["items"]

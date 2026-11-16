@@ -653,6 +653,17 @@ class ReadTest(Base):
         self.assertEqual(self.b.user_name(ME), "示例用户")
         self.assertEqual(self.b.user_name(""), "")
 
+    def test_a_reaction(self):
+        S.api_answers["reactions.PutReactionRequest"] = {}
+        self.b.react("500", "101", "THINKING")
+        self.assertEqual(S.api_calls[-1], ("reactions.PutReactionRequest", {"messageId": "101", "reactionType": "THINKING"}))
+        with self.assertRaises(larkagentx.BackendError):
+            self.b.react("500", "", "THINKING")
+        del S.api_answers["reactions.PutReactionRequest"]  # refused: a BackendError with no library words
+        with self.assertRaises(larkagentx.BackendError) as e:
+            self.b.react("500", "102", "NOPE")
+        self.assertEqual(e.exception.kind, "unavailable")
+
     def test_who_is_a_bot(self):
         S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {
             "7003": {"id": "7003", "name": "示例同事丙", "type": "USER"},
