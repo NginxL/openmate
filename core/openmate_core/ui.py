@@ -25,6 +25,7 @@ CHATS_PAGE = "chats"
 CHATS_CARD = "chats-today"
 NEEDS_MOST = 30
 GROUPS_MOST = 10
+SLOW_RENDER = 0.3
 THREAD_LINES = 30
 REFRESH = 60
 
@@ -279,7 +280,14 @@ class UI:
         return page
 
     def render(self, params: dict) -> dict:
-        return self._page(params).render(params)
+        page = self._page(params)
+        t0 = time.monotonic()
+        try:
+            return page.render(params)
+        finally:
+            took = time.monotonic() - t0
+            if took > SLOW_RENDER:  # the hub and the apps wait on it: say which page was slow
+                log.info("ui.render %s took %dms", params.get("contribution"), took * 1000)
 
     def action(self, params: dict) -> dict:
         return self._page(params).action(params)
