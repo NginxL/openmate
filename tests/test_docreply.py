@@ -50,9 +50,12 @@ class DocReplyTest(unittest.TestCase):
 
     def test_what_is_never_answered(self):
         h = make(self)
+        self.assertEqual(h.app.people.kind_now("user_example_b"), "user", "known as a person: only the rule below says no")
         mention(h, "d-bot", who="bot_example_notice")
         mention(h, "d-ai", text="🤖 AI 代答 · 某模型\n我先看看")
         mention(h, "d-old", at=time.time() - 7200)
+        time.sleep(0.5)
+        self.assertEqual(h.http.starts(), [])
         h.world.people["user_example_new"] = "新同事"
         h.world.kinds_fail = True
         mention(h, "d-unknown", who="user_example_new")
