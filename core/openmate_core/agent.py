@@ -605,8 +605,8 @@ class AgentRunner:
     def _settled(self, run: dict) -> bool:
         """The turn ended without its turn_duration item: the session answered our request, has been quiet for
         agent_settle (so the session list's status, which lags the transcript, has caught up) and is done or idle."""
-        if not run.get("ours_seen") or not run.get("answered"):
-            return False
+        if not run.get("ours_seen") or not (run.get("answered") or run.get("replies")):  # a reply through the tool
+            return False                                                                # answered it too
         settle = self.app.timing.agent_settle
         now = time.time()
         if now - float(run.get("quiet_since") or run["created"]) < settle:

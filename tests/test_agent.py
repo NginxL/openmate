@@ -650,6 +650,16 @@ class NetworkTest(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(len(h.http.session_rows()), asked, "a finished run is not polled any more")
 
+    def test_a_run_that_replied_through_the_tool_ends_by_its_status(self):
+        h = agent(self)
+        m = ask(h, "/agent 只用工具回复")
+        run = running(h, m)
+        h.tool("agent_reply", request=run["id"], text="工具回复")
+        h.http.finish(run["session_id"])  # nothing new in the transcript that the poll would read as an answer
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "done", what="done")
+        time.sleep(0.2)
+        self.assertEqual([x["text"] for x in replies(h)], ["工具回复\n\n" + SUFFIX])
+
     def test_a_done_status_before_the_answer_is_not_the_end(self):
         h = agent(self)
         m = ask(h, "/agent 还没开口")
