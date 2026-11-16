@@ -41,6 +41,7 @@ EVENTS = [
     ev("e3", "交流分享", 16, (20, 30), (21, 30), rsvp="tentative"),
     ev("e4", "已拒绝的会", 16, (16, 0), (17, 0), rsvp="decline"),
     ev("e5", "周会", 17, (10, 0), (11, 0)),
+    ev("e7", "明天的邀请", 17, (15, 0), (16, 0), rsvp="needs_action"),
     {"event_id": "e6", "summary": "团建", "start_time": {"date": "2026-11-18"}, "end_time": {"date": "2026-11-19"},
      "self_rsvp_status": "accept"},
 ]
@@ -78,6 +79,10 @@ def pages(config=None, runner=None, clock=None):
 
 
 def items(view):
+    from openmate_core.ui import check_view
+
+    problems = check_view(view, compact="title" not in view)
+    assert not problems, problems
     return [it for s in view["sections"] for it in s["items"]]
 
 
@@ -109,11 +114,12 @@ class AgendaTest(unittest.TestCase):
         self.assertEqual(view["title"], "日程")
         grid = items(view)[0]["stats"]
         self.assertEqual([(s["label"], s["value"]) for s in grid],
-                         [("今天", "3 个"), ("下一个", "14:00"), ("现在", "会议中"), ("待回复", "1")])
+                         [("今天", "3 个"), ("下一个", "14:00"), ("现在", "会议中"), ("待回复", "2")])
         self.assertEqual(grid[2]["detail"], "10:30 结束")
         self.assertEqual(grid[1]["detail"], "示例评审会")
         pending = section(view, "待回复的邀请")
-        self.assertEqual([(r["title"], r["value"]) for r in pending], [("示例评审会", "11-16 周一 14:00–15:00")])
+        self.assertEqual([(r["title"], r["value"]) for r in pending],
+                         [("示例评审会", "11-16 周一 14:00–15:00"), ("明天的邀请", "11-17 周二 15:00–16:00")])
         self.assertEqual(pending[0]["badge"], {"text": "待回复", "tone": "caution"})
         today = section(view, "今天")
         self.assertEqual([r["title"] for r in today], ["站会", "示例评审会", "交流分享"], "not the declined one")
@@ -122,7 +128,8 @@ class AgendaTest(unittest.TestCase):
         self.assertNotIn("badge", today[0])
         self.assertEqual(today[0]["action"], {"id": "open:e1"})
         later = section(view, "接下来 6 天")
-        self.assertEqual([(r["title"], r["value"]) for r in later], [("周会", "11-17 周二 10:00–11:00"), ("团建", "11-18 周三 全天")])
+        self.assertEqual([(r["title"], r["value"]) for r in later],
+                         [("周会", "11-17 周二 10:00–11:00"), ("明天的邀请", "11-17 周二 15:00–16:00"), ("团建", "11-18 周三 全天")])
 
     def test_free_until_the_next_and_none_left(self):
         page, _, _, _ = pages(clock=lambda: dt.datetime(2026, 11, 16, 11, 0, tzinfo=TZ).timestamp())

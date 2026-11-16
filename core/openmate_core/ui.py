@@ -9,6 +9,7 @@ The page's badge (ui.badge) is how many chats need the user; it is sent again wh
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
 import threading
 import time
@@ -85,6 +86,24 @@ def when(ts: float, tz, now: Optional[float] = None) -> str:
     return d.strftime("%m-%d")
 
 
+def state_of(params: dict) -> dict:
+    """The page's state as the app sends it back: a string (JSON) the extension wrote; {} when none or unreadable."""
+    raw = params.get("state")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            v = json.loads(raw)
+            return v if isinstance(v, dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+def state_text(state: dict) -> str:
+    return json.dumps(state, ensure_ascii=False, separators=(",", ":")) if state else ""
+
+
 def day_start(tz, now: Optional[float] = None) -> float:
     d = _dt.datetime.fromtimestamp(now or time.time(), tz)
     return d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -145,7 +164,7 @@ class ChatsPage(Page):
         self.data = ChatsToday(app)
 
     def render(self, params: dict) -> dict:
-        state = params.get("state") if isinstance(params.get("state"), dict) else {}
+        state = state_of(params)
         if not self.card and state.get("chat"):
             return self._chat(str(state["chat"]), int(params.get("ui_version") or 1))
         return self._overview(int(params.get("ui_version") or 1))
@@ -191,7 +210,7 @@ class ChatsPage(Page):
                       for chat, last in self.data.active_groups()]
             if groups:
                 sections.append({"title": "今天活跃的群", "items": groups})
-        view: Dict[str, Any] = {"sections": sections, "refresh_after": REFRESH, "state": {}}
+        view: Dict[str, Any] = {"sections": sections, "refresh_after": REFRESH, "state": ""}
         if not self.card:
             view["title"] = "%s今天" % p
         return view
@@ -209,7 +228,7 @@ class ChatsPage(Page):
         if not items:
             items = [empty("最近没有消息", "", version)]
         back = {"type": "button", "title": "返回", "action": {"id": "back"}}
-        return {"title": views.chat_name(chat, chat_id), "state": {"chat": chat_id}, "refresh_after": REFRESH,
+        return {"title": views.chat_name(chat, chat_id), "state": state_text({"chat": chat_id}), "refresh_after": REFRESH,
                 "sections": [{"items": [back]}, {"title": views.where(app.platform.name, chat, chat_id), "items": items}]}
 
 
@@ -260,3 +279,61 @@ class UI:
         if text:
             params["tone"] = "caution"
         app.peer.notify("ui.badge", params)
+
+
+TONES = ("neutral", "positive", "caution", "danger")
+
+
+def check_view(view: dict, compact: bool = False) -> List[str]:
+    """What the hub would refuse in a View (docs/extensions/extensions.md "Declarative UI": the schema and ui.go's
+    checks), as sentences; [] when it draws. For tests, and for a page that might grow past a limit."""
+    problems: List[str] = []
+    if not isinstance(view, dict):
+        return ["not an object"]
+    if "state" in view and (not isinstance(view["state"], str) or len(view["state"]) > 16384):
+        problems.append("state must be a string of at most 16 KB")
+    if "refresh_after" in view and (not isinstance(view["refresh_after"], int) or view["refresh_after"] < 0):
+        problems.append("refresh_after must be seconds")
+    sections = view.get("sections")
+    if not isinstance(sections, list):
+        return problems + ["sections must be a list"]
+    keys = set()
+    count = 0
+    for i, sec in enumerate(sections):
+        for j, item in enumerate(sec.get("items") or []):
+            count += 1
+            where = "section %d item %d (%s)" % (i, j, item.get("type"))
+            if not item.get("type"):
+                problems.append(where + ": no type")
+            k = item.get("key")
+            if k is not None:
+                if k in keys:
+                    problems.append("%s: key %r twice" % (where, k))
+                keys.add(k)
+            if item.get("type") == "row" and not item.get("title"):
+                problems.append(where + ": a row needs a title")
+            if item.get("type") == "stat_grid" and not 1 <= len(item.get("stats") or []) <= 6:
+                problems.append(where + ": 1–6 stats")
+            if item.get("type") == "link" and not str(item.get("url") or "").startswith("https://"):
+                problems.append(where + ": https links only")
+            if compact and item.get("type") == "field":
+                problems.append(where + ": no fields on a card")
+
+    def walk(v, path):
+        if isinstance(v, dict):
+            for k, x in v.items():
+                if k == "tone" and x not in TONES:
+                    problems.append("%s.tone %r" % (path, x))
+                walk(x, path + "." + str(k))
+        elif isinstance(v, list):
+            for n, x in enumerate(v):
+                walk(x, "%s[%d]" % (path, n))
+        elif isinstance(v, str) and len(v) > 2000 and not path.endswith(".text") and not path.endswith("state"):
+            problems.append("%s: longer than 2000 characters" % path)
+
+    walk(sections, "sections")
+    if count > 300:
+        problems.append("more than 300 items")
+    if compact and (len(sections) > 2 or count > 12):
+        problems.append("a card has at most 2 sections and 12 items")
+    return problems

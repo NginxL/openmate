@@ -227,9 +227,10 @@ class CalendarPage(Page):
             return {"type": "stat_grid", "stats": stats}
         return {"type": "text", "text": " · ".join("%s %s" % (s["label"], s["value"]) for s in stats)}
 
-    def _row(self, e: Event, with_day: bool, interactive: bool) -> dict:
+    def _row(self, e: Event, with_day: bool, interactive: bool, part: str) -> dict:
+        # an event can be in two sections (an invitation is also one of the next days): keys are per section
         return row(e.title, e.detail(), e.span(with_day), "open:" + e.id if interactive and e.id else "",
-                   key="ev:" + e.id + (":d" if with_day else ""), badge=e.badge())
+                   key="%s:%s" % (part, e.id), badge=e.badge())
 
     def render(self, params: dict) -> dict:
         version = int(params.get("ui_version") or 1)
@@ -241,16 +242,16 @@ class CalendarPage(Page):
         sections: List[Dict[str, Any]] = [{"items": [self._stats(now, today, events, version)]}]
         if self.card:
             nxt = [e for e in today if e.all_day or (e.end or e.start) > now][:3]
-            sections.append({"items": [self._row(e, False, False) for e in nxt] or [empty("今天没有日程了", "", version)]})
+            sections.append({"items": [self._row(e, False, False, "next") for e in nxt] or [empty("今天没有日程了", "", version)]})
             return {"sections": sections, "refresh_after": REFRESH}
         pending = [e for e in events if e.rsvp == "needs_action"]
         if pending:
-            sections.append({"title": "待回复的邀请", "items": [self._row(e, True, True) for e in pending]})
-        sections.append({"title": "今天", "items": [self._row(e, False, True) for e in today]
+            sections.append({"title": "待回复的邀请", "items": [self._row(e, True, True, "pending") for e in pending]})
+        sections.append({"title": "今天", "items": [self._row(e, False, True, "today") for e in today]
                          or [empty("今天没有日程", "", version)]})
         if later:
             sections.append({"title": "接下来 %d 天" % (DAYS - 1),
-                             "items": [self._row(e, True, True) for e in later[:LATER_MOST]],
+                             "items": [self._row(e, True, True, "later") for e in later[:LATER_MOST]],
                              **({"footer": "还有 %d 个" % (len(later) - LATER_MOST)} if len(later) > LATER_MOST else {})})
         return {"title": "日程", "sections": sections, "refresh_after": REFRESH}
 
