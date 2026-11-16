@@ -57,6 +57,12 @@ class ManifestTest(unittest.TestCase):
                                                 "todos.read"])
         self.assertEqual(perms["network"], ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com",
                                             "larkoffice.com", "*.larkoffice.com", "config:starkmesh_url:http"])
+        props = MANIFEST["configuration"]["properties"]
+        for entry in perms["network"]:
+            if entry.startswith("config:"):
+                field = entry.split(":")[1]
+                self.assertEqual(props[field].get("format"), "uri", entry)
+                self.assertNotIn("default", props[field], "the hub drops an extension whose network address has a default")
         self.assertEqual(MANIFEST["host_integrations"], [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}])
 
     def test_configuration(self):
@@ -72,7 +78,8 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(config_defaults(MANIFEST).get("lark_cli_profile", ""), "", "lark-cli's default unless named")
 
         d = config_defaults(MANIFEST)
-        self.assertEqual((props["starkmesh_url"]["format"], d["starkmesh_url"]), ("uri", "http://127.0.0.1:18080"))
+        self.assertEqual(props["starkmesh_url"]["format"], "uri")
+        self.assertNotIn("starkmesh_url", d, "an address a network permission names is the user's to write: no default")
         self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"]),
                          (True, 20, "> 🤖 AI 代答 · {model} · {effort}"))
         self.assertEqual(d["larkx_commit"], "97ad48e69e34bd8c78ee30f795b7c3759dd81659")

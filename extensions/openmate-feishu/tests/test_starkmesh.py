@@ -69,9 +69,10 @@ class Gateway:
         return io.BytesIO(json.dumps({"code": 0, "message": "success", "data": data}).encode("utf-8"))
 
 
-def make(key="sk-admin-readonly", gateway=None):
+def make(key="sk-admin-readonly", gateway=None, url=True):
     gateway = gateway or Gateway()
-    app = types.SimpleNamespace(config={}, secrets={"starkmesh_key": key} if key else {}, tz=TZ)
+    app = types.SimpleNamespace(config={"starkmesh_url": "http://127.0.0.1:18080"} if url else {},
+                                secrets={"starkmesh_key": key} if key else {}, tz=TZ)
     mesh = starkmesh.StarkMesh(app, api=starkmesh.StarkMeshAPI(app, urlopen=gateway), clock=lambda: NOW, spawn=INPLACE)
     return starkmesh.StarkMeshPage(app, mesh), gateway
 
@@ -121,10 +122,11 @@ class StarkMeshTest(unittest.TestCase):
         self.assertEqual(len(gw.calls), 3, "kept fresh behind: one read")
 
     def test_no_key_a_wrong_key_and_no_gateway(self):
-        page, gw = make(key="")
-        self.assertIn("还没有接上 StarkMesh", str(page.render({"ui_version": 6})))
-        self.assertIsNone(page.card(6, True, True), "no block on 今天 without a key")
-        self.assertEqual(gw.calls, [])
+        for kw in ({"key": ""}, {"url": False}):
+            page, gw = make(**kw)
+            self.assertIn("还没有接上 StarkMesh", str(page.render({"ui_version": 6})))
+            self.assertIsNone(page.card(6, True, True), "no block on 今天 without an address and a key")
+            self.assertEqual(gw.calls, [])
         gw = Gateway()
         gw.fail = urllib.error.HTTPError("u", 401, "no", {}, None)
         page, _ = make(gateway=gw)

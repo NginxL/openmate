@@ -1,8 +1,8 @@
 """StarkMesh, the user's AI gateway: a dashboard of its accounts' quota, read through a scoped admin key the user made
 (read only: accounts.read, accounts.usage.read, accounts.stats.read, dashboard.read). Nothing is ever changed there.
 
-The key is the manifest's secret starkmesh_key; the address is starkmesh_url (the gateway on this computer's tunnel by
-default). Reads are kept fresh behind the page (Fresh): the accounts, their passive usage snapshots (never an active
+The key is the manifest's secret starkmesh_key; the address is starkmesh_url, which only the user writes (the hub lets
+the program reach the address in that setting, so it has no default). Reads are kept fresh behind the page (Fresh): the accounts, their passive usage snapshots (never an active
 refresh upstream) and the site's stats of today.
 
 Quota is counted in 号, accounts' worth: for a window (5 小时, 本周, Fable 本周) the sum over usable Claude accounts of
@@ -25,7 +25,7 @@ from openmate_core.ui import Fresh, Page, empty, row, stat, tile, when
 log = logging.getLogger("openmate.starkmesh")
 
 PAGE = "starkmesh"
-DEFAULT_URL = "http://127.0.0.1:18080"
+EXAMPLE_URL = "http://127.0.0.1:18080"  # the gateway on this computer's tunnel; the user writes it (a network permission)
 WAIT = 10.0
 AHEAD = 30.0
 STALE = 600.0
@@ -49,15 +49,15 @@ class StarkMeshAPI:
 
     @property
     def url(self) -> str:
-        return str(self.app.config.get("starkmesh_url") or DEFAULT_URL).strip().rstrip("/")
+        return str(self.app.config.get("starkmesh_url") or "").strip().rstrip("/")
 
     @property
     def key(self) -> str:
         return str((getattr(self.app, "secrets", None) or {}).get("starkmesh_key") or "").strip()
 
     def call(self, method: str, path: str, query: Optional[dict] = None, body: Optional[dict] = None) -> Any:
-        if not self.key:
-            raise StarkMeshError("还没有填 StarkMesh 的只读管理密钥", "setup")
+        if not self.key or not self.url:
+            raise StarkMeshError("还没有填 StarkMesh 的地址和只读管理密钥", "setup")
         url = self.url + path + ("?" + urllib.parse.urlencode(query) if query else "")
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method, headers={
@@ -182,7 +182,7 @@ class StarkMesh:
 
     @property
     def configured(self) -> bool:
-        return bool(self.api.key)
+        return bool(self.api.key and self.api.url)
 
     def warm(self) -> None:
         if self.configured:
@@ -240,7 +240,7 @@ class StarkMeshPage(Page):
     def _snapshot(self, version: int) -> Tuple[Optional[Snapshot], Optional[dict]]:
         if not self.mesh.configured:
             return None, empty("还没有接上 StarkMesh",
-                               "在 StarkMesh 后台 设置 › 管理密钥 新建一个只读密钥（权限：%s），填到这个扩展设置里的“StarkMesh 只读管理密钥”" % PERMISSIONS,
+                               "在这个扩展的设置里填“StarkMesh 地址”（例如 %s）和“StarkMesh 只读管理密钥”（在 StarkMesh 后台 设置 › 管理密钥 新建，权限只勾 %s）" % (EXAMPLE_URL, PERMISSIONS),
                                version)
         try:
             return self.mesh.read(), None
