@@ -36,7 +36,7 @@ TOKEN = "pext_test_token"
 def fast(**kw) -> Timing:
     base = dict(debounce=0.15, backoff_min=0.05, backoff_max=0.2, stable_after=0.3, login_wait=3.0, agent_poll=0.05,
                 agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, agent_settle=0.1, secrets_retry=0.05,
-                sent_retry=(0.05, 0.05, 0.05))
+                sent_retry=(0.05, 0.05, 0.05), warm_pages=False)
     base.update(kw)
     return Timing(**base)
 

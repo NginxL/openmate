@@ -14,7 +14,7 @@ from openmate_core.hub import HubError  # noqa: E402
 from openmate_core.ui import check_view  # noqa: E402
 from openmate_feishu import agenda, today  # noqa: E402
 
-from test_agenda import NOW, TZ, Runner, ev  # noqa: E402
+from test_agenda import INPLACE, NOW, TZ, Runner, ev  # noqa: E402
 
 
 class Hub:
@@ -73,8 +73,8 @@ def make(answers=None, needs=None, runner=None, clock=None, groups=None):
     cfg = {"lark_cli": "/bin/sh", "lark_cli_profile": "persona"}
     hub = Hub(answers if answers is not None else PERSONA)
     app = types.SimpleNamespace(config=cfg, tz=TZ, hub=hub, store=None, me_name=lambda: "我")
-    shared = agenda.Agenda(app, clock=clock, cli=agenda.LarkCLI(cfg, run=runner or Runner()))
-    persona = today.PersonaToday(app, clock=clock)
+    shared = agenda.Agenda(app, clock=clock, cli=agenda.LarkCLI(cfg, run=runner or Runner()), spawn=INPLACE)
+    persona = today.PersonaToday(app, clock=clock, spawn=INPLACE)
     chats = Chats(CHAT_NEEDS if needs is None else needs, GROUPS if groups is None else groups)
     return (today.TodayPage(app, shared, persona, chats), today.TodayPage(app, shared, persona, chats, card=True), hub)
 
@@ -189,6 +189,19 @@ class TodayTest(unittest.TestCase):
         now[0] += 61
         page.render({"ui_version": 6})
         self.assertEqual(len(hub.calls), 8)
+
+    def test_a_part_missing_later_keeps_the_last_whole_read(self):
+        now = [NOW]
+        answers = dict(PERSONA)
+        page, _, hub = make(answers=answers, clock=lambda: now[0])
+        page.render({"ui_version": 6})
+        answers["/api/v1/inbox"] = HubError(502, "the manager could not reach the hub", "hub_unreachable")
+        now[0] += 61
+        view = page.render({"ui_version": 6})
+        self.assertEqual(view["sections"][0]["title"], "需要我 · 5", "the last whole read")
+        self.assertNotIn("暂时读不到", str(view))
+        now[0] += 600
+        self.assertIn("暂时读不到：Persona 收件箱", str(page.render({"ui_version": 6})))
 
     def test_old_apps(self):
         page, card, _ = make()

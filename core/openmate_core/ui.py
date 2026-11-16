@@ -13,7 +13,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import views
 from .textutil import one_line
@@ -134,6 +134,83 @@ def state_text(state: dict) -> str:
 def day_start(tz, now: Optional[float] = None) -> float:
     d = _dt.datetime.fromtimestamp(now or time.time(), tz)
     return d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+class Fresh:
+    """A value kept fresh behind the pages: get() answers the last read at once and reads again in the background once
+    it is older than ahead; only a first read, one for another key (a new day) or one older than stale waits for it.
+    A failed read keeps the last value (until stale) and raises only when there is nothing to show. spawn runs a
+    background read (a thread; tests run it in place)."""
+
+    def __init__(self, read: Callable[[], Any], ahead: float, stale: float, clock: Callable[[], float] = time.time,
+                 key: Optional[Callable[[], Any]] = None, spawn: Optional[Callable[[Callable[[], None]], None]] = None,
+                 name: str = ""):
+        self.read, self.ahead, self.stale, self.clock = read, ahead, stale, clock
+        self.key = key or (lambda: None)
+        self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="openmate-fresh", daemon=True).start())
+        self.name = name
+        self._mu = threading.Lock()  # the kept value
+        self._reading = threading.Lock()  # one read at a time
+        self._kept: Optional[Tuple[float, Any, Any]] = None  # (read at, key, value)
+        self._busy = False
+
+    def _usable(self, k, within: float) -> bool:
+        kept = self._kept
+        return kept is not None and kept[1] == k and self.clock() - kept[0] < within
+
+    def get(self) -> Any:
+        k = self.key()
+        again = False
+        with self._mu:
+            if self._usable(k, self.ahead):
+                return self._kept[2]
+            if self._usable(k, self.stale):
+                value = self._kept[2]
+                if not self._busy:
+                    self._busy = again = True
+            else:
+                value = None
+        if again:
+            self.spawn(self._again)
+            return value
+        if value is not None:
+            return value
+        with self._reading:
+            with self._mu:  # read by someone else meanwhile
+                if self._usable(k, self.ahead):
+                    return self._kept[2]
+            value = self.read()
+            self._keep(k, value)
+            return value
+
+    def _again(self) -> None:
+        k = self.key()
+        try:
+            with self._reading:
+                with self._mu:
+                    if self._usable(k, self.ahead):
+                        return
+                value = self.read()
+            self._keep(k, value)
+        except Exception as e:  # the last value stays
+            log.debug("%s: reading again failed (%s); the last read stays", self.name, e.__class__.__name__)
+        finally:
+            with self._mu:
+                self._busy = False
+
+    def _keep(self, k, value) -> None:
+        with self._mu:
+            self._kept = (self.clock(), k, value)
+
+    def warm(self) -> None:
+        """Read now in the background, so that the first draw does not wait."""
+        def run():
+            try:
+                self.get()
+            except Exception as e:
+                log.debug("%s: the first read failed (%s)", self.name, e.__class__.__name__)
+
+        self.spawn(run)
 
 
 class ChatsToday:
@@ -291,6 +368,16 @@ class UI:
 
     def action(self, params: dict) -> dict:
         return self._page(params).action(params)
+
+    def warm(self) -> None:
+        """Have the pages read what they show (the calendar, Persona) in the background, before anyone looks."""
+        for page in {id(p): p for p in self.pages.values()}.values():
+            fn = getattr(page, "warm", None)
+            if fn is not None:
+                try:
+                    fn()
+                except Exception:
+                    log.exception("a page could not start reading")
 
     def update_badge(self) -> None:
         """How many chats need the user, on the navigation entry (sent when it changed, and always after a start)."""

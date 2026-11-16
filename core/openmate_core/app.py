@@ -218,6 +218,8 @@ class ConnectorApp:
                     self._start_link(restore=True)
             self.agent.start()
             self._ui().update_badge()  # the hub forgets an extension's badges when it restarts
+            if self.timing.warm_pages:
+                self._ui().warm()
         except Exception:
             log.exception("startup failed")
             if not self.setup_error:

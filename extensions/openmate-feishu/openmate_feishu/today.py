@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openmate_core.hub import HubError
 from openmate_core import views
-from openmate_core.ui import CHATS_PAGE, ChatsToday, Page, day_start, empty, row, stat, state_text, tile, when
+from openmate_core.ui import CHATS_PAGE, ChatsToday, Fresh, Page, day_start, empty, row, stat, state_text, tile, when
 
 from .agenda import PAGE as CALENDAR_PAGE
 from .agenda import Agenda, CalendarError, Event
@@ -25,7 +25,8 @@ log = logging.getLogger("openmate.today")
 
 PAGE = "today"
 CARD = "today-card"
-CACHE = 60.0
+AHEAD = 30.0  # older than this, read again in the background
+STALE = 600.0  # older than this, a draw waits for a new read
 WAIT = 8.0
 REFRESH = 120
 NEEDS_MOST = 12
@@ -37,24 +38,37 @@ WEEKDAYS = "一二三四五六日"
 NEEDS_TIERS = ("action", "needs_you")
 
 
+class Partial(Exception):
+    """A read of Persona with parts missing: shown when there is nothing better, never kept."""
+
+    def __init__(self, out: dict):
+        super().__init__("parts missing: " + ", ".join(out["missing"]))
+        self.out = out
+
+
 class PersonaToday:
     """Persona's side of today, through the hub API: {"waiting": [...], "working": [...], "inbox": [...],
-    "todos": [...], "missing": [sentences]}."""
+    "todos": [...], "missing": [sentences]}. A draw shows the last whole read and reads again behind it (Fresh); a read
+    with a part missing is shown only when there is no whole one younger than STALE."""
 
-    def __init__(self, app, clock: Callable[[], float] = time.time):
+    def __init__(self, app, clock: Callable[[], float] = time.time, spawn: Optional[Callable] = None):
         self.app = app
         self.clock = clock
-        self._mu = threading.Lock()
-        self._cache: Optional[Tuple[float, dict]] = None
+        self._fresh = Fresh(self._read, AHEAD, STALE, clock=clock, spawn=spawn, name="Persona")
 
     def _get(self, path: str, query: Optional[dict] = None) -> Any:
         return self.app.hub.request("GET", path, query=query, timeout=WAIT)
 
+    def warm(self) -> None:
+        self._fresh.warm()
+
     def read(self) -> dict:
-        with self._mu:
-            hit = self._cache
-            if hit is not None and self.clock() - hit[0] < CACHE:
-                return hit[1]
+        try:
+            return self._fresh.get()
+        except Partial as p:
+            return p.out
+
+    def _read(self) -> dict:
         parts: Dict[str, Any] = {}
         jobs = {
             "waiting": lambda: self._get("/api/v1/sessions", {"state": "needs_you", "summary": 1, "roots": 1, "limit": 20}),
@@ -73,8 +87,7 @@ class PersonaToday:
                 parts[key] = e
 
         if getattr(self.app, "hub", None) is None or not getattr(self.app.hub, "available", False):
-            out = {"waiting": [], "working": [], "inbox": [], "todos": [], "missing": ["拿不到 Persona hub 的地址或令牌"]}
-            return out
+            raise Partial({"waiting": [], "working": [], "inbox": [], "todos": [], "missing": ["拿不到 Persona hub 的地址或令牌"]})
         threads = [threading.Thread(target=run, args=(k, f), daemon=True) for k, f in jobs.items()]
         for t in threads:
             t.start()
@@ -94,9 +107,8 @@ class PersonaToday:
                 out[key] = [i for i in (v.get("items") or []) if isinstance(i, dict)]
             else:
                 out[key] = [t for t in (v.get("todos") or []) if isinstance(t, dict) and not t.get("done_at")]
-        if not out["missing"]:
-            with self._mu:
-                self._cache = (self.clock(), out)
+        if out["missing"]:
+            raise Partial(out)
         return out
 
 
@@ -136,6 +148,10 @@ class TodayPage(Page):
         self.persona = persona
         self.chats = chats or ChatsToday(app)
         self.card = card
+
+    def warm(self) -> None:
+        self.agenda.warm()
+        self.persona.warm()
 
     def _calendar(self, now) -> Tuple[List[Event], List[Event], int, str]:
         """(today's events still to come or on now, invitations waiting for an answer, how many in the next six days,

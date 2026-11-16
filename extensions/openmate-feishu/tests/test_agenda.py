@@ -63,6 +63,10 @@ class Runner:
         return subprocess.CompletedProcess(args, 0, out, "")
 
 
+def INPLACE(fn):
+    fn()  # a background read, here in place
+
+
 def pages(config=None, runner=None, clock=None):
     tmp = tempfile.mkdtemp(prefix="openmate-agenda-")
     fake = os.path.join(tmp, "lark-cli")
@@ -74,7 +78,7 @@ def pages(config=None, runner=None, clock=None):
     app = types.SimpleNamespace(config=cfg, tz=TZ)
     runner = runner or Runner()
     clock = clock or (lambda: NOW)
-    a = agenda.Agenda(app, clock=clock, cli=agenda.LarkCLI(cfg, run=runner))
+    a = agenda.Agenda(app, clock=clock, cli=agenda.LarkCLI(cfg, run=runner), spawn=INPLACE)
     return agenda.CalendarPage(app, a), agenda.CalendarPage(app, a, card=True), runner, fake
 
 
@@ -177,6 +181,17 @@ class AgendaTest(unittest.TestCase):
         self.assertIn("看不懂", items(page.render({"ui_version": 6}))[0]["detail"])
         old = items(page.render({"ui_version": 1}))[0]
         self.assertEqual(old["type"], "text", "old apps get text")
+
+    def test_a_failed_read_keeps_the_last_events(self):
+        now = [NOW]
+        runner = Runner()
+        page, _, _, _ = pages(runner=runner, clock=lambda: now[0])
+        page.render({"ui_version": 6})
+        runner.answer = {"ok": False, "error": {"type": "authorization"}}
+        now[0] += 61
+        self.assertEqual(section(page.render({"ui_version": 6}), "今天")[0]["title"], "站会", "the last read stays")
+        now[0] += 900
+        self.assertIn("auth login", items(page.render({"ui_version": 6}))[0]["detail"], "too old: says why")
 
     def test_read_once_a_minute(self):
         now = [NOW]

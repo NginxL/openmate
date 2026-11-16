@@ -15,18 +15,18 @@ import os
 import shlex
 import shutil
 import subprocess
-import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from openmate_core.ui import Page, day_start, empty, row, stat
+from openmate_core.ui import Fresh, Page, day_start, empty, row, stat
 
 log = logging.getLogger("openmate.calendar")
 
 PAGE = "calendar"
 CARD = "calendar-today"
 DAYS = 7
-CACHE = 60.0
+AHEAD = 30.0  # older than this, read again in the background (the page shows the last read meanwhile)
+STALE = 900.0  # older than this, a draw waits for a new read
 TIMEOUT = 25
 REFRESH = 120
 LATER_MOST = 30
@@ -168,26 +168,27 @@ class Event:
 
 
 class Agenda:
-    """The next DAYS days of events, read at most once a CACHE."""
+    """The next DAYS days of events: lark-cli takes seconds, so a draw shows the last read and reads again behind it
+    (Fresh); a new day, or a read older than STALE, waits."""
 
-    def __init__(self, app, clock: Callable[[], float] = time.time, cli: Optional[LarkCLI] = None):
+    def __init__(self, app, clock: Callable[[], float] = time.time, cli: Optional[LarkCLI] = None,
+                 spawn: Optional[Callable] = None):
         self.app = app
         self.clock = clock
         self.cli = cli or LarkCLI(app.config)
-        self._mu = threading.Lock()
-        self._cache: Optional[Tuple[float, float, List[dict]]] = None  # (read at, for the day starting, events)
+        self._fresh = Fresh(self._read, AHEAD, STALE, clock=clock, key=lambda: day_start(self.app.tz, self.clock()),
+                            spawn=spawn, name="calendar")
+
+    def _read(self) -> List[dict]:
+        begin = _dt.datetime.fromtimestamp(day_start(self.app.tz, self.clock()), self.app.tz)
+        return self.cli.agenda(begin, begin + _dt.timedelta(days=DAYS))
+
+    def warm(self) -> None:
+        self._fresh.warm()
 
     def events(self) -> List[Event]:
         tz = self.app.tz
-        now = self.clock()
-        start = day_start(tz, now)
-        with self._mu:
-            hit = self._cache
-            if hit is None or hit[1] != start or now - hit[0] >= CACHE:
-                begin = _dt.datetime.fromtimestamp(start, tz)
-                raw = self.cli.agenda(begin, begin + _dt.timedelta(days=DAYS))
-                hit = self._cache = (now, start, raw)
-        out = [Event(e, tz) for e in hit[2]]
+        out = [Event(e, tz) for e in self._fresh.get()]
         out = [e for e in out if e.start is not None and e.rsvp != "decline"]
         out.sort(key=lambda e: (e.start, e.title))
         return out
@@ -198,6 +199,9 @@ class CalendarPage(Page):
         self.app = app
         self.agenda = agenda
         self.card = card
+
+    def warm(self) -> None:
+        self.agenda.warm()
 
     def _split(self, events: List[Event]):
         tz = self.app.tz
