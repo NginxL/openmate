@@ -88,7 +88,7 @@ class BlocksTest(unittest.TestCase):
 
         page, card, _ = make()
         page.mesh, _ = make_mesh()
-        tiles = page.render({"ui_version": 6})["sections"][0]["items"][0]["tiles"]
+        tiles = page.render({"ui_version": 6})["sections"][1]["items"][0]["tiles"]
         self.assertEqual([t["title"] for t in tiles], ["需要我", "日程", "飞书", "Agent", "中转站"])
         self.assertEqual((tiles[-1]["value"], tiles[-1]["badge"]), ("3/4", {"text": "偏紧", "tone": "caution"}))
         self.assertEqual(len(card.render({"ui_version": 6})["sections"][0]["items"][0]["tiles"]), 4, "the Overview card stays four")

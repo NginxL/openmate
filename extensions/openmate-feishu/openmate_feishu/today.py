@@ -428,7 +428,11 @@ class Day:
         build = {"status": self.status_block, "needs": self.needs_card, "calendar": self.calendar_card,
                  "feishu": self.feishu_card, "agents": self.agents_block, "mesh": self.mesh_card, "auto": self.auto_card,
                  "todos": self.todos_card, "shortcuts": self.shortcuts_block, "bookmarks": self.bookmarks_block}
-        sections = []
+        top: Dict[str, Any] = {"items": [row("调整布局", "上移、下移、隐藏每一块，或改成整行、半行", "", "layout:edit", key="layout",
+                                             **self._icon("settings", "gray"))]}
+        if self.v8:
+            top["span"] = "full"
+        sections = [top]
         for b in lay.shown():
             sec = build[b]()
             if sec is None:
@@ -445,10 +449,6 @@ class Day:
             if self.v8:
                 note["span"] = "full"
             sections.append(note)
-        tail: Dict[str, Any] = {"items": [{"type": "button", "title": "调整布局", "action": {"id": "layout:edit"}, "key": "layout"}]}
-        if self.v8:
-            tail["span"] = "full"
-        sections.append(tail)
         view = {"title": self.page.title(self.now), "sections": sections, "refresh_after": REFRESH, "state": ""}
         if self.v8:
             view["layout"] = "columns"  # the blocks the user made whole rows across, the others two by two
@@ -548,6 +548,11 @@ class Day:
             parts.append("待办等你拍板 %d" % len(self.asks))
         if self.done:
             parts.append("已处理 %d" % self.done)
+        chats = self.page.chats
+        if getattr(chats, "closed", 0):
+            parts.append("已聊完 %d" % chats.closed)
+        if getattr(chats, "expired", 0):
+            parts.append("超过 %d 小时的 %d 条不算" % (chats.needs_hours(), chats.expired))
         rows = self.needs_rows()
         sec: Dict[str, Any] = {"title": "需要我 · %d" % self.needs_total if self.needs_total else "需要我",
                                "items": [self._caption(" · ".join(parts))]

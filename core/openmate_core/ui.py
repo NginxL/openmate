@@ -225,11 +225,46 @@ class Fresh:
         self.spawn(run)
 
 
+NEEDS_HOURS = 24  # an @me or a direct message older than this no longer needs the user (setting needs_hours)
+TALK_GAP = 3600.0  # the other side answered within this of my last message: the talk goes on, it is not a request
+CLOSER_MOST = 3  # at most this many messages back from them, none asking anything: the talk is over
+ASKING = ("?", "？", "吗", "么", "呢", "嘛", "能不能", "可不可以", "可以不", "帮忙", "帮我", "麻烦", "请你", "请帮",
+          "看下", "看一下", "看看", "确认", "给点", "审批", "approval")
+
+
+def asks_something(row: dict) -> bool:
+    """A message that asks the user something or for something (a question, a request, an approval link)."""
+    text = views.text_of(row)
+    return bool(row.get("at_me")) or any(w in text for w in ASKING)
+
+
+def talk_closed(rows: List[dict]) -> bool:
+    """A direct chat where the user spoke last and the other side only answered (a few lines, soon after, asking
+    nothing): "27层" after "几楼呀" needs no answer."""
+    msgs = [r for r in rows if not views.is_system(r) and views.has_content(r)]
+    run = views.unanswered_run(msgs)
+    if not run or len(run) == len(msgs) or len(run) > CLOSER_MOST:
+        return False
+    mine = msgs[len(msgs) - len(run) - 1]
+    if (run[0].get("at") or 0) - (mine.get("at") or 0) > TALK_GAP:
+        return False
+    return not any(asks_something(r) for r in run)
+
+
 class ChatsToday:
     """What needs the user in the chats, from the store: unanswered direct chats and @me, today's traffic."""
 
     def __init__(self, app):
         self.app = app
+        self.expired = 0  # left out by needs(): older than needs_hours
+        self.closed = 0  # left out by needs(): direct chats where the other side only answered
+
+    def needs_hours(self) -> int:
+        try:
+            n = int((getattr(self.app, "config", None) or {}).get("needs_hours") or NEEDS_HOURS)
+        except (TypeError, ValueError):
+            n = NEEDS_HOURS
+        return max(1, min(168, n))
 
     def needs(self) -> List[dict]:
         """Direct chats and @me the user has not answered (the inbox's rule), newest first. A bot's (People) are
@@ -239,13 +274,18 @@ class ChatsToday:
         out = []
         self.bots = 0
         self.done = []
+        self.expired = self.closed = 0
         if app.store is None:
             return out
+        oldest = time.time() - self.needs_hours() * 3600.0
         for chat in app.store.chats_since(time.time() - app.timing.inbox_window, app.timing.inbox_most):
             rows = app.store.messages_before(chat["id"], None, 60)
             thing = views.inbox_thing(chat, rows, platform=app.platform.name, tz=app.tz, me=app.me_name(), rules="",
                                       can_reply=False)
             if thing is None or thing.get("done") or thing["kind"] not in ("dm", "mention"):
+                continue
+            if thing["kind"] == "dm" and talk_closed(rows):
+                self.closed += 1
                 continue
             thing["_at"] = max((r.get("at") or 0) for r in rows) if rows else 0
             thing["_chat"] = chat
@@ -274,6 +314,9 @@ class ChatsToday:
                 t["_at"] = r.get("at") or t["_at"]
                 t["_version"] = str(r.get("id") or "")  # a new @me brings it back, not any line of the group
             t["_done_key"] = "chat:" + t["_chat"]["id"]
+        fresh = [t for t in out if t["_at"] >= oldest]  # the @me itself (a group) or the last line (a direct chat)
+        self.expired = len(out) - len(fresh)
+        out = fresh
         out.sort(key=lambda t: -t["_at"])
         marked = app.store.dismissed(t["_done_key"] for t in out) if out else {}
         self.done = [t for t in out if marked.get(t["_done_key"]) == t["_version"]]

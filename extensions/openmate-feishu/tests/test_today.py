@@ -122,10 +122,10 @@ class TodayTest(unittest.TestCase):
         self.assertEqual(view["title"], "今天 · 11月16日 周一")
         self.assertEqual([s.get("title") for s in body(view)],
                          ["需要我 · 5", "日程", "飞书今天", "正在跑的 Agent · 2", "待办 · 1", "快捷入口"])
-        status = view["sections"][0]["items"][0]
+        status = view["sections"][1]["items"][0]
         self.assertEqual([(t["title"], t["value"], t["badge"]["text"]) for t in status["tiles"]],
                          [("需要我", "5", "待处理"), ("日程", "3", "待回复 2"), ("飞书", "2", "@我 1"), ("Agent", "2", "等你 1")])
-        self.assertEqual(view["sections"][-1]["items"][0]["action"], {"id": "layout:edit"})
+        self.assertEqual(view["sections"][0]["items"][0]["action"], {"id": "layout:edit"}, "调整布局 on top")
         needs = body(view)[0]
         self.assertEqual(texts(needs), ["飞书 2 · 收件箱 1 · Agent 等你 1 · 待办等你拍板 1"])
         self.assertEqual([(r["title"], r["badge"]["text"], r["icon"]) for r in rows(needs)[:-1]],
@@ -159,8 +159,8 @@ class TodayTest(unittest.TestCase):
         needs, cal, feishu, agents, todos, shortcuts = body(view)
         self.assertEqual((needs.get("span"), needs.get("columns")), ("full", 2), "需要我 across, its rows two by two")
         self.assertEqual([s.get("span") for s in (cal, feishu, agents, todos)], [None] * 4, "the rest two to a row")
-        self.assertEqual((view["sections"][0].get("span"), shortcuts.get("span"), view["sections"][-1].get("span")),
-                         ("full", "full", "full"), "the status tiles, the shortcuts and the button across")
+        self.assertEqual((view["sections"][0].get("span"), view["sections"][1].get("span"), shortcuts.get("span")),
+                         ("full", "full", "full"), "调整布局, the status tiles and the shortcuts across")
         self.assertEqual([(s["icon"], s["icon_color"]) for s in body(view)[:5]],
                          [("bell", "red"), ("calendar", "blue"), ("chat", "indigo"), ("robot", "teal"), ("check", "green")])
         self.assertEqual(needs["link"], {"title": "全部", "action": {"id": "go:chats"}})
@@ -287,7 +287,7 @@ class TodayTest(unittest.TestCase):
         view = page.render({"ui_version": 6})
         items(view)
         self.assertEqual(body(view)[0]["title"], "需要我 · 3")
-        note = view["sections"][-2]["items"][0]  # above the 调整布局 button
+        note = view["sections"][-1]["items"][0]
         self.assertEqual(note["text"], "暂时读不到：Persona 收件箱、待办（稍后自动重试）")
         self.assertNotIn("manager", note["text"])
         self.assertNotIn("待办 · 0", [s.get("title") for s in body(view)])
