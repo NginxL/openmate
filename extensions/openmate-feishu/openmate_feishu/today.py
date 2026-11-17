@@ -359,16 +359,20 @@ class Day:
 
     def card(self) -> dict:
         v, p = self.version, self.p
+        unread = self.counts["mentions"] + self.counts["dms"]
+        ok = {"text": "正常", "tone": "positive"}
         blocks = [
-            # (title, value, line, icon, color, badge, key)
+            # (title, value, line, icon, color, badge, key): each tile says how it stands in its pill, as a status board
             ("需要我", str(self.needs_total), "飞书 %d · 收件箱 %d · Agent %d" % (len(self.chat_needs), len(self.inbox_needs), len(p["waiting"])),
-             "bell", "red" if self.needs_total else "gray", None, "b:needs"),
-            ("日程", "—" if self.cal_missing else "%d 个" % len(self.today), self.cal_line, "calendar", "blue",
-             {"text": "待回复 %d" % len(self.pending), "tone": "caution"} if self.pending else None, "b:calendar"),
-            ("飞书", "@我 %d · 私聊 %d" % (self.counts["mentions"], self.counts["dms"]),
-             "今天收到 %d 条 · %d 个会话" % (self.counts["messages"], self.counts["chats"]), "chat", "indigo", None, "b:feishu"),
-            ("Agent", "%d 在跑" % len(p["working"]), "等你 %d" % len(p["waiting"]) if p["waiting"] else "没有在等你的",
-             "robot", "teal", {"text": "等你 %d" % len(p["waiting"]), "tone": "danger"} if p["waiting"] else None, "b:agents"),
+             "bell", "red" if self.needs_total else "gray",
+             {"text": "待处理", "tone": "danger"} if self.needs_total else {"text": "清空", "tone": "positive"}, "b:needs"),
+            ("日程", "—" if self.cal_missing else str(len(self.today)), self.cal_line, "calendar", "blue",
+             {"text": "读不到", "tone": "caution"} if self.cal_missing else
+             {"text": "待回复 %d" % len(self.pending), "tone": "caution"} if self.pending else ok, "b:calendar"),
+            ("飞书", str(unread), "@我 %d · 私聊 %d · 今天 %d 条" % (self.counts["mentions"], self.counts["dms"], self.counts["messages"]),
+             "chat", "indigo", {"text": "@我 %d" % self.counts["mentions"], "tone": "caution"} if self.counts["mentions"] else ok, "b:feishu"),
+            ("Agent", str(len(p["working"])), "在跑 · 等你 %d" % len(p["waiting"]) if p["waiting"] else "在跑 · 没有在等你的",
+             "robot", "teal", {"text": "等你 %d" % len(p["waiting"]), "tone": "danger"} if p["waiting"] else ok, "b:agents"),
         ]
         if v >= 6:
             head = {"type": "grid", "max_columns": 4, "key": "blocks",

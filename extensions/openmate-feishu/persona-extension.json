@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -35,11 +35,12 @@
     "ui": [
       {"id": "openmate-today", "title": "今天", "placement": "nav_page", "icon": "bell"},
       {"id": "today-card", "title": "今天", "placement": "overview_card", "opens": "openmate-today"},
+      {"id": "openmate-agents", "title": "Agent 进度", "placement": "nav_page", "icon": "list"},
+      {"id": "agents-card", "title": "Agent 进度", "placement": "overview_card", "opens": "openmate-agents"},
       {"id": "chats", "title": "飞书", "placement": "nav_page", "icon": "list"},
-      {"id": "chats-today", "title": "飞书今天", "placement": "overview_card", "opens": "chats"},
       {"id": "calendar", "title": "日程", "placement": "nav_page", "icon": "calendar"},
-      {"id": "calendar-today", "title": "今天的日程", "placement": "overview_card", "opens": "calendar"},
-      {"id": "starkmesh", "title": "中转站", "placement": "nav_page", "icon": "wallet"}
+      {"id": "starkmesh", "title": "中转站", "placement": "nav_page", "icon": "wallet"},
+      {"id": "starkmesh-card", "title": "中转站", "placement": "overview_card", "opens": "starkmesh"}
     ]
   },
   "configuration": {

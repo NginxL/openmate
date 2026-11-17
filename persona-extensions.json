@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.7.1",
+        "version": "0.8.0",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -83,16 +83,22 @@
               "opens": "openmate-today"
             },
             {
-              "id": "chats",
-              "title": "飞书",
+              "id": "openmate-agents",
+              "title": "Agent 进度",
               "placement": "nav_page",
               "icon": "list"
             },
             {
-              "id": "chats-today",
-              "title": "飞书今天",
+              "id": "agents-card",
+              "title": "Agent 进度",
               "placement": "overview_card",
-              "opens": "chats"
+              "opens": "openmate-agents"
+            },
+            {
+              "id": "chats",
+              "title": "飞书",
+              "placement": "nav_page",
+              "icon": "list"
             },
             {
               "id": "calendar",
@@ -101,16 +107,16 @@
               "icon": "calendar"
             },
             {
-              "id": "calendar-today",
-              "title": "今天的日程",
-              "placement": "overview_card",
-              "opens": "calendar"
-            },
-            {
               "id": "starkmesh",
               "title": "中转站",
               "placement": "nav_page",
               "icon": "wallet"
+            },
+            {
+              "id": "starkmesh-card",
+              "title": "中转站",
+              "placement": "overview_card",
+              "opens": "starkmesh"
             }
           ]
         },
@@ -312,9 +318,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.7.1/openmate-feishu-0.7.1.tar.gz",
-          "sha256": "f06e82ea260ac0d0ab28feb6fa3a12e3a92cb2052e6255def92a90399d03f57a",
-          "size": 130000
+          "url": "packages/openmate-feishu/0.8.0/openmate-feishu-0.8.0.tar.gz",
+          "sha256": "519d3c3d7030f6f38129d617e00993ff9791d991a38cf8b44d6dc59443a1585d",
+          "size": 137775
         }
       ]
     }

@@ -258,6 +258,11 @@ class TodayTest(unittest.TestCase):
         grid = view["sections"][0]["items"][0]
         self.assertEqual([t["title"] for t in grid["tiles"]], ["需要我", "日程", "飞书", "Agent"])
         self.assertEqual(grid["tiles"][0]["value"], "5")
+        # each tile says how it stands in a pill, as a status board does
+        self.assertEqual([t["badge"] for t in grid["tiles"]],
+                         [{"text": "待处理", "tone": "danger"}, {"text": "待回复 2", "tone": "caution"},
+                          {"text": "@我 1", "tone": "caution"}, {"text": "等你 1", "tone": "danger"}])
+        self.assertEqual((grid["tiles"][2]["value"], grid["tiles"][3]["value"]), ("2", "2"))
         self.assertNotIn("title", view)
         card_rows = view["sections"][1]["items"]
         self.assertEqual([r["title"] for r in card_rows], ["修复登录问题", "示例告警", "提交评审材料"])
@@ -280,6 +285,7 @@ class TodayTest(unittest.TestCase):
         self.assertEqual(section(view, "日程")["items"][0]["title"], "日程读不到")
         tiles = card.render({"ui_version": 6})["sections"][0]["items"][0]["tiles"]
         self.assertEqual((tiles[1]["value"], tiles[1]["subtitle"]), ("—", "读不到"))
+        self.assertEqual(tiles[1]["badge"], {"text": "读不到", "tone": "caution"})
 
     def test_nothing_to_do(self):
         page, card, _ = make(answers={"/api/v1/todos": {"todos": []}}, needs=[], groups=[])

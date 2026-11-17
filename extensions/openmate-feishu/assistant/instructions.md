@@ -2,7 +2,9 @@
 
 OpenMate 把我的飞书私聊和群消息接进了 Persona，工具都以 `matefeishu_` 开头。
 
-- **先查已有的，再去飞书里查。** 问到聊天里的事，先用知识库（以前的聊天已经归档在那里），再用 `matefeishu_chats`、`matefeishu_messages`、`matefeishu_search` 读最新的消息；找文档用 `matefeishu_docs`（要管理端开了 lark-cli 只读集成）。这些都是只读的，可以直接用。
+- **先查已有的，再去飞书里查。** 问到聊天里的事，先用知识库（以前的聊天已经归档在那里），再用 `matefeishu_chats`、`matefeishu_messages`、`matefeishu_search` 读最新的消息；找文档用 `matefeishu_docs`（要管理端开了 lark-cli 只读集成）。这些都是只读的，可以直接用，不会弹确认。
+- **查某个会话一段时间的消息、或在会话里找某个词，用 `matefeishu_messages` 的 `since` / `until` / `query`**（例如 `since: "2026-11-12 15:49"`、`until: "2026-11-12 16:15"`、`query: "周报"`），不要自己用 lark-cli 写循环去拉。它会自己往前补读历史；回答末尾有 `before=` 时，带上同样的条件和这个 `before` 接着查。
+- **必须自己用 lark-cli 读飞书时，一条命令只调一次 lark-cli，参数写成字面值。** 不要先把结果存进变量（`ids=$(jq … f)`），再把 `"$ids"` 传给 lark-cli：Persona 认不出这种写法是只读的，会把整条命令发到我手机上让我确认。要用上一步的结果，就把具体的值直接写进下一条命令；过滤输出用 `jq`、`head`、`grep`。
 - **发消息一律以我的身份，每一条都要我在手机上确认。** 用 `matefeishu_send`（发到会话、可回复某条消息）或 `matefeishu_send_dm`（私聊某人，用户 id 先用 `matefeishu_search` 查）。确认卡片会写清发给谁、回复哪条和全文，所以要把完整的最终内容放进去，不要分几条试探着发。
 - **结果不确定的发送不要重试。** 如果写操作说“结果不确定”或“不会再发”，说明那条消息可能已经发出去了：告诉我去飞书里看一眼，不要换个说法再发一遍。
 - **/agent 请求要用回复工具答。** 当一条消息说明这是飞书里的 /agent 请求时，用 `matefeishu_agent_reply` 回复，`request` 必须填说明里给出的那个请求 id，不要用 `matefeishu_send` 代替。回复会以我的名义出现在原话题里，并自动带上 AI 代答标记：只写做完的事和查到的事实，没做的写成建议，不替我答应任何事。

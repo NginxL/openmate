@@ -208,3 +208,33 @@ class StarkMeshTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverviewCardTest(unittest.TestCase):
+    def test_the_card_has_a_pill_then_each_window(self):
+        page, _ = make()
+        card = starkmesh.StarkMeshCard(page)
+        view = card.render({"ui_version": 6})
+        assert not check_view(view, compact=True), check_view(view, compact=True)
+        head, grid = view["sections"][0]["items"]
+        self.assertEqual(head["title"], "可用号 3/4")
+        self.assertEqual(head["badge"], {"text": "偏紧", "tone": "caution"})  # the 5 小时 window: 1.30 of 4 left
+        self.assertEqual([t["title"] for t in grid["tiles"]], ["5 小时", "本周", "Fable 本周"])
+        rings = card.render({"ui_version": 9})["sections"][0]["items"][1]["tiles"]
+        self.assertIn("gauge", rings[0])
+        bars = card.render({"ui_version": 5})["sections"][0]["items"]
+        self.assertEqual([it["type"] for it in bars], ["row", "progress", "progress", "progress"])
+        self.assertNotIn("icon", bars[0])
+
+    def test_without_a_key_it_says_how(self):
+        page, _ = make(key="")
+        view = starkmesh.StarkMeshCard(page).render({"ui_version": 6})
+        self.assertEqual(view["sections"][0]["items"][0]["title"], "还没有接上 StarkMesh")
+
+    def test_the_pill_follows_what_is_left(self):
+        s = types.SimpleNamespace(ok_claude=[1], window=lambda key: {"ratio": 0.6} if key == "five_hour" else None)
+        self.assertEqual(starkmesh.standing(s), ("充足", "positive"))
+        s.window = lambda key: {"ratio": 0.1}
+        self.assertEqual(starkmesh.standing(s), ("快用完", "danger"))
+        s.window, s.ok_claude = (lambda key: None), []
+        self.assertEqual(starkmesh.standing(s), ("没有可用号", "danger"))

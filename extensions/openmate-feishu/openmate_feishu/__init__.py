@@ -51,17 +51,22 @@ def platform(manifest_path: str = "") -> Platform:
 
 
 def _agenda_pages(app):
-    # the calendar page and card (lark-cli, read-only) and the 今天 page and card, sharing one read of the calendar
+    # the calendar page and card (lark-cli, read-only), the 今天 page and card sharing one read of the calendar, the
+    # StarkMesh page and its Overview card, and the Agents' progress (the hub's session list)
+    from openmate_core import agents
+
     from . import agenda, starkmesh, today
 
     shared = agenda.Agenda(app)
     persona = today.PersonaToday(app)
     mesh = starkmesh.StarkMeshPage(app, starkmesh.StarkMesh(app))
+    board = agents.AgentsRead(app)
     return {
         agenda.PAGE: agenda.CalendarPage(app, shared), agenda.CARD: agenda.CalendarPage(app, shared, card=True),
         today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh),
         today.CARD: today.TodayPage(app, shared, persona, card=True),
-        starkmesh.PAGE: mesh,
+        starkmesh.PAGE: mesh, starkmesh.CARD: starkmesh.StarkMeshCard(mesh),
+        agents.PAGE: agents.AgentsPage(app, board), agents.CARD: agents.AgentsPage(app, board, card=True),
     }
 
 

@@ -1,10 +1,14 @@
 """Read tools (no gate) and the two writes (send, send_dm): their cards, request ids, uncertain sends."""
 
+import datetime as _dt
 import json
 import os
+import re
+import time
 import unittest
 
 from harness import CID, ROOT, Harness, HubSideError, wait_until
+from openmate_core.backend import Chat
 
 
 class ToolListTest(unittest.TestCase):
@@ -217,3 +221,63 @@ class ActionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FilteredMessagesTest(unittest.TestCase):
+    """matefeishu_messages with since / until / query: the reads the assistant used to script with lark-cli loops."""
+
+    def setUp(self):
+        from openmate_core.fixture import FixtureWorld
+
+        self.world = FixtureWorld()
+        self.world.add_chat(Chat("chat_long", "group", "长历史群", members=9))
+        self.base = time.time() - 1000 * 60
+        for i in range(1000):  # one a minute; only the newest reach the store at catch-up, the rest is history
+            self.world.make("chat_long", "user_example_a", ("周报 第%d条" if i % 100 == 7 else "闲聊 第%d条") % i, at=self.base + i * 60)
+        self.h = Harness(self, world=self.world)
+        self.h.sign_in()
+        wait_until(lambda: self.h.app._catchup_done.is_set(), what="catch-up")
+
+    def stamp(self, i: int) -> str:
+        return _dt.datetime.fromtimestamp(self.base + i * 60).strftime("%Y-%m-%d %H:%M")
+
+    def test_query_keeps_only_matching_messages(self):
+        text = self.h.tool("messages", chat="chat_example_team", query="周会")
+        self.assertIn("下午三点开周会", text)
+        self.assertNotIn("接口文档", text)
+        self.assertIn("含“周会”", text)
+        self.assertIn("示例同事甲", self.h.tool("messages", chat="chat_example_team", query="示例同事甲"))  # the sender counts
+        self.assertIn("没有符合的消息", self.h.tool("messages", chat="chat_example_team", query="周会 不存在的词"))
+
+    def test_a_window_reads_back_into_history(self):
+        text = self.h.tool("messages", chat="chat_long", since=self.stamp(100), until=self.stamp(104), limit=50)
+        got = [int(x) for x in re.findall(r"第(\d+)条", text)]
+        self.assertEqual(got, [100, 101, 102, 103, 104])  # oldest first, both ends kept, nothing outside
+        self.assertNotIn("before=", text)  # the window was read to its start
+
+    def test_query_over_history_pages_by_before(self):
+        text = self.h.tool("messages", chat="chat_long", query="周报", limit=3)
+        self.assertEqual(re.findall(r"周报 第(\d+)条", text), ["707", "807", "907"])
+        before = re.search(r"更早的符合消息：before=(\d+)", text).group(1)
+        older = self.h.tool("messages", chat="chat_long", query="周报", limit=50, before=before)
+        self.assertEqual(re.findall(r"周报 第(\d+)条", older), ["7", "107", "207", "307", "407", "507", "607"])
+        self.assertNotIn("before=", older)
+
+    def test_a_long_look_hands_back_where_to_go_on(self):
+        from openmate_core import tools
+
+        old = tools.SCAN_MOST
+        tools.SCAN_MOST = 250
+        try:
+            text = self.h.tool("messages", chat="chat_long", query="不存在的词")
+        finally:
+            tools.SCAN_MOST = old
+        self.assertIn("没有符合的消息", text)
+        self.assertRegex(text, r"还没看完，接着往前：before=\d+")
+
+    def test_a_date_until_is_the_whole_day_and_bad_times_say_so(self):
+        day = _dt.datetime.fromtimestamp(self.base + 999 * 60).strftime("%Y-%m-%d")
+        self.assertIn("闲聊 第999条", self.h.tool("messages", chat="chat_long", until=day, limit=1))
+        with self.assertRaises(HubSideError) as e:
+            self.h.tool("messages", chat="chat_long", since="上周三")
+        self.assertIn("时间看不懂", e.exception.message)

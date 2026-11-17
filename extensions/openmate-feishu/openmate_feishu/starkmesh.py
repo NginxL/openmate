@@ -378,3 +378,47 @@ class StarkMeshPage(Page):
 
     def action(self, params: dict) -> dict:
         return {}
+
+
+CARD = "starkmesh-card"
+
+
+def standing(s: "Snapshot") -> Tuple[str, str]:
+    """(word, tone) of the quota as a whole, by the 5 小时 window (else 本周): what the Overview card's pill says."""
+    for key, _ in WINDOWS[:2]:
+        w = s.window(key)
+        if w is not None:
+            _, tone = tone_of(w["ratio"])
+            return {"positive": "充足", "caution": "偏紧", "danger": "快用完"}[tone], tone
+    return ("没有可用号", "danger") if not s.ok_claude else ("正常", "positive")
+
+
+class StarkMeshCard(Page):
+    """The Overview card (overview_card): usable accounts, a pill for how much is left, then each window's quota (rings
+    from UI version 9, tiles before, bars before 6) and when it resets."""
+
+    def __init__(self, page: StarkMeshPage):
+        self.page = page
+
+    def warm(self) -> None:
+        self.page.warm()
+
+    def render(self, params: dict) -> dict:
+        version = int(params.get("ui_version") or 1)
+        s, note = self.page._snapshot(version)
+        if s is None:
+            return {"sections": [{"items": [note]}], "refresh_after": REFRESH}
+        word, tone = standing(s)
+        head: Dict[str, Any] = {"type": "row", "key": "sm:head", "title": "可用号 %d/%d" % (len(s.ok_claude), len(s.claude)),
+                                "subtitle": "Claude 账号 · 数据读于 %s" % when(s.now, self.page.app.tz),
+                                "badge": {"text": word, "tone": tone}}
+        if version >= 6:
+            head.update(icon="gauge", icon_color={"positive": "green", "caution": "amber", "danger": "red"}[tone])
+        items: List[dict] = [head]
+        if version >= 6:
+            tiles = self.page.quota_tiles(s, version)
+            if tiles:
+                items.append({"type": "grid", "max_columns": 3, "key": "sm:quota", "tiles": tiles})
+        else:
+            items += self.page.quota_bars(s)
+        return {"sections": [{"items": items}], "refresh_after": REFRESH}

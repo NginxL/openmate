@@ -5,6 +5,7 @@ Names are <connector id>_<what>, so another platform's connector reuses this mod
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import re
@@ -36,11 +37,15 @@ def read_tools(app) -> List[dict]:
         {"name": c + "_chats", "description": "最近活跃的%s会话（私聊和群），按最近消息排序，带会话 id、类型和还没回的消息数。可以按名字过滤。" % p,
          "input_schema": _obj({"query": {"type": "string", "description": "按会话名过滤，可选"},
                                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "最多几个，默认 30"}})},
-        {"name": c + "_messages", "description": "读一个%s会话的消息，从旧到新，每页最多 50 条；用返回的 before 往前翻。给 thread 只看一个话题。" % p,
+        {"name": c + "_messages", "description": "读一个%s会话的消息，从旧到新，每页最多 50 条；用返回的 before 往前翻。给 thread 只看一个话题。"
+                                         "给 since / until 只看一段时间，给 query 只看含这个词的消息（内容或发送人），不够时会去%s补读更早的历史。" % (p, p),
          "input_schema": _obj({"chat": {"type": "string", "description": "会话 id（%s_chats 或 %s_search 给出）" % (c, c)},
                                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "条数，默认 20"},
                                "before": {"type": "string", "description": "上一页返回的 before，往前翻时用"},
-                               "thread": {"type": "string", "description": "话题根消息 id，可选"}}, ["chat"])},
+                               "thread": {"type": "string", "description": "话题根消息 id，可选"},
+                               "since": {"type": "string", "description": "从这个时间起，如 2026-11-12 15:49 或 2026-11-12（我的时区），可选"},
+                               "until": {"type": "string", "description": "到这个时间为止，格式同 since，只写日期时含这一整天，可选"},
+                               "query": {"type": "string", "description": "关键词，可选；多个词用空格隔开，要全部出现"}}, ["chat"])},
         {"name": c + "_search", "description": "在%s里搜人和群，返回用户 id（给 %s_send_dm）或群的会话 id（给 %s_send、%s_messages）。" % (p, c, c, c),
          "input_schema": _obj({"query": {"type": "string", "description": "名字或关键词"},
                                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最多几个，默认 20"}}, ["query"])},
@@ -182,7 +187,13 @@ def _messages(app, a: dict) -> str:
     if chat is None:
         raise RPCError("没有这个%s会话：%s" % (app.platform.name, chat_id))
     thread = str(a.get("thread") or "").strip()
-    if thread:
+    since, until = _when(app, a.get("since"), False), _when(app, a.get("until"), True)
+    words = [w.casefold() for w in str(a.get("query") or "").split()]
+    filtered = since is not None or until is not None or bool(words)
+    more = ""
+    if filtered:
+        rows, more, scanned = _scan(app, chat_id, thread, before_pos, since, until, words, limit)
+    elif thread:
         rows = app.store.thread_messages(chat_id, thread, limit)
     else:
         rows = app.store.messages_before(chat_id, before_pos, limit)
@@ -191,19 +202,126 @@ def _messages(app, a: dict) -> str:
             rows = app.store.messages_before(chat_id, before_pos, limit)
     me = app.me_name()
     head = "%s（%s，chat=%s）" % (views.chat_name(chat, chat_id), "私聊" if chat.get("kind") == "dm" else "群", chat_id)
+    if filtered:
+        head += "，" + _filter_words(app, since, until, a.get("query"))
+        if not rows:
+            return head + "：看了 %d 条，没有符合的消息%s" % (scanned, "；" + more if more else "")
+        lines = [head + "：%d 条，从旧到新：" % len(rows)]
+        lines += [_row_line(app, r, me) for r in rows]
+        if more:
+            lines.append(more)
+        return "\n".join(lines)
     if not rows:
         return head + "：没有更多消息"
     lines = [head + "，%d 条，从旧到新：" % len(rows)]
-    for r in rows:
-        extra = ""
-        if r.get("parent_id"):
-            extra += " 回复=" + r["parent_id"]
-        if r.get("root_id"):
-            extra += " 话题=" + r["root_id"]
-        lines.append("[%s] %s (id=%s%s)" % (r["position"], views.log_line(r, app.tz, me), r["id"], extra))
+    lines += [_row_line(app, r, me) for r in rows]
     if not thread and len(rows) >= limit:
         lines.append("更早的消息：before=%s" % rows[0]["position"])
     return "\n".join(lines)
+
+
+def _row_line(app, r: dict, me: str) -> str:
+    extra = ""
+    if r.get("parent_id"):
+        extra += " 回复=" + r["parent_id"]
+    if r.get("root_id"):
+        extra += " 话题=" + r["root_id"]
+    return "[%s] %s (id=%s%s)" % (r["position"], views.log_line(r, app.tz, me), r["id"], extra)
+
+
+SCAN_PAGE = 200  # messages read from the store (and asked of the service) at a time by a filtered read
+SCAN_MOST = 3000  # messages one filtered read looks through before it hands back a before= to go on from
+
+
+def _when(app, value: Any, end: bool) -> Optional[float]:
+    """since / until as a timestamp: "2026-11-12 15:49", ISO 8601 with or without an offset, or a date (until: that whole
+    day; to the minute: that whole minute). Without an offset it is the user's time zone."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    try:
+        if len(s) == 10:
+            d = _dt.datetime.combine(_dt.date.fromisoformat(s.replace("/", "-")), _dt.time())
+            if end:
+                d += _dt.timedelta(days=1)
+        else:
+            d = _dt.datetime.fromisoformat(s.replace("/", "-").replace("Z", "+00:00"))
+    except ValueError:
+        raise RPCError("时间看不懂：%s（写成 2026-11-12 15:49 或 2026-11-12）" % s)
+    if d.tzinfo is None and app.tz is not None:
+        d = d.replace(tzinfo=app.tz)
+    t = d.timestamp()  # naive: the machine's local time
+    if end and len(s) == 10:
+        return t - 0.001
+    if end and re.search(r"[ T]\d{1,2}:\d{2}$", s):
+        return t + 59.999  # "until 16:15" keeps what was said during 16:15
+    return t
+
+
+def _filter_words(app, since: Optional[float], until: Optional[float], query: Any) -> str:
+    bits = []
+    if since is not None or until is not None:
+        bits.append("%s 到 %s" % (local_stamp(since, app.tz) if since is not None else "最早",
+                                 local_stamp(until, app.tz) if until is not None else "现在"))
+    q = " ".join(str(query or "").split())
+    if q:
+        bits.append("含“%s”" % q)
+    return "，".join(bits)
+
+
+def _scan(app, chat_id: str, thread: str, before_pos: Optional[int], since: Optional[float], until: Optional[float],
+          words: List[str], limit: int):
+    """The newest limit messages that fit, oldest first, looking back from before_pos (the store first, then older
+    history from the service), at most SCAN_MOST of them. Returns (rows, how to go on or "", how many were looked at)."""
+
+    def fits(r: dict) -> bool:
+        if until is not None and r["at"] > until:
+            return False
+        if since is not None and r["at"] < since:
+            return False
+        hay = ((r.get("text") or "") + " " + (r.get("sender_name") or "")).casefold()
+        return all(w in hay for w in words)
+
+    if thread:
+        rows = [r for r in app.store.thread_messages(chat_id, thread, SCAN_MOST)
+                if before_pos is None or r["position"] < before_pos]
+        hits = [r for r in rows if fits(r)]
+        more = "更早的符合消息：before=%s" % hits[-limit]["position"] if len(hits) > limit else ""
+        return hits[-limit:], more, len(rows)
+    hits: List[dict] = []  # newest first
+    scanned, pos, can_fill, done = 0, before_pos, True, False
+    last: Optional[dict] = None
+    while scanned < SCAN_MOST and not done:
+        page = app.store.messages_before(chat_id, pos, SCAN_PAGE)
+        if len(page) < SCAN_PAGE and can_fill:
+            had = len(page)
+            none_older = app.fill_older(chat_id, page[0]["position"] if page else pos, SCAN_PAGE - had)
+            page = app.store.messages_before(chat_id, pos, SCAN_PAGE)
+            can_fill = not none_older and len(page) > had  # nothing came: not signed in, failed, or the start
+        if not page:
+            done = True
+            break
+        for r in reversed(page):
+            if since is not None and r["at"] < since:
+                done = True  # older than the window: what is left is older still
+                break
+            scanned += 1
+            last = r
+            if fits(r):
+                hits.append(r)
+                if len(hits) >= limit:
+                    break
+        if len(hits) >= limit:
+            break
+        pos = page[0]["position"]
+        if len(page) < SCAN_PAGE and not can_fill:
+            done = True  # the chat's first message
+    hits.reverse()
+    if len(hits) >= limit and not done:
+        return hits, "更早的符合消息：before=%s" % hits[0]["position"], scanned
+    if not done and last is not None:
+        return hits, "看到 %s 还没看完，接着往前：before=%s" % (local_stamp(last["at"], app.tz), last["position"]), scanned
+    return hits, "", scanned
 
 
 def _search(app, a: dict) -> str:

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -102,11 +103,17 @@ class ManifestTest(unittest.TestCase):
         ui = {u["id"]: u for u in MANIFEST["contributes"]["ui"]}
         self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
             "openmate-today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "openmate-today"),
-            "chats": ("nav_page", "list", None), "chats-today": ("overview_card", None, "chats"),
-            "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar"),
-            "starkmesh": ("nav_page", "wallet", None)})
+            "openmate-agents": ("nav_page", "list", None), "agents-card": ("overview_card", None, "openmate-agents"),
+            "chats": ("nav_page", "list", None), "calendar": ("nav_page", "calendar", None),
+            "starkmesh": ("nav_page", "wallet", None), "starkmesh-card": ("overview_card", None, "starkmesh")})
         self.assertEqual(ui["starkmesh"]["title"], "中转站")
         self.assertTrue(all(1 <= len(u["title"]) <= 40 for u in ui.values()))
+        # every contribution is drawn by the program (a missing one is an error on the Overview)
+        from openmate_core.ui import UI
+
+        app = types.SimpleNamespace(config={}, tz=None, hub=None, secrets={}, store=None, closing=None)
+        drawn = UI(app, openmate_feishu.platform().ui_pages).pages
+        self.assertEqual(sorted(k for k in ui if k not in drawn), [])
     def test_packaged_manifest_drops_source_only_fields(self):
         m = packaged_manifest(MANIFEST)
         self.assertNotIn("tags", m)
