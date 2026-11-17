@@ -238,6 +238,11 @@ class AgentsPage(Page):
         return {"type": "text", "text": " · ".join("%s %s" % (t, v) for t, v, *_ in blocks)}
 
     def _row(self, board: Board, s: dict, kind: str, version: int, interactive: bool = True) -> dict:
+        return self.row_of(board, s, kind, version, interactive)
+
+    @staticmethod
+    def row_of(board: Board, s: dict, kind: str, version: int, interactive: bool = True) -> dict:
+        """One Agent's row; its action (agent:<id>) opens the details on the Agent progress page."""
         _, _, icon, color, tone, _ = [g for g in GROUPS if g[0] == kind][0]
         badge = {"text": TITLES[kind], "tone": tone} if tone and kind in ("needs", "stuck") else None
         sid = str(s.get("session_id") or "")

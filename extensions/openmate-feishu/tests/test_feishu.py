@@ -73,7 +73,7 @@ class ManifestTest(unittest.TestCase):
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
                                        "auto_reply_header",
                                        "agent_reply_suffix",
-                                       "history_chats", "triage_rules", "lark_cli", "lark_cli_profile", "starkmesh_url"])
+                                       "history_chats", "triage_rules", "lark_cli", "lark_cli_profile", "starkmesh_url", "bookmarks"])
         self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])
         self.assertIn("config:starkmesh_url:http", MANIFEST["permissions"]["network"])
         self.assertNotIn("default", props["larkx_python"])

@@ -97,6 +97,11 @@ def items(view, compact=False):
     return [it for s in view["sections"] for it in s["items"]]
 
 
+def body(view):
+    """The page's cards: without the status tiles on top and the 调整布局 button at the bottom (neither has a title)."""
+    return [s for s in view["sections"] if s.get("title")]
+
+
 def section(view, title):
     return [s for s in view["sections"] if s.get("title") == title][0]
 
@@ -115,9 +120,13 @@ class TodayTest(unittest.TestCase):
         view = page.render({"ui_version": 6})
         items(view)
         self.assertEqual(view["title"], "今天 · 11月16日 周一")
-        self.assertEqual([s.get("title") for s in view["sections"]],
-                         ["需要我 · 5", "日程", "飞书今天", "正在跑的 Agent · 2", "待办 · 1"])
-        needs = view["sections"][0]
+        self.assertEqual([s.get("title") for s in body(view)],
+                         ["需要我 · 5", "日程", "飞书今天", "正在跑的 Agent · 2", "待办 · 1", "快捷入口"])
+        status = view["sections"][0]["items"][0]
+        self.assertEqual([(t["title"], t["value"], t["badge"]["text"]) for t in status["tiles"]],
+                         [("需要我", "5", "待处理"), ("日程", "3", "待回复 2"), ("飞书", "2", "@我 1"), ("Agent", "2", "等你 1")])
+        self.assertEqual(view["sections"][-1]["items"][0]["action"], {"id": "layout:edit"})
+        needs = body(view)[0]
         self.assertEqual(texts(needs), ["飞书 2 · 收件箱 1 · Agent 等你 1 · 待办等你拍板 1"])
         self.assertEqual([(r["title"], r["badge"]["text"], r["icon"]) for r in rows(needs)[:-1]],
                          [("修复登录问题", "Agent 等你", "robot"), ("示例告警", "收件箱", "mail"), ("提交评审材料", "等你拍板", "check"),
@@ -125,19 +134,19 @@ class TodayTest(unittest.TestCase):
         self.assertEqual(rows(needs)[3]["action"], {"id": "chat:c1"})
         self.assertEqual(rows(needs)[3]["value"], "09:55")
         self.assertEqual((rows(needs)[-1]["title"], rows(needs)[-1]["action"]), ("在“飞书今天”里看全部私聊和 @我 ›", {"id": "go:chats"}))
-        cal = view["sections"][1]
+        cal = body(view)[1]
         self.assertEqual(texts(cal), ["今天 3 个 · 会议中，10:30 结束 · 2 个邀请没回复"])
         self.assertEqual([r["title"] for r in rows(cal)], ["站会", "示例评审会", "交流分享", "本周还有 3 个 ›"])
         self.assertEqual((rows(cal)[0]["badge"], rows(cal)[0]["icon_color"]), ({"text": "进行中", "tone": "positive"}, "green"))
         self.assertEqual((rows(cal)[-1]["value"], rows(cal)[-1]["action"]), ("待回复 2", {"id": "go:calendar"}))
-        feishu = view["sections"][2]
+        feishu = body(view)[2]
         self.assertEqual(texts(feishu), ["@我 1 · 私聊 1 · 今天收到 120 条，9 个会话"])
         self.assertEqual([(r["title"], r.get("subtitle")) for r in rows(feishu)],
                          [("示例项目群", "示例同事乙：今天发版"), ("示例值班群", "示例同事丙：已处理"), ("打开飞书今天 ›", None)])
-        agents = view["sections"][3]
+        agents = body(view)[3]
         self.assertEqual(texts(agents), ["在跑 2 · 等你 1（在“需要我”里）"])
         self.assertEqual([(r["title"], r["value"]) for r in rows(agents)], [("整理周报", "codex"), ("示例仓库", "claude")])
-        todos = view["sections"][4]
+        todos = body(view)[4]
         self.assertEqual(texts(todos), ["未完成 2 · 今天到期 1"])
         self.assertEqual([r["title"] for r in rows(todos)], ["下周的事"], "the one waiting for a decision is in 需要我")
         self.assertTrue(all(t == 8.0 for _, _, t in hub.calls), "short waits")
@@ -147,10 +156,12 @@ class TodayTest(unittest.TestCase):
         view = page.render({"ui_version": 8})
         items(view)
         self.assertEqual(view["layout"], "columns")
-        needs, cal, feishu, agents, todos = view["sections"]
+        needs, cal, feishu, agents, todos, shortcuts = body(view)
         self.assertEqual((needs.get("span"), needs.get("columns")), ("full", 2), "需要我 across, its rows two by two")
         self.assertEqual([s.get("span") for s in (cal, feishu, agents, todos)], [None] * 4, "the rest two to a row")
-        self.assertEqual([(s["icon"], s["icon_color"]) for s in view["sections"]],
+        self.assertEqual((view["sections"][0].get("span"), shortcuts.get("span"), view["sections"][-1].get("span")),
+                         ("full", "full", "full"), "the status tiles, the shortcuts and the button across")
+        self.assertEqual([(s["icon"], s["icon_color"]) for s in body(view)[:5]],
                          [("bell", "red"), ("calendar", "blue"), ("chat", "indigo"), ("robot", "teal"), ("check", "green")])
         self.assertEqual(needs["link"], {"title": "全部", "action": {"id": "go:chats"}})
         self.assertEqual(cal["link"], {"title": "日历", "action": {"id": "go:calendar"}})
@@ -161,7 +172,7 @@ class TodayTest(unittest.TestCase):
         self.assertEqual(texts(needs), ["飞书 2 · 收件箱 1 · Agent 等你 1 · 待办等你拍板 1"])
         # nothing waits: no link on 需要我, a gray bell
         page, _, _ = make(answers={"/api/v1/todos": {"todos": []}}, needs=[], groups=[])
-        quiet = page.render({"ui_version": 8})["sections"][0]
+        quiet = body(page.render({"ui_version": 8}))[0]
         self.assertEqual((quiet["icon_color"], "link" in quiet), ("gray", False))
 
     def test_before_8_no_columns_fields(self):
@@ -169,26 +180,26 @@ class TodayTest(unittest.TestCase):
         for v in (6, 7):
             view = page.render({"ui_version": v})
             self.assertNotIn("layout", view)
-            self.assertFalse(any(k in s for s in view["sections"] for k in ("span", "icon", "link", "columns")))
+            self.assertFalse(any(k in s for s in body(view) for k in ("span", "icon", "link", "columns")))
 
     def test_marked_done(self):
         now = [NOW]
         answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
         page, card, _ = make(answers=answers, clock=lambda: now[0])
         view = page.render({"ui_version": 6})
-        needs = rows(view["sections"][0])
+        needs = rows(body(view)[0])
         self.assertEqual([r["actions"][0]["action"]["id"] for r in needs[:-1]],
                          ["done:wait:s1", "done:inbox:i1", "done:ask:t1", "done:chat:c1", "done:chat:c2"])
         self.assertTrue(all(r["actions"][0]["title"] == "处理完" for r in needs[:-1]))
         self.assertFalse(any("actions" in r for r in card.render({"ui_version": 6})["sections"][1]["items"]))
-        self.assertFalse(any("actions" in r for r in rows(page.render({"ui_version": 5})["sections"][0])), "a row menu is 6")
+        self.assertFalse(any("actions" in r for r in rows(body(page.render({"ui_version": 5}))[0])), "a row menu is 6")
         for aid in ("done:inbox:i1", "done:wait:s1", "done:ask:t1", "done:chat:c1"):
             out = page.action({"action": {"id": aid}, "ui_version": 6})
             self.assertIn("已标记处理完", out["toast"])
         view = out["view"]
-        self.assertEqual(view["sections"][0]["title"], "需要我 · 1")
-        self.assertEqual([r["title"] for r in rows(view["sections"][0])][:1], ["示例同事甲"])
-        self.assertEqual(texts(view["sections"][0]), ["飞书 1 · 收件箱 0 · Agent 等你 0 · 已处理 4"])
+        self.assertEqual(body(view)[0]["title"], "需要我 · 1")
+        self.assertEqual([r["title"] for r in rows(body(view)[0])][:1], ["示例同事甲"])
+        self.assertEqual(texts(body(view)[0]), ["飞书 1 · 收件箱 0 · Agent 等你 0 · 已处理 4"])
         self.assertIn("没有要处理", page.action({"action": {"id": "done:inbox:nope"}, "ui_version": 6})["toast"])
         # the inbox item is updated, the Agent asks again: they come back; the others stay handled
         answers["/api/v1/inbox"] = {"items": [dict(PERSONA["/api/v1/inbox"]["items"][0], updated_at="2026-11-16T03:00:00Z")]}
@@ -196,8 +207,8 @@ class TodayTest(unittest.TestCase):
                                                                         state_since="2026-11-16T03:00:00Z")]}
         now[0] += 700  # past STALE: a fresh read
         view = page.render({"ui_version": 6})
-        self.assertEqual([r["title"] for r in rows(view["sections"][0])][:2], ["修复登录问题", "示例告警"])
-        self.assertIn("已处理 2", texts(view["sections"][0])[0])
+        self.assertEqual([r["title"] for r in rows(body(view)[0])][:2], ["修复登录问题", "示例告警"])
+        self.assertIn("已处理 2", texts(body(view)[0])[0])
 
     def test_what_ai_answered_today(self):
         page, _, _ = make()
@@ -275,11 +286,11 @@ class TodayTest(unittest.TestCase):
         page, _, _ = make(answers=answers)
         view = page.render({"ui_version": 6})
         items(view)
-        self.assertEqual(view["sections"][0]["title"], "需要我 · 3")
-        note = view["sections"][-1]["items"][0]
+        self.assertEqual(body(view)[0]["title"], "需要我 · 3")
+        note = view["sections"][-2]["items"][0]  # above the 调整布局 button
         self.assertEqual(note["text"], "暂时读不到：Persona 收件箱、待办（稍后自动重试）")
         self.assertNotIn("manager", note["text"])
-        self.assertNotIn("待办 · 0", [s.get("title") for s in view["sections"]])
+        self.assertNotIn("待办 · 0", [s.get("title") for s in body(view)])
         page, card, _ = make(runner=Runner({"ok": False, "error": {"type": "authorization"}}))
         view = page.render({"ui_version": 6})
         self.assertEqual(section(view, "日程")["items"][0]["title"], "日程读不到")
@@ -316,7 +327,7 @@ class TodayTest(unittest.TestCase):
         answers["/api/v1/inbox"] = HubError(502, "the manager could not reach the hub", "hub_unreachable")
         now[0] += 61
         view = page.render({"ui_version": 6})
-        self.assertEqual(view["sections"][0]["title"], "需要我 · 5", "the last whole read")
+        self.assertEqual(body(view)[0]["title"], "需要我 · 5", "the last whole read")
         self.assertNotIn("暂时读不到", str(view))
         now[0] += 600
         self.assertIn("暂时读不到：Persona 收件箱", str(page.render({"ui_version": 6})))

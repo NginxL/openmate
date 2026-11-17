@@ -63,7 +63,7 @@ def _agenda_pages(app):
     board = agents.AgentsRead(app)
     return {
         agenda.PAGE: agenda.CalendarPage(app, shared), agenda.CARD: agenda.CalendarPage(app, shared, card=True),
-        today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh),
+        today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh, agents=board),
         today.CARD: today.TodayPage(app, shared, persona, card=True),
         starkmesh.PAGE: mesh, starkmesh.CARD: starkmesh.StarkMeshCard(mesh),
         agents.PAGE: agents.AgentsPage(app, board), agents.CARD: agents.AgentsPage(app, board, card=True),

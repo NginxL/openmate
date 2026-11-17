@@ -16,9 +16,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openmate_core.hub import HubError
 from openmate_core import views
-from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, Page, day_start, done_action, empty, row, stat, state_text,
-                              tile, when)
+from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, Page, day_start, done_action, empty, row, stat, state_of,
+                              state_text, tile, when)
 
+from openmate_core import agents as agents_mod
+
+from . import layout as layout_mod
 from .agenda import PAGE as CALENDAR_PAGE
 from .agenda import Agenda, CalendarError, Event
 
@@ -115,6 +118,20 @@ class PersonaToday:
         return out
 
 
+BOOKMARKS_MOST = 30
+
+
+def bookmarks(config: dict) -> List[Tuple[str, str, str]]:
+    """The 书签 setting: lines "标题 | https://… | 说明" (说明 optional); a line without an https link is skipped."""
+    out = []
+    for line in (config or {}).get("bookmarks") or []:
+        parts = [x.strip() for x in str(line).split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1].startswith("https://") or len(parts[1]) > 2000:
+            continue
+        out.append((parts[0][:60], parts[1], parts[2][:120] if len(parts) > 2 else ""))
+    return out[:BOOKMARKS_MOST]
+
+
 def agent_title(s: dict) -> str:
     return str(s.get("title") or s.get("space_name") or s.get("cwd") or "Agent").strip()
 
@@ -156,17 +173,26 @@ def todo_due(t: dict, tz) -> Tuple[Optional[_dt.datetime], str]:
 
 class TodayPage(Page):
     def __init__(self, app, agenda: Agenda, persona: PersonaToday, chats: Optional[ChatsToday] = None,
-                 card: bool = False, mesh=None):
+                 card: bool = False, mesh=None, agents: Optional[agents_mod.AgentsRead] = None):
         self.app = app
         self.agenda = agenda
         self.persona = persona
         self.chats = chats or ChatsToday(app)
         self.card = card
         self.mesh = mesh  # starkmesh.StarkMeshPage: its block on the page once a key is set
+        self.agents = agents  # the Agent progress read: the Agent block sorts by it (else Persona's working / waiting)
 
     def warm(self) -> None:
         self.agenda.warm()
         self.persona.warm()
+        if self.agents is not None:
+            self.agents.warm()
+
+    def layout(self) -> layout_mod.Layout:
+        return layout_mod.Layout.load(getattr(self.app, "store", None))
+
+    def title(self, now) -> str:
+        return "今天 · %s 周%s" % (now.strftime("%m月%d日").lstrip("0"), WEEKDAYS[now.weekday()])
 
     def _calendar(self, now) -> Tuple[List[Event], List[Event], int, str]:
         """(today's events still to come or on now, invitations waiting for an answer, how many in the next six days,
@@ -184,6 +210,8 @@ class TodayPage(Page):
         version = int(params.get("ui_version") or 1)
         tz = self.app.tz
         now = _dt.datetime.fromtimestamp(self.agenda.clock(), tz)
+        if not self.card and state_of(params).get("edit"):
+            return layout_mod.edit_view(self.layout(), version, self.title(now), state_text({"edit": 1}))
         t0 = time.monotonic()
         p = self.persona.read()
         t1 = time.monotonic()
@@ -232,6 +260,17 @@ class TodayPage(Page):
         if aid.startswith("doc:"):
             run = self.app.store.run_get(aid[4:]) if getattr(self.app, "store", None) is not None else None
             return {"open_url": run["doc_url"]} if run and run.get("doc_url") else {"toast": "这条评论的文档链接不在了"}
+        if aid.startswith("layout:"):
+            return self._layout(params, aid[7:])
+        if aid.startswith("agent:"):
+            return {"push": {"ui": agents_mod.PAGE, "state": state_text({"session": aid[6:]}), "title": "Agent"}}
+        if aid == "go:agents":
+            return {"push": {"ui": agents_mod.PAGE, "title": "Agent 进度"}}
+        if aid.startswith("url:"):
+            for i, (_, url, _) in enumerate(bookmarks(self.app.config)):
+                if "url:%d" % i == aid:
+                    return {"open_url": url}
+            return {"toast": "这个书签已经不在了"}
         if aid == "go:starkmesh":
             return {"push": {"ui": "starkmesh", "title": "中转站 · StarkMesh"}}
         if aid == "go:calendar":
@@ -239,6 +278,25 @@ class TodayPage(Page):
         if aid == "go:chats":
             return {"push": {"ui": CHATS_PAGE, "title": "飞书今天"}}
         return {}
+
+    def _layout(self, params: dict, what: str) -> dict:
+        store = getattr(self.app, "store", None)
+        if store is None:
+            return {"toast": "扩展还在启动，请稍后再试"}
+        if what == "edit":
+            return {"view": self.render(dict(params, state=state_text({"edit": 1})))}
+        if what == "done":
+            return {"view": self.render(dict(params, state=""))}
+        if what == "reset":
+            layout_mod.Layout.default().save(store)
+            return {"toast": "已恢复默认布局", "view": self.render(dict(params, state=state_text({"edit": 1})))}
+        change, _, block = what.partition(":")
+        lay = self.layout()
+        toast = lay.change(change, block)
+        if toast:
+            lay.save(store)
+        view = self.render(dict(params, state=state_text({"edit": 1})))
+        return {"toast": toast, "view": view} if toast else {"view": view}
 
     def _dismiss(self, kind: str, ident: str) -> bool:
         store = getattr(self.app, "store", None)
@@ -358,11 +416,52 @@ class Day:
     # ---- the card
 
     def card(self) -> dict:
-        v, p = self.version, self.p
+        v = self.version
+        head = self._tiles(self.status_blocks(), "blocks")
+        rows = [{k: x for k, x in r.items() if k not in ("action", "actions")} for r in self.needs_rows()[:3]]  # a card only shows
+        return {"sections": [{"items": [head]}, {"items": rows or [empty("没有要你处理的事", "", v)]}], "refresh_after": REFRESH}
+
+    # ---- the page
+
+    def full(self) -> dict:
+        lay = self.page.layout()
+        build = {"status": self.status_block, "needs": self.needs_card, "calendar": self.calendar_card,
+                 "feishu": self.feishu_card, "agents": self.agents_block, "mesh": self.mesh_card, "auto": self.auto_card,
+                 "todos": self.todos_card, "shortcuts": self.shortcuts_block, "bookmarks": self.bookmarks_block}
+        sections = []
+        for b in lay.shown():
+            sec = build[b]()
+            if sec is None:
+                continue
+            if self.v8:  # a whole row or one of two (layout columns); below 8 every section is a whole row
+                if lay.is_wide(b):
+                    sec["span"] = "full"
+                else:
+                    sec.pop("span", None)
+                    sec.pop("columns", None)
+            sections.append(sec)
+        if self.p["missing"]:
+            note: Dict[str, Any] = {"items": [self._caption("暂时读不到：%s（稍后自动重试）" % "、".join(self.p["missing"]))]}
+            if self.v8:
+                note["span"] = "full"
+            sections.append(note)
+        tail: Dict[str, Any] = {"items": [{"type": "button", "title": "调整布局", "action": {"id": "layout:edit"}, "key": "layout"}]}
+        if self.v8:
+            tail["span"] = "full"
+        sections.append(tail)
+        view = {"title": self.page.title(self.now), "sections": sections, "refresh_after": REFRESH, "state": ""}
+        if self.v8:
+            view["layout"] = "columns"  # the blocks the user made whole rows across, the others two by two
+        return view
+
+    # ---- the blocks only the page has
+
+    def status_blocks(self, mesh: bool = False) -> List[tuple]:
+        """The status tiles: (title, value, line, icon, color, badge, key), each with a pill saying how it stands."""
+        p = self.p
         unread = self.counts["mentions"] + self.counts["dms"]
         ok = {"text": "正常", "tone": "positive"}
-        blocks = [
-            # (title, value, line, icon, color, badge, key): each tile says how it stands in its pill, as a status board
+        out = [
             ("需要我", str(self.needs_total), "飞书 %d · 收件箱 %d · Agent %d" % (len(self.chat_needs), len(self.inbox_needs), len(p["waiting"])),
              "bell", "red" if self.needs_total else "gray",
              {"text": "待处理", "tone": "danger"} if self.needs_total else {"text": "清空", "tone": "positive"}, "b:needs"),
@@ -374,39 +473,73 @@ class Day:
             ("Agent", str(len(p["working"])), "在跑 · 等你 %d" % len(p["waiting"]) if p["waiting"] else "在跑 · 没有在等你的",
              "robot", "teal", {"text": "等你 %d" % len(p["waiting"]), "tone": "danger"} if p["waiting"] else ok, "b:agents"),
         ]
-        if v >= 6:
-            head = {"type": "grid", "max_columns": 4, "key": "blocks",
-                    "tiles": [tile(t, val, line, icon, color, key, badge) for t, val, line, icon, color, badge, key in blocks]}
-        elif v >= 2:
-            head = {"type": "stat_grid", "stats": [stat(t, val, line, "caution" if badge else "") for t, val, line, _, _, badge, _ in blocks]}
-        else:
-            head = {"type": "text", "text": " · ".join("%s %s" % (t, val) for t, val, *_ in blocks)}
-        rows = [{k: x for k, x in r.items() if k not in ("action", "actions")} for r in self.needs_rows()[:3]]  # a card only shows
-        return {"sections": [{"items": [head]}, {"items": rows or [empty("没有要你处理的事", "", v)]}], "refresh_after": REFRESH}
+        page = getattr(self.page, "mesh", None)
+        if mesh and page is not None:
+            t = page.status_tile()
+            if t is not None:
+                out.append(t)
+        return out
 
-    # ---- the page
+    def _tiles(self, blocks: List[tuple], key: str) -> dict:
+        if self.version >= 6:
+            return {"type": "grid", "max_columns": len(blocks), "key": key,
+                    "tiles": [tile(t, val, line, icon, color, k, badge) for t, val, line, icon, color, badge, k in blocks]}
+        if self.version >= 2:
+            return {"type": "stat_grid", "stats": [stat(t, val, line, (badge or {}).get("tone") if (badge or {}).get("tone") in ("caution", "danger") else "")
+                                                    for t, val, line, _, _, badge, _ in blocks][:6]}
+        return {"type": "text", "text": " · ".join("%s %s" % (t, val) for t, val, *_ in blocks)}
 
-    def full(self) -> dict:
-        sections = [self.needs_card(), self.calendar_card(), self.feishu_card(), self.agents_card()]
-        mesh = self.mesh_card()
-        if mesh is not None:
-            sections.append(mesh)
-        auto = self.auto_card()
-        if auto is not None:
-            sections.append(auto)
-        todos = self.todos_card()
-        if todos is not None:
-            sections.append(todos)
-        if self.p["missing"]:
-            note: Dict[str, Any] = {"items": [self._caption("暂时读不到：%s（稍后自动重试）" % "、".join(self.p["missing"]))]}
-            if self.v8:
-                note["span"] = "full"
-            sections.append(note)
-        title = "今天 · %s 周%s" % (self.now.strftime("%m月%d日").lstrip("0"), WEEKDAYS[self.now.weekday()])
-        view = {"title": title, "sections": sections, "refresh_after": REFRESH}
-        if self.v8:
-            view["layout"] = "columns"  # 需要我 across, then 日程 | 飞书今天, 正在跑的 Agent | 待办
-        return view
+    def status_block(self) -> dict:
+        return {"items": [self._tiles(self.status_blocks(mesh=True), "status")]}
+
+    def agents_block(self) -> dict:
+        """等你, maybe stuck and working Agents, from the Agent progress read (else Persona's working list)."""
+        read = getattr(self.page, "agents", None)
+        if read is None:
+            return self.agents_card()
+        try:
+            board = agents_mod.Board(read.read(), self.now.timestamp(), self.page.app.tz)
+        except Exception as e:
+            log.info("the Agent block could not be read: %s", e.__class__.__name__)
+            return self.agents_card()
+        parts = ["%s %d" % (t, board.count(k)) for k, t, *_ in agents_mod.GROUPS if board.count(k)]
+        rows = []
+        for k in ("needs", "stuck", "working"):
+            for s in board.groups[k]:
+                if len(rows) < WORK_MOST:
+                    rows.append(agents_mod.AgentsPage.row_of(board, s, k, self.version, self.links))
+        busy = board.count("needs") + board.count("stuck") + board.count("working")
+        sec: Dict[str, Any] = {"title": "Agent · %d" % busy if busy else "Agent",
+                               "items": [self._caption(" · ".join(parts) or "今天还没有 Agent 做过事")]
+                               + (rows or [empty("没有等你或在跑的 Agent", "", self.version)])}
+        if busy > WORK_MOST:
+            sec["footer"] = "还有 %d 个" % (busy - WORK_MOST)
+        if not self.v8:
+            sec["items"] += self._link("打开 Agent 进度 ›", "go:agents", "link:agents")
+        return self._card(sec, "robot", "teal", ("全部", "go:agents"))
+
+    SHORTCUTS = (("飞书", "@我、私聊和今天活跃的群", "chat", "indigo", "go:chats"),
+                 ("日程", "今天和这周的会", "calendar", "blue", "go:calendar"),
+                 ("中转站", "各账号额度和重置时间", "gauge", "teal", "go:starkmesh"),
+                 ("Agent 进度", "所有电脑上的 Agent", "robot", "purple", "go:agents"))
+
+    def shortcuts_block(self) -> Optional[dict]:
+        if not self.links:
+            return None  # push came with UI version 3
+        items = [x for x in self.SHORTCUTS if x[4] != "go:starkmesh" or getattr(self.page, "mesh", None) is not None]
+        if self.icons:
+            body = {"type": "grid", "max_columns": len(items), "key": "shortcuts",
+                    "tiles": [tile(t, "", sub, icon, color, "sc:" + a, None, a) for t, sub, icon, color, a in items]}
+            return self._card({"title": "快捷入口", "items": [body]}, "link", "gray")
+        return {"title": "快捷入口", "items": [row(t + " ›", sub, "", a, key="sc:" + a) for t, sub, _, _, a in items]}
+
+    def bookmarks_block(self) -> Optional[dict]:
+        marks = bookmarks(self.page.app.config)
+        if not marks:
+            return None
+        rows = [row(t, about or url, "", "url:%d" % i, key="bm:%d" % i, **self._icon("link", "blue"))
+                for i, (t, url, about) in enumerate(marks)]
+        return self._card({"title": "书签", "items": rows}, "star", "amber")
 
     def needs_card(self) -> dict:
         p = self.p

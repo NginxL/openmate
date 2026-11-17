@@ -376,6 +376,20 @@ class StarkMeshPage(Page):
             items.append(row("打开中转站 ›", "", "", "go:starkmesh", key="link:starkmesh"))
         return sec
 
+    def status_tile(self) -> Optional[tuple]:
+        """The 今天 page's status tile: usable accounts and a pill for how much is left (None until a key is set)."""
+        if not self.mesh.configured:
+            return None
+        try:
+            s = self.mesh.read()
+        except StarkMeshError:
+            return ("中转站", "—", "读不到", "gauge", "gray", {"text": "读不到", "tone": "caution"}, "b:mesh")
+        word, tone = standing(s)
+        w = s.window(WINDOWS[0][0])
+        line = "5 小时剩 %.2f 号" % w["left"] if w is not None else "Claude 账号"
+        color = {"positive": "green", "caution": "amber", "danger": "red"}[tone]
+        return ("中转站", "%d/%d" % (len(s.ok_claude), len(s.claude)), line, "gauge", color, {"text": word, "tone": tone}, "b:mesh")
+
     def action(self, params: dict) -> dict:
         return {}
 

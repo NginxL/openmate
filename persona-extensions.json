@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.8.0",
+        "version": "0.9.0",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -270,6 +270,16 @@
               "format": "uri",
               "title": "StarkMesh 地址",
               "description": "StarkMesh 网关的地址（这台电脑上能访问到的，例如 http://127.0.0.1:18080）。StarkMesh 页和“今天”页的额度卡片从这里只读地读账号和用量。地址和下面的密钥都填了才会显示。"
+            },
+            "bookmarks": {
+              "type": "array",
+              "title": "书签",
+              "description": "“今天”页的书签，一行一个：标题 | https://链接 | 说明（说明可以不写）。只认 https 链接，最多 30 个。",
+              "items": {
+                "type": "string",
+                "maxLength": 2200
+              },
+              "maxItems": 30
             }
           }
         },
@@ -318,9 +328,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.8.0/openmate-feishu-0.8.0.tar.gz",
-          "sha256": "519d3c3d7030f6f38129d617e00993ff9791d991a38cf8b44d6dc59443a1585d",
-          "size": 137775
+          "url": "packages/openmate-feishu/0.9.0/openmate-feishu-0.9.0.tar.gz",
+          "sha256": "382fc1a135cea337416edd447a4018e8e661558f5f67b1f59c1d4de24c469175",
+          "size": 142247
         }
       ]
     }
