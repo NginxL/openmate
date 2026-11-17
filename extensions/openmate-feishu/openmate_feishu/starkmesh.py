@@ -69,7 +69,8 @@ class StarkMeshAPI:
             with self._open(req, timeout=WAIT) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
-            e.close()
+            if e.fp is not None:  # an HTTPError made without a body (3.9) has no file to close
+                e.close()
             if e.code in (401, 403):
                 raise StarkMeshError("StarkMesh 不认这个密钥，或它缺权限（要 %s）" % PERMISSIONS, "auth")
             raise StarkMeshError("StarkMesh 回答 HTTP %d" % e.code)
@@ -392,6 +393,42 @@ class StarkMeshPage(Page):
 
     def action(self, params: dict) -> dict:
         return {}
+
+    def tools(self) -> Dict[str, Tuple[dict, Callable[[dict], str]]]:
+        """The assistant's read of the quota (the morning brief says how much is left), from the page's own fresh read."""
+        name = self.app.cid + "_starkmesh"
+        return {name: ({"name": name, "description": "StarkMesh 中转站的 Claude 额度：总体充足 / 偏紧 / 快用完，可用号几个，"
+                                                      "5 小时、本周、Fable 本周各剩多少号、多久后重置，哪些号不可用、什么时候恢复，"
+                                                      "以及今天的请求数、Token 和费用。只读，不会改 StarkMesh 的任何东西。",
+                        "input_schema": {"type": "object", "properties": {}}}, self.brief)}
+
+    def brief(self, _args: dict) -> str:
+        if not self.mesh.configured:
+            return "还没有接上 StarkMesh：OpenMate 飞书扩展的设置里还没填 StarkMesh 地址和只读管理密钥。"
+        try:
+            s = self.mesh.read()
+        except StarkMeshError as e:
+            return "StarkMesh 读不到：" + e.message
+        word, _ = standing(s)
+        lines = ["StarkMesh 额度：%s（数据读于 %s）" % (word, when(s.now, self.app.tz)),
+                 "可用 Claude 号 %d/%d" % (len(s.ok_claude), len(s.claude))]
+        for key, label in WINDOWS:
+            w = s.window(key)
+            if w is not None:
+                reset = "，%s后重置" % span(w["reset"]) if w["reset"] else ""
+                lines.append("%s：剩 %.2f 号（%d 个可用号满额 %d 号）%s" % (label, w["left"], w["of"], w["of"], reset))
+        for a in s.claude:
+            if usable(a, s.now):
+                continue
+            text, _ = state_of(a, s.now)
+            back = [t for t in (_ts(a.get(f)) for f in ("rate_limit_reset_at", "overload_until", "temp_unschedulable_until"))
+                    if t and t > s.now]
+            lines.append("不可用：%s，%s%s" % (a.get("name") or a.get("id"), text, "，%s后恢复" % span(max(back) - s.now) if back else ""))
+        st = s.stats
+        if st:
+            lines.append("今天：请求 %s，Token %s，费用 %s" % (count(st.get("today_requests")), count(st.get("today_tokens")),
+                                                     money(st.get("today_actual_cost", st.get("today_cost")))))
+        return "\n".join(lines)
 
 
 CARD = "starkmesh-card"

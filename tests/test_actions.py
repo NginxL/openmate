@@ -17,7 +17,7 @@ class ToolListTest(unittest.TestCase):
         tools = h.c("tools.list")["tools"]
         actions = h.c("actions.list")["tools"]
         names = [t["name"] for t in tools]
-        self.assertEqual(names, [CID + "_" + n for n in ("status", "chats", "messages", "search", "docs", "agent_reply")])
+        self.assertEqual(names, [CID + "_" + n for n in ("status", "chats", "messages", "search", "docs", "agent_reply", "starkmesh")])
         self.assertEqual([a["name"] for a in actions], [CID + "_send", CID + "_send_dm"])
         for t in tools + actions:
             self.assertTrue(t["description"])

@@ -55,7 +55,13 @@ def read_tools(app) -> List[dict]:
         {"name": c + "_agent_reply", "description": "只给 /agent 用：把处理结果以我的身份回复到发出 /agent 的那个%s话题。request 必须是这次请求给出的 id；可以多次调用发进度，不要编造没做到的事。" % p,
          "input_schema": _obj({"request": {"type": "string", "description": "这次 /agent 请求的 id（请求说明里给出）"},
                                "text": {"type": "string", "description": "要回复的内容（纯文本）"}}, ["request", "text"])},
-    ]
+    ] + [schema for schema, _ in _page_tools(app).values()]
+
+
+def _page_tools(app) -> dict:
+    """The read tools the platform's pages add (UI.tools: the StarkMesh quota, say); none from an app without pages."""
+    ui = getattr(app, "_ui", None)
+    return ui().tools() if ui is not None else {}
 
 
 def write_tools(app) -> List[dict]:
@@ -120,9 +126,12 @@ def call_tool(app, params: dict) -> dict:
         c + "_docs": _docs,
         c + "_agent_reply": _agent_reply,
     }.get(name)
-    if fn is None:
+    if fn is not None:
+        return {"text": fn(app, a)}
+    page_tool = _page_tools(app).get(name)
+    if page_tool is None:
         raise RPCError("没有这个工具：%s" % name)
-    return {"text": fn(app, a)}
+    return {"text": page_tool[1](a)}
 
 
 def _status(app, a: dict) -> str:

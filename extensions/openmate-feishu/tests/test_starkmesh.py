@@ -72,7 +72,7 @@ class Gateway:
 def make(key="sk-admin-readonly", gateway=None, url=True):
     gateway = gateway or Gateway()
     app = types.SimpleNamespace(config={"starkmesh_url": "http://127.0.0.1:18080"} if url else {},
-                                secrets={"starkmesh_key": key} if key else {}, tz=TZ)
+                                secrets={"starkmesh_key": key} if key else {}, tz=TZ, cid="matefeishu")
     mesh = starkmesh.StarkMesh(app, api=starkmesh.StarkMeshAPI(app, urlopen=gateway), clock=lambda: NOW, spawn=INPLACE)
     return starkmesh.StarkMeshPage(app, mesh), gateway
 
@@ -206,8 +206,36 @@ class StarkMeshTest(unittest.TestCase):
         self.assertNotIn("go:starkmesh", str(page.card(8, True, True)), "the card's own link on 8")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class QuotaToolTest(unittest.TestCase):
+    """matefeishu_starkmesh: the assistant's read of the quota, from the page's own fresh read."""
+
+    def test_the_quota_in_words(self):
+        page, gw = make()
+        tools = page.tools()
+        self.assertEqual(list(tools), ["matefeishu_starkmesh"])
+        schema, call = tools["matefeishu_starkmesh"]
+        self.assertEqual((schema["name"], schema["input_schema"]["type"]), ("matefeishu_starkmesh", "object"))
+        lines = call({}).split("\n")
+        self.assertTrue(lines[0].startswith("StarkMesh 额度：偏紧（数据读于 "), lines[0])  # 1.3 of 3 left in 5 小时
+        self.assertEqual(lines[1], "可用 Claude 号 3/4")
+        self.assertEqual(lines[2], "5 小时：剩 1.30 号（3 个可用号满额 3 号），1 小时 49 分后重置")
+        self.assertEqual(lines[3], "本周：剩 1.40 号（3 个可用号满额 3 号），1 天 16 小时后重置")
+        self.assertEqual(lines[4], "Fable 本周：剩 1.50 号（2 个可用号满额 2 号），1 天 16 小时后重置")
+        self.assertEqual(lines[5], "不可用：claude-limited，限流中，1 小时 0 分后恢复")
+        self.assertEqual(lines[6], "今天：请求 1.2万，Token 9876.5万，费用 $12.50")
+        self.assertEqual(len(lines), 7, "the OpenAI account is not a Claude one")
+        reads = len(gw.calls)
+        call({})
+        self.assertEqual(len(gw.calls), reads, "a second ask is answered from the fresh read")
+
+    def test_not_set_up_or_unreachable_is_said(self):
+        page, gw = make(key="")
+        self.assertIn("还没有接上 StarkMesh", page.tools()["matefeishu_starkmesh"][1]({}))
+        self.assertEqual(gw.calls, [])
+        gw = Gateway()
+        gw.fail = urllib.error.URLError("refused")
+        page, _ = make(gateway=gw)
+        self.assertTrue(page.brief({}).startswith("StarkMesh 读不到："))
 
 
 class OverviewCardTest(unittest.TestCase):
@@ -238,3 +266,7 @@ class OverviewCardTest(unittest.TestCase):
         self.assertEqual(starkmesh.standing(s), ("快用完", "danger"))
         s.window, s.ok_claude = (lambda key: None), []
         self.assertEqual(starkmesh.standing(s), ("没有可用号", "danger"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -546,6 +546,24 @@ class UI:
     def action(self, params: dict) -> dict:
         return self._page(params).action(params)
 
+    def tools(self) -> Dict[str, Tuple[dict, Callable[[dict], str]]]:
+        """Read tools the platform's pages offer the assistant (a page's tools(): {name: (schema, call)}), by name. Only
+        names in this connector's own namespace (<cid>_…) are taken; a page that fails is left out, not the list."""
+        out: Dict[str, Tuple[dict, Callable[[dict], str]]] = {}
+        for page in {id(p): p for p in self.pages.values()}.values():
+            fn = getattr(page, "tools", None)
+            if fn is None:
+                continue
+            try:
+                offered = fn() or {}
+            except Exception:
+                log.exception("a page's tools could not be listed")
+                continue
+            for name, entry in offered.items():
+                if name.startswith(self.app.cid + "_"):
+                    out.setdefault(name, entry)
+        return out
+
     def warm(self) -> None:
         """Have the pages read what they show (the calendar, Persona) in the background, before anyone looks."""
         for page in {id(p): p for p in self.pages.values()}.values():

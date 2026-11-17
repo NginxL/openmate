@@ -22,7 +22,7 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 | 收件箱回复 | 以你本人身份发出，同一条回复只发一次 |
 | 会话页 | 每页最多 50 条，可以往前翻，本地没有的旧消息会从飞书补拉；图片 4 MB 以内可以预览 |
 | 知识库 | 按游标增量归档聊天记录，附件 20 MB 以内按需下载 |
-| 只读工具 | `matefeishu_status`、`matefeishu_chats`、`matefeishu_messages`（可按时间段和关键词查，会自己往前补读历史）、`matefeishu_search`（搜人和群）、`matefeishu_docs`（通过管理端的 lark-cli 只读集成搜文档） |
+| 只读工具 | `matefeishu_status`、`matefeishu_chats`、`matefeishu_messages`（可按时间段和关键词查，会自己往前补读历史）、`matefeishu_search`（搜人和群）、`matefeishu_docs`（通过管理端的 lark-cli 只读集成搜文档）、`matefeishu_starkmesh`（中转站额度：还剩多少号、多久重置、哪些号不可用，早报用它） |
 | 写操作 | `matefeishu_send`、`matefeishu_send_dm`：每次都在手机上确认全文和发给谁；同一个请求只执行一次；结果不确定时绝不重发 |
 | `/agent` | 你自己在飞书里发 `/agent …`，交给 Agent 处理并以你的身份回复到原话题（私聊里是引用回复），末尾带“AI 代答”标记；同一话题里接着发会进同一个会话；`/stop`、`/停止`、`/停` 可以停下。回复不经手机确认，每一条都记进 Persona 的“以你身份发出的消息”记录，所以安装时 Persona 会提示这个扩展会“以你的身份发消息” |
 | 历史补收 | 首次登录和每次重连后补收最近会话里漏掉的消息 |
