@@ -55,6 +55,19 @@ DEFAULT_ACK = "THINKING"  # the reaction that says a request was taken (Feishu's
 DEFAULT_DONE = "DONE"  # what replaces it when the turn ended (Feishu's ✅ 完成)
 DEFAULT_FAIL = "CrossMark"  # and when the request failed or timed out (Feishu's ❌)
 PROGRESS_MARK = "⏳ 进行中（这条会原地更新）"
+MARK_POSITIONS = ("end", "top")  # where the AI mark line goes: after the answer (so a folded thread shows the answer) or on top
+
+
+def mark_lines(text: str) -> tuple:
+    """The first and the last non-empty line of a message, without a leading quote mark: where an AI mark sits."""
+    lines = [l.lstrip("> ").strip() for l in (text or "").split("\n") if l.strip()]
+    return (lines[0], lines[-1]) if lines else ("", "")
+
+
+def ai_marked(text: str, marks) -> bool:
+    """Whether the message carries one of these marks on its first or its last line (ours or another AI's)."""
+    first, last = mark_lines(text)
+    return any(m and (first.startswith(m) or last.startswith(m)) for m in marks)
 PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
 ACTIVE = ("starting", "running")
@@ -169,6 +182,8 @@ class AgentRunner:
         self.launcher = str(cfg.get("agent_launcher") or "").strip()
         self.suffix = parse_suffix(cfg.get("agent_reply_suffix"))
         self.header = parse_header(cfg.get("agent_reply_header"))
+        pos = str(cfg.get("agent_mark_position") or "end").strip().lower()
+        self.mark_position = pos if pos in MARK_POSITIONS else "end"
         self.auto = bool(cfg.get("auto_reply", True))
         self.auto_docs = bool(cfg.get("auto_reply_docs", True))
         self.auto_header = parse_header(cfg.get("auto_reply_header") if cfg.get("auto_reply_header") is not None else AUTO_HEADER)
@@ -276,8 +291,7 @@ class AgentRunner:
         for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
             if s and t.endswith(s):
                 return True
-        first = t.lstrip().split("\n", 1)[0].lstrip("> ").strip()
-        return any(first.startswith(m) for m in self._header_marks())
+        return ai_marked(t, self._header_marks())
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
@@ -357,8 +371,7 @@ class AgentRunner:
         if row.get("at") and abs(now - row["at"]) > self.app.timing.agent_fresh:
             return
         text = row.get("text") or ""
-        first = text.lstrip().split("\n", 1)[0].lstrip("> ").strip()
-        if self.is_agent_text(text) or any(first.startswith(m) for m in AI_MARKS):
+        if self.is_agent_text(text) or ai_marked(text, AI_MARKS):
             return
         if not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
             return
@@ -392,8 +405,7 @@ class AgentRunner:
         now = time.time()
         if m.at and abs(now - m.at) > self.app.timing.agent_fresh:
             return
-        first = (m.text or "").lstrip().split("\n", 1)[0].strip()
-        if any(first.startswith(x) for x in AI_MARKS):
+        if ai_marked(m.text or "", AI_MARKS):
             return
         if not self.store.seen_add("doc:%s" % m.id):
             return
@@ -1027,8 +1039,8 @@ class AgentRunner:
         return model, effort
 
     def with_suffix(self, text: str, run: Optional[dict] = None) -> str:
-        """The message as it goes out: the header line on top (the model and effort that answered), the end mark if
-        one is set. A mark the Agent wrote itself is not doubled."""
+        """The message as it goes out: the AI mark line (the model and effort that answered) after the answer, or on
+        top with agent_mark_position "top"; the end mark if one is set. A mark the Agent wrote itself is not doubled."""
         t = (text or "").strip()
         for s in {self.suffix.strip(), DEFAULT_SUFFIX, KNOWN_SUFFIXES[0]}:
             while s and t.endswith(s):
@@ -1038,12 +1050,14 @@ class AgentRunner:
         marks = self._header_marks()
         while t and any(t.split("\n", 1)[0].lstrip("> ").strip().startswith(m) for m in marks):
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
+        while t and any(t.rsplit("\n", 1)[-1].lstrip("> ").strip().startswith(m) for m in marks):
+            t = t.rsplit("\n", 1)[0].rstrip() if "\n" in t else ""
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
         if header:
             line = fill_header(header, *self._model_of(run, header))
             if run and run.get("kind") == "doc":
                 line = line.lstrip("> ").strip()  # a comment shows a quote mark as it is
-            t = line + "\n" + t
+            t = (line + "\n" + t) if self.mark_position == "top" else (t + "\n\n" + line)
         if self.suffix:
             t += ("" if self.suffix.startswith("\n") else "\n\n") + self.suffix
         return t

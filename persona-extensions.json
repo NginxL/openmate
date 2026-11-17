@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.10.0",
+        "version": "0.11.0",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -188,10 +188,26 @@
             },
             "agent_reply_header": {
               "type": "string",
-              "title": "AI 回复抬头",
-              "description": "每条 /agent 回复的第一行，{model} 和 {effort} 换成回答它的模型和思考强度。留空表示不加。",
+              "title": "AI 回复标记",
+              "description": "每条 /agent 回复带的 AI 标记行，{model} 和 {effort} 换成回答它的模型和思考强度；放在哪由“AI 标记位置”决定。留空表示不加。",
               "default": "> 🤖 AI 回复 · {model} · {effort}",
               "maxLength": 200
+            },
+            "agent_mark_position": {
+              "type": "string",
+              "title": "AI 标记位置",
+              "description": "AI 标记行放在回复末尾（话题折叠时直接显示答案）还是第一行。",
+              "oneOf": [
+                {
+                  "const": "end",
+                  "title": "末尾"
+                },
+                {
+                  "const": "top",
+                  "title": "第一行"
+                }
+              ],
+              "default": "end"
             },
             "agent_ack_reaction": {
               "type": "string",
@@ -244,8 +260,8 @@
             },
             "auto_reply_header": {
               "type": "string",
-              "title": "代答抬头",
-              "description": "自动代答回复的第一行，{model} 和 {effort} 换成回答它的模型和思考强度。留空表示不加。",
+              "title": "代答标记",
+              "description": "自动代答回复带的 AI 标记行，{model} 和 {effort} 换成回答它的模型和思考强度；位置同“AI 标记位置”。留空表示不加。",
               "default": "> 🤖 AI 代答 · {model} · {effort}",
               "maxLength": 200
             },
@@ -351,9 +367,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.10.0/openmate-feishu-0.10.0.tar.gz",
-          "sha256": "c85b5452cfbbeef93fd16b93f7ac253af327e754bbe6cbeb60892c87ceb60037",
-          "size": 146892
+          "url": "packages/openmate-feishu/0.11.0/openmate-feishu-0.11.0.tar.gz",
+          "sha256": "bb2381646ac04d5ecfa78dd3ea5485ebc789503b3cf630506a4136dea40010cc",
+          "size": 147453
         }
       ]
     }

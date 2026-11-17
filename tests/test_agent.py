@@ -547,12 +547,12 @@ class ReceiptsAndProgressTest(unittest.TestCase):
         self.assertIn("原地编辑", out)
         self.assertEqual(len(h.sent()), 1, "edited, not sent again")
         self.assertEqual(h.world.edits[-1][1], first["id"])
-        self.assertTrue(h.sent()[0]["text"].endswith("第二步：跑测试"))
+        self.assertIn("第二步：跑测试\n\n> 🤖 AI 回复", h.sent()[0]["text"])
         h.tool("agent_reply", request=run["id"], text="做完了：三步都过了")
         self.assertEqual(len(h.sent()), 2, "the answer is a new message, so it notifies")
-        self.assertTrue(h.sent()[1]["text"].endswith("做完了：三步都过了"))
+        self.assertTrue(h.sent()[1]["text"].startswith("做完了：三步都过了"), "the answer first, the mark after")
         self.assertIn("✅ 已完成", h.sent()[0]["text"], "the progress message says it is over")
-        self.assertTrue(h.sent()[0]["text"].endswith("第二步：跑测试"), "with its last progress")
+        self.assertIn("第二步：跑测试", h.sent()[0]["text"], "with its last progress")
         self.assertEqual(h.app.store.run_get(run["id"])["replies"], 1, "progress is not the answer")
 
     def test_an_edit_refused_sends_a_new_progress_message(self):
@@ -575,7 +575,7 @@ class ReceiptsAndProgressTest(unittest.TestCase):
         h.http.add(run["session_id"], "assistant", "text", "查完了，结论是可以")
         h.http.end_turn(run["session_id"])
         wait_until(lambda: len(h.sent()) == 2, what="the fallback answer")
-        self.assertTrue(h.sent()[1]["text"].endswith("查完了，结论是可以"))
+        self.assertTrue(h.sent()[1]["text"].startswith("查完了，结论是可以"))
         wait_until(lambda: "✅ 已完成" in h.sent()[0]["text"], what="the progress message closed")
         self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "DONE")])
 
@@ -905,7 +905,7 @@ class SettingsAndFailuresTest(unittest.TestCase):
         h.sign_in()
         m = ask(h, "/agent 你好")
         said = wait_until(lambda: [x for x in h.sent() if "Persona hub" in x["text"]], what="the explanation")
-        self.assertTrue(said[0]["text"].startswith("> 🤖 AI 回复\n"), "the header, without a model: no session yet")
+        self.assertTrue(said[0]["text"].endswith("\n\n> 🤖 AI 回复"), "the mark, without a model: no session yet")
         self.assertEqual(run_of(h, m)["state"], "failed")
 
     def test_start_refused(self):
@@ -951,7 +951,7 @@ class DefaultsTest(unittest.TestCase):
         run = running(h, msg)
         h.tool("agent_reply", request=run["id"], text="> 🤖 AI 回复 · 别的模型\n总结如下：一切正常。")
         sent = h.sent()[-1]
-        self.assertEqual(sent["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n总结如下：一切正常。", "its own header is not doubled")
+        self.assertEqual(sent["text"], "总结如下：一切正常。\n\n> 🤖 AI 回复 · Claude Opus 5.5 · xhigh", "its own mark is not doubled")
         self.assertEqual((sent["reply_to"], sent["root"]), (msg.id, msg.id), "quoting the request")
         self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "THINKING")], "once")
         self.assertTrue(h.app.agent.is_agent_text(sent["text"]))
@@ -966,17 +966,17 @@ class DefaultsTest(unittest.TestCase):
         run = running(h, msg)
         h.http.model_late = 2  # the hub lists the new session twice before it knows its model
         h.tool("agent_reply", request=run["id"], text="第一条")
-        self.assertEqual(h.sent()[-1]["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n第一条")
+        self.assertEqual(h.sent()[-1]["text"], "第一条\n\n> 🤖 AI 回复 · Claude Opus 5.5 · xhigh")
         h2 = self.make(agent_reply_suffix="")
         msg = ask(h2, "/agent 一直不知道模型")
         run = running(h2, msg)
         h2.http.model_late = 1000
         h2.tool("agent_reply", request=run["id"], text="先发出去")
-        self.assertEqual(h2.sent()[-1]["text"], "> 🤖 AI 回复\n先发出去", "after agent_model_wait, without it")
+        self.assertEqual(h2.sent()[-1]["text"], "先发出去\n\n> 🤖 AI 回复", "after agent_model_wait, without it")
         self.assertFalse(h2.app.store.run_get(run["id"]).get("model"), "not kept empty")
         h2.http.model_late = 0
         h2.tool("agent_reply", request=run["id"], text="第二条")
-        self.assertEqual(h2.sent()[-1]["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n第二条", "asked again")
+        self.assertEqual(h2.sent()[-1]["text"], "第二条\n\n> 🤖 AI 回复 · Claude Opus 5.5 · xhigh", "asked again")
 
     def test_settings_and_a_refused_reaction(self):
         h = self.make(agent_ack_reaction="OnIt", agent_reply_header="—— {model}（{effort}）", agent_reply_suffix=SUFFIX)
@@ -984,13 +984,30 @@ class DefaultsTest(unittest.TestCase):
         msg = ask(h, "/agent 写个周报")
         run = running(h, msg)  # a refused reaction never holds the request
         h.tool("agent_reply", request=run["id"], text="周报写好了")
-        self.assertEqual(h.sent()[-1]["text"], "—— Claude Opus 5.5（xhigh）\n周报写好了\n\n" + SUFFIX)
+        self.assertEqual(h.sent()[-1]["text"], "周报写好了\n\n—— Claude Opus 5.5（xhigh）\n\n" + SUFFIX)
         self.assertEqual(h.world.reactions, [])
         h2 = self.make(agent_ack_reaction="", agent_reply_header="")
         msg = ask(h2, "/agent 不要表情")
         run = running(h2, msg)
         h2.tool("agent_reply", request=run["id"], text="好")
         self.assertEqual((h2.sent()[-1]["text"], h2.world.reactions), ("好", []))
+
+    def test_the_mark_on_top_on_request_and_marks_at_either_end_are_recognised(self):
+        h = self.make(agent_mark_position="top")
+        msg = ask(h, "/agent 放第一行")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="答案在第二行\n\n> 🤖 AI 回复 · 别的模型")
+        self.assertEqual(h.sent()[-1]["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n答案在第二行", "its own mark at the end is not doubled")
+        h2 = self.make(agent_mark_position="sideways")
+        self.assertEqual(h2.app.agent.mark_position, "end", "an unknown value is the default")
+        agent_ = h2.app.agent
+        for text in ("答案\n\n> 🤖 AI 回复 · Claude Opus 5.5", "> 🤖 AI 回复 · Claude Opus 5.5\n答案", "答案\n🤖 AI 代答 · 某模型\n"):
+            self.assertTrue(agent_.is_agent_text(text), text)
+        self.assertFalse(agent_.is_agent_text("我觉得 🤖 AI 回复 这种标记挺好\n就这样"), "a mark mid-line is not one")
+        # another AI's reply with its mark at the end never starts a request here
+        h2.world.push("chat_example_team", "me", "/agent 再帮我看看\n\n> 🤖 AI 回复 · 别人的模型")
+        time.sleep(0.3)
+        self.assertEqual(len(h2.http.starts()), 0)
 
     def test_labels(self):
         from openmate_core.agent import fill_header, model_label

@@ -61,7 +61,7 @@ class AutoReplyTest(unittest.TestCase):
         wait_until(lambda: h.world.reactions, what="the reaction")
         h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
         sent = h.sent()[-1]
-        self.assertEqual(sent["text"], "> 🤖 AI 代答 · Claude Opus 5.5 · xhigh\n接口周五前上线。")
+        self.assertEqual(sent["text"], "接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
         self.assertEqual(sent["reply_to"], msg.id, "quoting their message")
         sec = [s for s in page(h)["sections"] if s.get("title") == "自动代答"][0]
         self.assertEqual([r["subtitle"] for r in sec["items"] if r["key"] == "auto:" + TEAM], ["开着 · 今天代答 1 次"])

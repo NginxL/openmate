@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -48,8 +49,10 @@ def ts(v: Any) -> float:
     s = str(v or "").strip()
     if not s or s.startswith("0001-"):
         return 0.0
+    # Go writes 0–9 fraction digits (".49", ".123456789"); Python before 3.11 takes only 3 or 6
+    s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s.replace("Z", "+00:00"), count=1)
     try:
-        return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        return _dt.datetime.fromisoformat(s).timestamp()
     except ValueError:
         return 0.0
 

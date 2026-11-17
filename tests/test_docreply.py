@@ -45,7 +45,7 @@ class DocReplyTest(unittest.TestCase):
             self.assertIn(part, prompt)
         self.assertLess(prompt.count("很长的正文。"), 1400, "an excerpt, not the whole document")
         h.tool("agent_reply", request=run["id"], text="> 🤖 AI 代答 · 自己写的\n不用改，口径和上周一致。")
-        self.assertEqual(h.world.doc_replies, [(URL, "c1", "🤖 AI 代答 · Claude Opus 5.5 · xhigh\n不用改，口径和上周一致。")])
+        self.assertEqual(h.world.doc_replies, [(URL, "c1", "不用改，口径和上周一致。\n\n🤖 AI 代答 · Claude Opus 5.5 · xhigh")])
         self.assertEqual(h.sent(), [], "nothing in any chat")
         self.assertEqual(h.world.reactions, [], "no chat message to react on")
         mention(h)  # the same notice again: once

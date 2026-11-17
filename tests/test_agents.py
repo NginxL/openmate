@@ -166,6 +166,9 @@ class AgentsPageTest(unittest.TestCase):
         self.assertEqual(agents.span(3 * 86400), "3 天")
         self.assertEqual(agents.ts("0001-01-01T00:00:00Z"), 0.0)
         self.assertEqual(agents.ts("2026-11-17T06:24:06.49Z"), dt.datetime(2026, 11, 17, 6, 24, 6, 490000, dt.timezone.utc).timestamp())
+        self.assertEqual(agents.ts("2026-11-17T06:24:06.123456789+08:00"),
+                         dt.datetime(2026, 11, 16, 22, 24, 6, 123456, dt.timezone.utc).timestamp(), "Go's nine digits")
+        self.assertEqual(agents.ts("2026-11-17T06:24:06Z"), dt.datetime(2026, 11, 17, 6, 24, 6, tzinfo=dt.timezone.utc).timestamp())
 
 
 if __name__ == "__main__":
