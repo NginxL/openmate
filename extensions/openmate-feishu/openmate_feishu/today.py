@@ -24,7 +24,8 @@ from .agenda import Agenda, CalendarError, Event
 
 log = logging.getLogger("openmate.today")
 
-PAGE = "today"
+# Contribution ids are one namespace across every extension on a hub: a bare "today" kept Kaboo (its card) out.
+PAGE = "openmate-today"
 CARD = "today-card"
 AHEAD = 30.0  # older than this, read again in the background
 STALE = 600.0  # older than this, a draw waits for a new read

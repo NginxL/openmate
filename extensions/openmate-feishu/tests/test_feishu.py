@@ -101,7 +101,7 @@ class ManifestTest(unittest.TestCase):
     def test_pages_and_cards(self):
         ui = {u["id"]: u for u in MANIFEST["contributes"]["ui"]}
         self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
-            "today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "today"),
+            "openmate-today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "openmate-today"),
             "chats": ("nav_page", "list", None), "chats-today": ("overview_card", None, "chats"),
             "calendar": ("nav_page", "calendar", None), "calendar-today": ("overview_card", None, "calendar"),
             "starkmesh": ("nav_page", "wallet", None)})
