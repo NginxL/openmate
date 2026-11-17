@@ -54,7 +54,9 @@ def read_tools(app) -> List[dict]:
                                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多几个，默认 10"}}, ["query"])},
         {"name": c + "_agent_reply", "description": "只给 /agent 用：把处理结果以我的身份回复到发出 /agent 的那个%s话题。request 必须是这次请求给出的 id；可以多次调用发进度，不要编造没做到的事。" % p,
          "input_schema": _obj({"request": {"type": "string", "description": "这次 /agent 请求的 id（请求说明里给出）"},
-                               "text": {"type": "string", "description": "要回复的内容（纯文本）"}}, ["request", "text"])},
+                               "text": {"type": "string", "description": "要回复的内容（纯文本）"},
+                               "progress": {"type": "boolean", "description": "true 表示这是中途进度：原地更新同一条进度消息，不另发新消息。最终结果不要带它"}},
+                              ["request", "text"])},
     ] + [schema for schema, _ in _page_tools(app).values()]
 
 
@@ -416,7 +418,7 @@ def _docs(app, a: dict) -> str:
 def _agent_reply(app, a: dict) -> str:
     if app.agent is None:
         raise RPCError("扩展还在启动，请稍后再试")
-    return app.agent.reply_tool(_need(a, "request", "请求 id"), _need(a, "text", "回复内容"))
+    return app.agent.reply_tool(_need(a, "request", "请求 id"), _need(a, "text", "回复内容"), progress=a.get("progress") is True)
 
 
 # ---------------------------------------------------------------- writes

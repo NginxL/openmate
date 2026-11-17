@@ -10,6 +10,11 @@ instead (never both). A turn ends at its turn_duration item; Claude Code does no
 answered and then stayed quiet for `agent_settle` has ended its turn too when its status says done or idle. /stop, /停止 or /停 in the thread (or quoting the request) stops it. Runs are kept in the store,
 so a restart goes on waiting for the running ones.
 
+How it shows in the chat: the request gets a 🤔 when it is taken (agent_ack_reaction), swapped for ✅ when the turn
+ended (agent_done_reaction) or ❌ when it failed or timed out (agent_fail_reaction); a /stop just takes the 🤔 away.
+Progress the Agent marks as such (progress=true) goes into one message that is edited in place instead of a new message
+each time, and is marked done once the answer went out; the answer itself is always a new message, so it notifies.
+
 The hub is reached over a network that drops now and then. A request waits for it (`agent_hub_wait`), and a start that
 failed on the way is tried again. A new conversation has no idempotency key, so a start that may have reached the hub
 is tried again under a new request id (`<run id>.<try>`): a conversation the lost start may have opened can then never
@@ -47,6 +52,10 @@ GUEST_KINDS = QUIET_KINDS
 GUEST_RUNNING_MOST = 3  # 自动代答 and 文档代答 under way at once
 DOC_TEXT_MOST = 8000  # characters of a document a 文档代答 guest gets
 DEFAULT_ACK = "THINKING"  # the reaction that says a request was taken (Feishu's 🤔)
+DEFAULT_DONE = "DONE"  # what replaces it when the turn ended (Feishu's ✅ 完成)
+DEFAULT_FAIL = "CrossMark"  # and when the request failed or timed out (Feishu's ❌)
+PROGRESS_MARK = "⏳ 进行中（这条会原地更新）"
+PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
 ACTIVE = ("starting", "running")
 PROMPT_MOST = 30000
@@ -174,6 +183,9 @@ class AgentRunner:
         self._guest_ok_until = 0.0
         ack = cfg.get("agent_ack_reaction")
         self.ack = DEFAULT_ACK if ack is None else str(ack).strip()
+        done, fail = cfg.get("agent_done_reaction"), cfg.get("agent_fail_reaction")
+        self.done_reaction = DEFAULT_DONE if done is None else str(done).strip()
+        self.fail_reaction = DEFAULT_FAIL if fail is None else str(fail).strip()
         self.purpose = getattr(app.platform, "agent_purpose", "") or ""
         self._mu = threading.Lock()
         self._run_locks: Dict[str, threading.RLock] = {}
@@ -481,6 +493,35 @@ class AgentRunner:
             backend.react(run["chat_id"], run["request_id"], self.ack)
         except Exception as e:
             log.info("the /agent request's reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+            return
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"])
+            if cur is not None:
+                cur["acked"] = self.ack
+                self.store.run_put(cur)
+
+    def _end_reaction(self, run_id: str, outcome: str) -> None:
+        """Swap the request's 🤔 for how it ended: "done" ✅, "failed" ❌ (a timeout too), "stopped" nothing. Only where
+        the 🤔 went on, once per run, never in the way of the run."""
+        with self._lock(run_id):
+            cur = self.store.run_get(run_id)
+            if cur is None or not cur.get("acked") or cur.get("ack_end"):
+                return
+            cur["ack_end"] = outcome
+            self.store.run_put(cur)
+        backend = getattr(self.app, "backend", None)
+        if backend is None:
+            return
+        try:
+            backend.unreact(cur["chat_id"], cur["request_id"], cur["acked"])
+        except Exception as e:
+            log.info("the /agent request's reaction was not taken back (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+        new = {"done": self.done_reaction, "failed": self.fail_reaction}.get(outcome, "")
+        if new:
+            try:
+                backend.react(cur["chat_id"], cur["request_id"], new)
+            except Exception as e:
+                log.info("the /agent request's end reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
 
     def _start_run(self, run: dict, row: dict) -> None:
         self._ack_request(run)
@@ -652,7 +693,8 @@ class AgentRunner:
             "我在%s里发了一条 /agent 请求，请你替我处理。" % p,
             "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份发到这个话题里，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run)),
             "- 回复以我的名义发出：只写已经做完的事和查到的事实；还没做的写成建议，不要替我答应任何事。",
-            "- 可以多次调用 %s_agent_reply 发进度，但只发有意义的进展和最终结果。" % c,
+            "- 中途进度：调用 %s_agent_reply 时加 progress=true，它会原地更新同一条进度消息，不会刷屏；只发有意义的进展。" % c,
+            "- 最终结果：不要带 progress，它会作为一条新回复发出并提醒我，之前那条进度消息会标成已完成。",
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
             "- 下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c),
         ])
@@ -911,6 +953,7 @@ class AgentRunner:
                     post = text
             cur["state"] = "done"
             self.store.run_put(cur)
+        self._end_reaction(run_id, "done")
         if post is not None:
             mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, reply_to=cur["request_id"],
                                   root=cur["root_id"] or cur["request_id"])
@@ -920,6 +963,8 @@ class AgentRunner:
                 if mid:
                     cur["reply_ids"] = (cur.get("reply_ids") or []) + [mid]
                 self.store.run_put(cur)
+            if mid and cur.get("progress_id"):
+                self._progress_done(cur)
 
     def _timeout(self, run_id: str) -> None:
         with self._lock(run_id):
@@ -928,6 +973,7 @@ class AgentRunner:
                 return
             cur["state"] = "timeout"
             self.store.run_put(cur)
+        self._end_reaction(run_id, "failed")
         if not cur["replies"] and not cur["reply_inflight"]:
             self._post_once(cur, "agent:%s:timeout" % run_id,
                             "等了 %s 还没有结果，不再等待。可以在 Persona 里打开这个会话看进度。" % _span(self.app.timing.agent_timeout),
@@ -941,6 +987,7 @@ class AgentRunner:
             cur["state"] = "failed"
             cur["error"] = message
             self.store.run_put(cur)
+        self._end_reaction(run_id, "failed")
         self._post_once(cur, "agent:%s:failed" % run_id, message, reply_to=cur["request_id"],
                         root=cur["root_id"] or cur["request_id"])
 
@@ -1050,8 +1097,9 @@ class AgentRunner:
             log.warning("an /agent message was not sent: %s", e.code or "error")
             return ""
 
-    def reply_tool(self, request: str, text: str) -> str:
-        """<connector>_agent_reply: only the run this request id names, and only while it may still reply."""
+    def reply_tool(self, request: str, text: str, progress: bool = False) -> str:
+        """<connector>_agent_reply: only the run this request id names, and only while it may still reply. progress:
+        the run's progress message, edited in place (_progress), not the answer."""
         run = self.store.run_get(request.split(".", 1)[0])
         if run is None:
             raise RPCError("没有这个 /agent 请求：request 不对，或者已经过期")
@@ -1063,6 +1111,8 @@ class AgentRunner:
             raise RPCError("这个 /agent 请求已经过期了")
         if not text.strip():
             raise RPCError("回复内容是空的")
+        if progress and run.get("kind") != "doc":  # a document's comment has no progress message
+            return self._progress(run, text)
         key = "agent:%s:%s" % (run["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
@@ -1097,7 +1147,67 @@ class AgentRunner:
             if sent_id:
                 cur["reply_ids"] = (cur.get("reply_ids") or []) + [sent_id]
             self.store.run_put(cur)
+        if cur.get("progress_id") and cur.get("kind") != "doc":
+            self._progress_done(cur)
         return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
+
+    def _progress(self, run: dict, text: str) -> str:
+        """A progress update: the run's one progress message, sent the first time and edited in place after (a new one
+        when the edit is refused). Never the answer: a turn that ends with only progress still posts its last words."""
+        with self._lock("progress:" + run["id"]):  # two updates at once never make two progress messages
+            cur = self.store.run_get(run["id"])
+            body = self.with_suffix(PROGRESS_MARK + "\n" + text.strip(), cur)
+            self._remember_post(body)
+            pid = str(cur.get("progress_id") or "")
+            if pid and self._edit(cur, pid, body, "/agent 更新了进度消息"):
+                self._keep_progress(cur["id"], pid, text)
+                return "已更新进度（原地编辑了消息 id=%s）" % pid
+            key = "agent:%s:progress:%s" % (cur["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
+            res = self._send(cur, key, body, cur["request_id"], cur["root_id"] or cur["request_id"])
+            mid = str(res.get("message_ref") or "")
+            self._keep_progress(cur["id"], mid or pid, text)
+            return "已发出进度（消息 id=%s），之后的进度会原地更新这条" % (mid or "未知")
+
+    def _keep_progress(self, run_id: str, mid: str, text: str) -> None:
+        with self._lock(run_id):
+            cur = self.store.run_get(run_id)
+            if cur is not None:
+                cur["progress_id"], cur["progress_text"] = mid, text.strip()
+                self.store.run_put(cur)
+
+    def _progress_done(self, run: dict) -> None:
+        """The answer went out: the progress message says it is over (best effort, once)."""
+        with self._lock("progress:" + run["id"]):
+            cur = self.store.run_get(run["id"])
+            if cur is None or not cur.get("progress_id") or cur.get("progress_closed"):
+                return
+            body = self.with_suffix(PROGRESS_DONE_MARK + "\n" + (cur.get("progress_text") or ""), cur)
+            self._remember_post(body)
+            if self._edit(cur, cur["progress_id"], body, "/agent 把进度消息标成已完成"):
+                with self._lock(cur["id"]):
+                    cur = self.store.run_get(cur["id"])
+                    cur["progress_closed"] = True
+                    self.store.run_put(cur)
+
+    def _edit(self, run: dict, mid: str, body: str, summary: str) -> bool:
+        """Edit a message /agent sent, as the user; told to the sent-as-user ledger like a send. False when the
+        service has no editing or refused it."""
+        backend = getattr(self.app, "backend", None)
+        if backend is None:
+            return False
+        try:
+            backend.edit(run["chat_id"], mid, body)
+        except Exception as e:
+            log.info("an /agent message was not edited (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+            return False
+        chat = self.store.get_chat(run["chat_id"])
+        try:
+            self.app.record_sent(run["chat_id"], body, mid, reply_to=run["request_id"], root=run["root_id"] or run["request_id"],
+                                 session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "", setting="agent",
+                                 summary=summary + "（" + views.where(self.app.platform.name, chat, run["chat_id"]) + "）")
+        except Exception:
+            log.exception("an /agent edit was not told to the ledger")
+        return True
 
     # ---------------------------------------------------------------- /stop
 
@@ -1142,6 +1252,8 @@ class AgentRunner:
             cur["state"] = "stopped"
             cur["stopped_at"] = time.time()
             self.store.run_put(cur)
+        if before in ACTIVE:
+            self._end_reaction(cur["id"], "stopped")
         tasks: List[str] = []
         failed = ""
         if before == "stopped":

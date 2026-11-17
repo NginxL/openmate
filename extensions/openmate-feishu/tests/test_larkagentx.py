@@ -700,6 +700,37 @@ class ReadTest(Base):
             self.b.react("500", "102", "NOPE")
         self.assertEqual(e.exception.kind, "unavailable")
 
+    def test_taking_a_reaction_back(self):
+        S.api_answers["reactions.DeleteReactionRequest"] = {}
+        self.b.unreact("500", "101", "THINKING")
+        self.assertEqual(S.api_calls[-1], ("reactions.DeleteReactionRequest", {"messageId": "101", "reactionType": "THINKING"}))
+        del S.api_answers["reactions.DeleteReactionRequest"]
+        with self.assertRaises(larkagentx.BackendError) as e:
+            self.b.unreact("500", "102", "THINKING")
+        self.assertEqual(e.exception.kind, "unavailable")
+
+    def test_editing_a_sent_message(self):
+        import base64
+        import json as _json
+        S.api_answers["messages.EditMessageRequest"] = {}
+        self.b.edit("500", "101", "进度：第二步")
+        name, data = S.api_calls[-1]
+        self.assertEqual(name, "messages.EditMessageRequest")
+        self.assertEqual((data["msgId"], data["type"]), ("101", 4))
+        rich = data["content"]["richText"]
+        self.assertEqual(rich["innerText"], "进度：第二步")
+        (element,) = rich["elementIds"]
+        cell = rich["elements"]["dictionary"][element]
+        self.assertEqual(cell["tag"], 1)
+        self.assertEqual(_json.loads(base64.b64decode(cell["property"]))["content"], "进度：第二步", "the text element carries it")
+        for bad in (("500", "", "x"), ("500", "abc", "x"), ("500", "101", "  ")):
+            with self.assertRaises(larkagentx.BackendError):
+                self.b.edit(*bad)
+        del S.api_answers["messages.EditMessageRequest"]
+        with self.assertRaises(larkagentx.BackendError) as e:
+            self.b.edit("500", "101", "改不了")
+        self.assertEqual(e.exception.kind, "unavailable")
+
     def test_who_is_a_bot(self):
         S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {
             "7003": {"id": "7003", "name": "示例同事丙", "type": "USER"},

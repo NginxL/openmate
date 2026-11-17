@@ -489,6 +489,96 @@ class StopTest(unittest.TestCase):
         self.assertEqual(h.app.store.run_get(self.run["id"])["state"], "running")
 
 
+
+class ReceiptsAndProgressTest(unittest.TestCase):
+    """How a request shows in the chat: 🤔 swapped for ✅ / ❌ (a /stop takes it away), progress edited in one message."""
+
+    def make(self, timing=None, **cfg):
+        config = {"agent": True}
+        config.update(cfg)
+        h = Harness(self, config=config, timing=timing)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        return h
+
+    def test_the_reaction_says_how_it_ended(self):
+        h = self.make()
+        msg = ask(h, "/agent 查一下")
+        run = running(h, msg)
+        wait_until(lambda: h.world.reactions, what="the 🤔")
+        h.tool("agent_reply", request=run["id"], text="查到了")
+        self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "THINKING")], "the answer alone does not end it")
+        h.http.end_turn(run["session_id"])
+        wait_until(lambda: h.world.reactions == [("chat_example_team", msg.id, "DONE")], what="✅ instead of 🤔")
+        h2 = self.make(timing=fast(agent_timeout=0.5))
+        slow = ask(h2, "/agent 慢慢来")
+        running(h2, slow)
+        wait_until(lambda: h2.world.reactions == [("chat_example_team", slow.id, "CrossMark")], timeout=5, what="❌ on timeout")
+        h3 = self.make(agent_done_reaction="", agent_fail_reaction="")
+        stop = ask(h3, "/agent 停下")
+        running(h3, stop)
+        wait_until(lambda: h3.world.reactions, what="the 🤔")
+        ask(h3, "/stop", root_id=stop.id)
+        wait_until(lambda: h3.world.reactions == [] and h3.app.store.run_get(run_of(h3, stop)["id"])["state"] == "stopped",
+                   what="a /stop takes the 🤔 away")
+
+    def test_a_refused_reaction_never_holds_the_run(self):
+        h = self.make()
+        h.world.react_fail = True
+        msg = ask(h, "/agent 没有表情也行")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="好的")
+        h.http.end_turn(run["session_id"])
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "done", what="done")
+        self.assertEqual(h.world.reactions, [])
+        self.assertFalse(h.app.store.run_get(run["id"]).get("ack_end"), "no 🤔 went on: nothing to swap")
+
+    def test_progress_is_one_message_edited_in_place(self):
+        h = self.make()
+        msg = ask(h, "/agent 分三步做")
+        run = running(h, msg)
+        out = h.tool("agent_reply", request=run["id"], text="第一步：读代码", progress=True)
+        self.assertIn("之后的进度会原地更新这条", out)
+        first = h.sent()[-1]
+        self.assertEqual((first["reply_to"], first["root"]), (msg.id, msg.id))
+        self.assertIn("⏳ 进行中", first["text"])
+        self.assertTrue(h.app.agent.is_agent_text(first["text"]), "never read as a request")
+        out = h.tool("agent_reply", request=run["id"], text="第二步：跑测试", progress=True)
+        self.assertIn("原地编辑", out)
+        self.assertEqual(len(h.sent()), 1, "edited, not sent again")
+        self.assertEqual(h.world.edits[-1][1], first["id"])
+        self.assertTrue(h.sent()[0]["text"].endswith("第二步：跑测试"))
+        h.tool("agent_reply", request=run["id"], text="做完了：三步都过了")
+        self.assertEqual(len(h.sent()), 2, "the answer is a new message, so it notifies")
+        self.assertTrue(h.sent()[1]["text"].endswith("做完了：三步都过了"))
+        self.assertIn("✅ 已完成", h.sent()[0]["text"], "the progress message says it is over")
+        self.assertTrue(h.sent()[0]["text"].endswith("第二步：跑测试"), "with its last progress")
+        self.assertEqual(h.app.store.run_get(run["id"])["replies"], 1, "progress is not the answer")
+
+    def test_an_edit_refused_sends_a_new_progress_message(self):
+        h = self.make()
+        msg = ask(h, "/agent 改不了就重发")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="进度一", progress=True)
+        h.world.edit_fail = True
+        h.tool("agent_reply", request=run["id"], text="进度二", progress=True)
+        self.assertEqual(len(h.sent()), 2)
+        self.assertEqual(h.app.store.run_get(run["id"])["progress_id"], h.sent()[1]["id"], "later edits go to the new one")
+        h.tool("agent_reply", request=run["id"], text="进度二", progress=True)
+        self.assertEqual(len(h.sent()), 2, "the same progress again is not sent twice")
+
+    def test_a_turn_with_only_progress_still_posts_its_answer(self):
+        h = self.make()
+        msg = ask(h, "/agent 只发了进度")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="正在查", progress=True)
+        h.http.add(run["session_id"], "assistant", "text", "查完了，结论是可以")
+        h.http.end_turn(run["session_id"])
+        wait_until(lambda: len(h.sent()) == 2, what="the fallback answer")
+        self.assertTrue(h.sent()[1]["text"].endswith("查完了，结论是可以"))
+        wait_until(lambda: "✅ 已完成" in h.sent()[0]["text"], what="the progress message closed")
+        self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "DONE")])
+
 class TimeoutRestartTest(unittest.TestCase):
     def test_timeout(self):
         h = agent(self, timing=fast(agent_timeout=0.5))

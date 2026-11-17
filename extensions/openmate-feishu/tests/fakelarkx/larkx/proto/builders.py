@@ -1,5 +1,8 @@
 import json
 
+from . import proto_pb2 as P
+from .ids import generate_request_cid
+
 
 def build_send_message_packet(text, chat_id, request_id, root_id=None, thread_chat=False):
     """The fake packet says what the real one would carry: the root (and parent) and the reply-in-thread mark."""
@@ -17,3 +20,4 @@ def decode_put_message_response(content):
 
 
 _ = json
+_ = (P, generate_request_cid)

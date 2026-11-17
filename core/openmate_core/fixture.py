@@ -51,6 +51,8 @@ class FixtureWorld:
         self.doc_texts: Dict[str, str] = {}  # doc url → its text, for doc_text
         self.doc_listener: Optional[Callable] = None
         self.react_fail = False
+        self.edits: List[Tuple[str, str, str]] = []  # (chat, message, new text) by edit
+        self.edit_fail = False
         self.kinds_calls: List[List[str]] = []
         self.chats: Dict[str, Chat] = {}
         self.history: Dict[str, List[Message]] = {}
@@ -291,6 +293,25 @@ class FixtureBackend(Backend):
             if w.react_fail:
                 raise BackendError("表情回应失败", "unavailable")
             w.reactions.append((chat_id, message_id, reaction))
+
+    def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
+        w = self.world
+        with w.lock:
+            if w.react_fail:
+                raise BackendError("撤回表情失败", "unavailable")
+            if (chat_id, message_id, reaction) in w.reactions:
+                w.reactions.remove((chat_id, message_id, reaction))
+
+    def edit(self, chat_id: str, message_id: str, text: str) -> None:
+        w = self.world
+        with w.lock:
+            if w.edit_fail:
+                raise BackendError("这条消息改不了", "unavailable")
+            mine = [s for s in w.sent if s["chat"] == chat_id and s["id"] == message_id]
+            if not mine:
+                raise BackendError("不是自己发的消息", "not_found")
+            mine[-1]["text"] = text
+            w.edits.append((chat_id, message_id, text))
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         w = self.world

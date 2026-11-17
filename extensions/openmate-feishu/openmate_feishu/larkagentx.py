@@ -1147,6 +1147,40 @@ class LarkXBackend(Backend):
         except Exception as e:  # the service's words stay out of the user's sight; the kind is enough
             raise BackendError("飞书没有接受这个表情回应（%s）" % e.__class__.__name__, "unavailable")
 
+    def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
+        client, _ = self._signed_in()
+        mid = _id(message_id)
+        if not mid or not reaction:
+            raise BackendError("没有要撤回的表情回应", "not_found")
+        try:
+            client.api("reactions.DeleteReactionRequest", {"messageId": mid, "reactionType": reaction})
+        except Exception as e:
+            raise BackendError("飞书没有撤回这个表情回应（%s）" % e.__class__.__name__, "unavailable")
+
+    def edit(self, chat_id: str, message_id: str, text: str) -> None:
+        """Replace a text message of the account's (one send() made: plain text in one text element)."""
+        if not (text or "").strip():
+            raise BackendError("消息内容是空的", "rejected")
+        mid = _id(message_id)
+        if not mid.isdigit():
+            raise BackendError("要编辑的%s消息 id 不对" % self.region.label, "not_found")
+        client, _ = self._signed_in()
+        b = self.lx.builders
+        try:
+            element = b.generate_request_cid()
+            prop = b.P.TextProperty()
+            prop.content = str(text)
+            data = {"msgId": mid, "cid": b.generate_request_cid(), "type": TEXT,
+                    "content": {"richText": {"elementIds": [element], "innerText": str(text),
+                                             "elements": {"dictionary": {element: {
+                                                 "tag": 1, "property": base64.b64encode(prop.SerializeToString()).decode()}}}}}}
+        except Exception as e:
+            raise BackendError("没能组成这次编辑（%s）" % type(e).__name__, "rejected")
+        try:
+            client.api("messages.EditMessageRequest", data)
+        except Exception as e:
+            raise BackendError("%s没有接受这次编辑（%s）" % (self.region.label, e.__class__.__name__), "unavailable")
+
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         ids = [i for i in (_id(u) for u in user_ids) if i]
         if not ids:

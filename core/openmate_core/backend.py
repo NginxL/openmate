@@ -257,6 +257,16 @@ class Backend(abc.ABC):
         the service has none or refused it. The core uses it to say a /agent request was taken."""
         raise BackendError("这个平台不支持表情回应", "unsupported")
 
+    def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
+        """Take back a reaction the account put (react). BackendError when the service has none or refused it. The
+        core swaps the /agent request's 🤔 for how it ended."""
+        raise BackendError("这个平台不支持撤回表情回应", "unsupported")
+
+    def edit(self, chat_id: str, message_id: str, text: str) -> None:
+        """Replace the text of a message the account sent (send). BackendError when the service has no editing or
+        refused it (too old, not the account's). The core edits a /agent run's progress message in place."""
+        raise BackendError("这个平台不支持编辑消息", "unsupported")
+
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         """Which of these are programs ("bot": bots and AI assistants) and which people ("user"), for those the service
         can tell; {} when it cannot. Read-only; the core asks in the background, at most 50 at a time."""
