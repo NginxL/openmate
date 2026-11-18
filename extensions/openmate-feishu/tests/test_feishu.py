@@ -54,8 +54,8 @@ class ManifestTest(unittest.TestCase):
 
     def test_permissions(self):
         perms = MANIFEST["permissions"]
-        self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask", "inbox.read", "kb.read",
-                                                "todos.read"])
+        self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask",
+                                                "extensions.call:openmate-wechat", "inbox.read", "kb.read", "todos.read"])
         self.assertEqual(perms["network"], ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com",
                                             "larkoffice.com", "*.larkoffice.com", "config:starkmesh_url:http"])
         props = MANIFEST["configuration"]["properties"]

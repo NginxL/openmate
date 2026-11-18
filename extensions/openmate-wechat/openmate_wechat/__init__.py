@@ -85,6 +85,7 @@ def platform(manifest_path: str = "") -> Platform:
         mark_view=mark_view,
         archive_chat=archive_chat,
         handle_kind="",  # no sender handles in archive batches (WeChat ids are not a kind the knowledge base knows)
+        today_api_callers=("extension:openmate-feishu",),  # Feishu's 今天 shows these chats (its own HTTP)
     )
 
 

@@ -134,6 +134,7 @@ class ConnectorApp:
         for m in getattr(platform, "methods_off", ()) or ():
             self._methods.pop(m, None)
         self.ui: Optional[UI] = None
+        self.today_api = None  # todayapi.TodayAPI, for a platform with today_api_callers and a socket from the host
 
     # ------------------------------------------------------------------ the protocol
 
@@ -197,6 +198,7 @@ class ConnectorApp:
                                   hub.get("token") or self.env.get("PERSONA_HUB_TOKEN", ""))
                 self.tz = zone(hub.get("timezone") or "")
                 self.initialized = True
+                self._start_today_api()  # /health answers from now on: the host checks it as soon as this returns
         out = {"protocol": PROTOCOL, "id": self.manifest["id"], "version": self.manifest["version"]}
         connectors = (self.manifest.get("contributes") or {}).get("connectors")
         if connectors:
@@ -252,6 +254,11 @@ class ConnectorApp:
         self.closing.set()
         self._done_wake.set()
         held = self._done_mu.acquire(timeout=5.0)  # a round touching the store finishes first
+        if self.today_api is not None:
+            try:
+                self.today_api.stop()  # no new requests; those in flight finish (bounded) before the store closes
+            except Exception:
+                log.exception("stopping the 今天 API failed")
         with self.lock:
             self._gen += 1
             self._link_stop.set()
@@ -376,6 +383,21 @@ class ConnectorApp:
                 self.agent.on_doc_mention(mention)
             except Exception:
                 log.exception("a document mention was not taken")
+
+    def _start_today_api(self) -> None:
+        callers = tuple(getattr(self.platform, "today_api_callers", ()) or ())
+        path = self.env.get("PERSONA_EXTENSION_SOCKET") or ""
+        if not callers or not path:
+            return
+        from .todayapi import TodayAPI
+
+        api = TodayAPI(self, path, callers)
+        try:
+            api.start()
+        except OSError as e:
+            log.warning("the 今天 API could not listen on the extension's socket (%s)", e.__class__.__name__)
+            return
+        self.today_api = api
 
     # ------------------------------------------------------------------ the service's done mark (Feishu's 完成)
 

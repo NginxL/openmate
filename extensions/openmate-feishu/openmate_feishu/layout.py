@@ -9,17 +9,18 @@ columns); below that every block is a whole row, and the choice is kept for when
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from openmate_core.ui import row
 
 KEY = "today_layout"
 # (id, title, whole row by default, what it shows)
 BLOCKS = (
-    ("status", "状态", True, "需要我、日程、飞书、Agent、中转站，各一块，带状态标签"),
+    ("status", "状态", True, "需要我、日程、飞书、微信、Agent、中转站，各一块，带状态标签"),
     ("needs", "需要我", True, "要你回复、决定或验收的事"),
     ("calendar", "日程", False, "今天的会和待回复的邀请"),
     ("feishu", "飞书今天", False, "今天活跃的群"),
+    ("wechat", "微信今天", False, "今天活跃的微信群（装了微信扩展才有）"),
     ("agents", "Agent", False, "等你、可能卡住、在跑的 Agent"),
     ("mesh", "中转站", False, "StarkMesh 各窗口剩多少"),
     ("auto", "AI 代答", False, "今天自动代答了什么（有才显示）"),
@@ -70,17 +71,21 @@ class Layout:
     def is_wide(self, block: str) -> bool:
         return self.wide.get(block, WIDE[block])
 
-    def change(self, what: str, block: str) -> Optional[str]:
-        """Apply one edit; the toast to show, or None when there was nothing to do."""
-        if block not in self.order:
+    def change(self, what: str, block: str, absent: Iterable[str] = ()) -> Optional[str]:
+        """Apply one edit; the toast to show, or None when there was nothing to do. A move passes over the blocks
+        absent here (微信今天 without WeChat): they keep their place for when they come."""
+        absent = set(absent)
+        if block not in self.order or block in absent:
             return None
-        i = self.order.index(block)
-        if what == "up" and i > 0:
-            self.order[i - 1], self.order[i] = self.order[i], self.order[i - 1]
-            return "已上移“%s”" % TITLES[block]
-        if what == "down" and i < len(self.order) - 1:
-            self.order[i + 1], self.order[i] = self.order[i], self.order[i + 1]
-            return "已下移“%s”" % TITLES[block]
+        here = [x for x in self.order if x not in absent]
+        i = here.index(block)
+        if what in ("up", "down"):
+            j = i - 1 if what == "up" else i + 1
+            if not 0 <= j < len(here):
+                return None
+            a, b = self.order.index(block), self.order.index(here[j])  # the two trade places; absent ones keep theirs
+            self.order[a], self.order[b] = self.order[b], self.order[a]
+            return ("已上移“%s”" if what == "up" else "已下移“%s”") % TITLES[block]
         if what == "hide" and block not in self.hidden:
             self.hidden.append(block)
             return "已隐藏“%s”" % TITLES[block]
@@ -96,13 +101,14 @@ class Layout:
         return None
 
 
-def edit_view(layout: Layout, version: int, title: str, state: str) -> dict:
+def edit_view(layout: Layout, version: int, title: str, state: str, absent: Iterable[str] = ()) -> dict:
     """The page in 调整布局: one row per block, in the page's order, with its menu (UI version 6: a row's actions)
-    or, before that, buttons under it."""
+    or, before that, buttons under it. Blocks absent here are not offered."""
     v8 = version >= 8
     rows: List[Dict[str, Any]] = []
-    n = len(layout.order)
-    for i, b in enumerate(layout.order):
+    blocks = [b for b in layout.order if b not in set(absent)]
+    n = len(blocks)
+    for i, b in enumerate(blocks):
         hidden = b in layout.hidden
         bits = ["已隐藏" if hidden else "显示中"]
         bits.append("整行" if layout.is_wide(b) else "半行" + ("" if v8 else "（hub 升级后生效）"))

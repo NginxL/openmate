@@ -94,6 +94,15 @@ class WeChatPlatformTest(unittest.TestCase):
         self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
 
 
+class TodayAPIGrantTest(unittest.TestCase):
+    def test_feishus_today_may_read_its_chats(self):
+        import json
+
+        self.assertEqual(openmate_wechat.platform().today_api_callers, ("extension:openmate-feishu",))
+        with open(os.path.join(ROOT, "extensions", "openmate-wechat", "persona-extension.json"), encoding="utf-8") as f:
+            self.assertTrue(json.load(f)["runtime"]["http"], "its own HTTP: the socket the host gives it")
+
+
 class OneReplyTest(unittest.TestCase):
     def test_a_quiet_fallback_does_not_take_the_auto_reply(self):
         h = wechat(self)

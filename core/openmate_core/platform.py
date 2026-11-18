@@ -50,6 +50,9 @@ class Platform:
     #: whether a chat's messages go to the knowledge base: (chat id, its stored row or None, the settings) → bool;
     #: None: every chat (Feishu). WeChat keeps groups out unless the user turns them on, and official accounts out
     archive_chat: Optional[Callable[[str, Optional[dict], Dict], bool]] = None
+    #: the extensions (X-Persona-Device "extension:<id>") that may read this one's chats for their 今天 through its own
+    #: HTTP (todayapi; the manifest needs runtime.http). Empty: no HTTP at all
+    today_api_callers: Tuple[str, ...] = ()
 
 
 @dataclass

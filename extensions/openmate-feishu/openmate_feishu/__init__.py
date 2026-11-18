@@ -59,12 +59,13 @@ def _agenda_pages(app):
 
     shared = agenda.Agenda(app)
     persona = today.PersonaToday(app)
+    wechat = today.PeerToday(app)  # openmate-wechat's chats, when it is installed beside this one
     mesh = starkmesh.StarkMeshPage(app, starkmesh.StarkMesh(app))
     board = agents.AgentsRead(app)
     return {
         agenda.PAGE: agenda.CalendarPage(app, shared), agenda.CARD: agenda.CalendarPage(app, shared, card=True),
-        today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh, agents=board),
-        today.CARD: today.TodayPage(app, shared, persona, card=True),
+        today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh, agents=board, wechat=wechat),
+        today.CARD: today.TodayPage(app, shared, persona, card=True, wechat=wechat),
         starkmesh.PAGE: mesh, starkmesh.CARD: starkmesh.StarkMeshCard(mesh),
         agents.PAGE: agents.AgentsPage(app, board), agents.CARD: agents.AgentsPage(app, board, card=True),
     }

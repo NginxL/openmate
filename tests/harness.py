@@ -399,7 +399,7 @@ class Harness:
     def __init__(self, test, config: Optional[dict] = None, timing: Optional[Timing] = None,
                  world: Optional[FixtureWorld] = None, http: Optional[FakeHubHTTP] = None, data_dir: Optional[str] = None,
                  secrets: Optional[Dict[str, str]] = None, hub_url: Optional[str] = None, initialize: bool = True,
-                 backend_factory=None, platform=None):
+                 backend_factory=None, platform=None, env: Optional[Dict[str, str]] = None):
         self.test = test
         self.platform = platform or openmate_feishu.platform()
         self.cid = self.platform.connector_id
@@ -420,7 +420,7 @@ class Harness:
         r2, w2 = os.pipe()
         self._files = [os.fdopen(r1, "rb"), os.fdopen(w2, "wb"), os.fdopen(r2, "rb"), os.fdopen(w1, "wb")]
         factory = backend_factory or (lambda cfg, d: FixtureBackend(self.world))
-        self.app = ConnectorApp(self.platform, timing=self.timing, backend_factory=factory, env={})
+        self.app = ConnectorApp(self.platform, timing=self.timing, backend_factory=factory, env=dict(env or {}))
         self.peer = Peer(self._files[0], self._files[1], self.app.handle, on_event=self.app.on_event,
                          after=self.app.after)
         self.app.attach(self.peer)

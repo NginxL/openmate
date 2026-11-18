@@ -37,7 +37,7 @@ class LayoutTest(unittest.TestCase):
         edit = out["view"]
         self.assertEqual(json.loads(edit["state"]), {"edit": 1})
         rows = [it for it in edit["sections"][0]["items"] if it["type"] == "row"]
-        self.assertEqual([r["title"] for r in rows], [b[1] for b in layout.BLOCKS])
+        self.assertEqual([r["title"] for r in rows], [b[1] for b in layout.BLOCKS if b[0] != "wechat"], "微信今天 only with WeChat")
         first = [a["title"] for a in rows[0]["actions"]]
         self.assertEqual(first, ["下移", "隐藏", "改成半行"], "the first can't go up; status is a whole row")
         self.assertIn("hub 升级后生效", rows[2]["subtitle"], "a half row before UI version 8 says when it counts")
@@ -66,7 +66,7 @@ class LayoutTest(unittest.TestCase):
         page.app.store.meta_set(layout.KEY, json.dumps({"order": older[:3] + ["gone", "needs"] + older[3:], "hidden": ["gone", "status"],
                                                         "wide": {"todos": True, "needs": "yes"}}))
         lay = page.layout()
-        self.assertEqual(lay.order, ["todos", "status", "needs", "calendar", "feishu", "agents", "mesh", "auto", "shortcuts", "bookmarks"],
+        self.assertEqual(lay.order, ["todos", "status", "needs", "calendar", "feishu", "wechat", "agents", "mesh", "auto", "shortcuts", "bookmarks"],
                          "a block the stored order lacks goes after the one before it by default; unknown and repeated ones go")
         self.assertEqual(lay.hidden, ["status"])
         self.assertEqual(lay.wide, {"todos": True})
