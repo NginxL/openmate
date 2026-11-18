@@ -1463,11 +1463,12 @@ class ConnectorApp:
             step = max(want - len(got), HISTORY_STEP)
             rows = self.store.history_rows(chat_id, older_than=older_than, newer_than=newer_than, inclusive=inclusive,
                                            limit=step)
+            inclusive = False  # only the first read includes the bound itself
             for r in (rows if newer_than is not None else reversed(rows)):
                 if newer_than is not None:
                     newer_than = r["_key"]
                 else:
-                    older_than, inclusive = r["_key"], False
+                    older_than = r["_key"]
                 if views.has_content(r):
                     got.append(r)
                     if len(got) >= want:
@@ -1485,10 +1486,13 @@ class ConnectorApp:
             raise RPCError("位置不是这个连接器给出的：%s" % raw[:40])
         if not (-_SEQ_MOST - 1 <= p <= _SEQ_MOST):
             raise RPCError("位置超出范围：%s" % raw[:40])
-        keys = self.store.position_keys(chat_id, p)
-        if not keys:
+        rows = self.store.position_rows(chat_id, p)
+        # the lines a page can hold decide (a blank or system line sharing the position must not move the bound past
+        # a line between them); a position holding none of those still names a place
+        shown = [r for r in rows if not views.is_system(r) and views.has_content(r)] or rows
+        if not shown:
             raise RPCError("这个会话里没有位置 %s 的消息" % raw[:40])
-        return keys[0] if mark == "before" else keys[-1]
+        return shown[0]["_key"] if mark == "before" else shown[-1]["_key"]
 
     def m_archive_history(self, params: dict) -> dict:
         """One page of a chat's stored messages, the lines archive.changes hands over only, walked by when they were

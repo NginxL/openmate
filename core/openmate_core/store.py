@@ -532,11 +532,16 @@ class Store:
             out.append(d)
         return out if newer_than is not None else out[::-1]
 
-    def position_keys(self, chat_id: str, position: int) -> List[tuple]:
-        """The (when, seq) keys of chat's lines at this position (history_rows' order), oldest first."""
-        rows = self._all("SELECT " + _WHEN + " AS w, seq FROM messages WHERE chat_id = ? AND position = ? ORDER BY w, seq",
-                         (chat_id, int(position)))
-        return [(float(r["w"] or 0), int(r["seq"])) for r in rows]
+    def position_rows(self, chat_id: str, position: int) -> List[dict]:
+        """chat's lines at this position, oldest first by (when, seq), each with its key as "_key" (history_rows')."""
+        rows = self._all("SELECT " + _MESSAGE_COLUMNS + ", " + _WHEN + " AS _when FROM messages "
+                         "WHERE chat_id = ? AND position = ? ORDER BY _when, seq", (chat_id, int(position)))
+        out = []
+        for r in rows:
+            d = _message_row(r)
+            d["_key"] = (float(d.pop("_when") or 0), int(d["seq"]))
+            out.append(d)
+        return out
 
     def message_counts(self) -> Dict[str, int]:
         """How many messages (not system lines) each chat has stored."""

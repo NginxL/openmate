@@ -162,6 +162,20 @@ class HistoryTest(unittest.TestCase):
         with self.assertRaises(HubSideError):
             self.h.c("archive.history", chat=BIG, before="99999")  # no line there
 
+    def test_a_blank_line_sharing_a_position_does_not_move_the_bound(self):
+        now = time.time()
+        self.h.app.store.upsert_chat(Chat("chat_example_pos", "group", "示例同位群"))
+        self.h.app.store.add_messages([
+            Message(id="msg_pa", chat_id="chat_example_pos", position=7, sender_id="user_example_a", text="甲", at=now - 30),
+            Message(id="msg_pb", chat_id="chat_example_pos", position=8, sender_id="user_example_a", text="乙", at=now - 20),
+            Message(id="msg_pblank", chat_id="chat_example_pos", position=7, sender_id="user_example_a", text="\u2003",
+                    at=now - 10),
+            Message(id="msg_p0", chat_id="chat_example_pos", position=8, sender_id="user_example_a", text="",
+                    at=now - 40)], from_history=False)
+        self.assertEqual([m["id"] for m in self.read("chat_example_pos", after="7", limit=5)["messages"]], ["msg_pb"])
+        self.assertEqual([m["id"] for m in self.read("chat_example_pos", before="8", limit=5)["messages"]], ["msg_pa"])
+        self.assertEqual([m["id"] for m in self.read("chat_example_pos", around="7", limit=1)["messages"]], ["msg_pa"])
+
     def test_a_long_run_of_blank_lines_costs_few_queries(self):
         now = time.time()
         rows = [Message(id="msg_blank_%d" % i, chat_id=BIG, position=1000 + i, sender_id="user_example_a",
@@ -179,6 +193,15 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual([x["id"] for x in page["messages"]], [self.content[-1]])
         self.assertNotIn("newer", page)
         self.assertLess(len(calls), 40, "one query per blank line")
+        # across the blanks the other way: after the last real line, then one more real line past 2500 blanks
+        self.h.app.store.add_messages([Message(id="msg_after_blanks", chat_id=BIG, position=4000,
+                                               sender_id="user_example_a", text="空白之后", at=now - 1)],
+                                      from_history=False)
+        at = cursor(self.h.app.store, BIG, self.content[-2])
+        got = [x["id"] for x in self.read(after=at, limit=2)["messages"]]
+        self.assertEqual(got, [self.content[-1], "msg_after_blanks"])
+        got = [x["id"] for x in self.read(around=cursor(self.h.app.store, BIG, "msg_after_blanks"), limit=3)["messages"]]
+        self.assertEqual(got, [self.content[-1], "msg_after_blanks"])
 
     def test_cursors_never_lead_to_an_empty_page(self):
         now = time.time()
