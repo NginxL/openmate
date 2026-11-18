@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 
-from harness import Harness, secret_json, wait_until
+from harness import CID, Harness, secret_json, wait_until
 
 
 def token(h):
@@ -189,6 +189,100 @@ class CredentialsTest(unittest.TestCase):
         h.sign_in()  # the user's own new QR does
         self.assertIn(h.cid, h.hub.secrets)
 
+
+    def test_a_failed_save_lets_the_adapter_go(self):
+        """The adapter took the sign-in, the core could not keep it: the adapter lets it go (nothing is sent as an
+        account the core does not know it has)."""
+        from harness import HubSideError
+
+        h = Harness(self)
+        outs = []
+        real = h.app.backend.logout
+        h.app.backend.logout = lambda: outs.append(1) or real()
+        h.hub.secrets_fail = True
+        p = h.c("login.step", step="", values={})
+        with self.assertRaises(HubSideError):
+            for _ in range(5):
+                p = h.c("login.step", step=p["step"])
+                if p.get("done"):
+                    break
+        self.assertEqual(outs, [1])
+
+    def test_a_sign_in_with_nothing_to_scan_reads_an_unread_saved_one_first(self):
+        from harness import HubSideError
+        from openmate_core.backend import LoginDone
+        from openmate_core.fixture import FixtureBackend, FixtureWorld
+
+        calls = []
+
+        class Direct(FixtureBackend):
+            signs_in_elsewhere = True
+
+            def login_direct(self):
+                calls.append(self.saved_credentials)
+                return LoginDone(credentials={"fixture_token": "d", "user": "user_example_me"}, account=self.world.me)
+
+        world = FixtureWorld()
+        h = Harness(self, world=world, backend_factory=lambda cfg, d: Direct(world), initialize=False)
+        h.hub.secrets_fail = True
+        h.initialize()
+        wait_until(lambda: h.app.creds == "error", what="the read failed")
+        with self.assertRaises(HubSideError) as e:
+            h.c("login.step", step="")
+        self.assertIn("读取保存的登录信息失败", e.exception.message)
+        self.assertEqual(calls, [])  # nothing taken while the saved one is unread
+        h.hub.secrets_fail = False
+        self.assertTrue(h.c("login.step", step="")["done"])
+        self.assertEqual(len(calls), 1)
+
+    def test_an_unread_saved_sign_in_read_again_goes_on_with_it(self):
+        from openmate_core.backend import LoginDone
+        from openmate_core.fixture import FixtureBackend, FixtureWorld
+
+        calls = []
+
+        class Direct(FixtureBackend):
+            signs_in_elsewhere = True
+
+            def login_direct(self):
+                calls.append(self.saved_credentials)
+                return LoginDone(credentials={"fixture_token": "d", "user": "user_example_me"}, account=self.world.me)
+
+        world = FixtureWorld()
+        h = Harness(self, world=world, backend_factory=lambda cfg, d: Direct(world), initialize=False)
+        import base64
+        import json as _json
+
+        h.hub.secrets[CID] = base64.b64encode(_json.dumps({"fixture_token": "saved", "user": "user_example_me"})
+                                              .encode()).decode()
+        h.hub.secrets_fail = True
+        h.initialize()
+        wait_until(lambda: h.app.creds == "error", what="the read failed")
+        h.hub.secrets_fail = False
+        self.assertTrue(h.c("login.step", step="")["done"])
+        self.assertEqual(calls, [{"fixture_token": "saved", "user": "user_example_me"}])
+
+    def test_a_qr_sign_in_is_not_held_by_an_unread_saved_one(self):
+        h = Harness(self, initialize=False)
+        h.hub.secrets_fail = True
+        h.initialize()
+        wait_until(lambda: h.app.creds == "error", what="the read failed")
+        self.assertEqual(h.c("login.step", step="")["kind"], "qr")
+
+    def test_a_failed_delete_keeps_the_saved_sign_in_for_the_adapter(self):
+        from harness import HubSideError
+
+        h = Harness(self)
+        h.sign_in()
+        self.assertIsNotNone(h.app.backend.saved_credentials)
+        self.assertEqual(h.app.backend.core_account, "user_example_me")
+        h.hub.secrets_fail = True
+        with self.assertRaises(HubSideError):
+            h.c("logout")
+        self.assertIsNotNone(h.app.backend.saved_credentials)  # still saved: the adapter still checks against it
+        h.hub.secrets_fail = False
+        h.c("logout")
+        self.assertIsNone(h.app.backend.saved_credentials)
 
     def test_a_failed_save_then_a_new_qr_signs_in(self):
         from harness import HubSideError

@@ -176,6 +176,15 @@ class Backend(abc.ABC):
     exponential, reset once a link stayed up for a minute); everything else from other threads at any time.
     """
 
+    #: Set by the core as soon as it has read them (and again whenever they change; None once signed out): the
+    #: saved credentials restore() will get. An adapter whose account must not change in place checks a sign-in
+    #: against them even before a restore ran.
+    saved_credentials: Optional[Dict] = None
+    #: Set by the core too: the account its own store belongs to ("" before any sign-in), the same check's other half
+    core_account: str = ""
+    #: Set by the core before anything else is called: the manifest's secrets the user set (name → value), such as a
+    #: token for a service the adapter connects to. Never logged or written anywhere.
+    secrets: Dict[str, str] = {}
     #: Set by the core: call it with new credentials when the service rotated them (a refreshed session), so the core
     #: seals them in the hub. Never write credentials anywhere yourself.
     on_credentials: Optional[Callable[[Dict], None]] = None
@@ -186,6 +195,9 @@ class Backend(abc.ABC):
     #: Set by the core: hand it messages to keep as history (from the listener's or a sender's thread): caught up
     #: after a reconnect, or the account's own sends the service never echoes back. Never acted on (/agent, 代答).
     on_history: Optional[Callable[[List["Message"]], None]] = None
+    #: Set by the core too: the same, saying whose they are (an account id): dropped when another account is signed
+    #: in by the time they are kept (an adapter that hands history over from another thread uses it)
+    on_history_for: Optional[Callable[[List["Message"], str], None]] = None
     #: Set by the core: call it with {user_id: "bot" | "user"} when the backend learns what someone is after it
     #: answered people_kinds (WeChat finds an official account with a person-like id later): the core keeps what it
     #: was told before for good, so this is how it changes (from any thread; it returns at once).
@@ -237,6 +249,16 @@ class Backend(abc.ABC):
     @abc.abstractmethod
     def login_finish(self, state: str) -> LoginDone:
         """After login_poll said confirmed: complete it, leave the adapter signed in, return the credentials."""
+
+    #: True for an adapter whose sign-in has nothing to scan (login_direct answers): it takes the account signed in
+    #: where it connects, so the core reads an unread saved sign-in before it
+    signs_in_elsewhere: bool = False
+
+    def login_direct(self) -> Optional[LoginDone]:
+        """A sign-in with nothing to scan, for an adapter whose account is signed in where it connects (WeChat through
+        AgentWechat): its LoginDone, as login_finish's. None (the default): sign in with login_start's QR.
+        BackendError: it cannot sign in now (its message is shown to the user)."""
+        return None
 
     @abc.abstractmethod
     def restore(self, credentials: Dict) -> Account:

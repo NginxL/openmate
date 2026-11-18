@@ -255,9 +255,11 @@ class ConnectorApp:
             self.changed = Changed(self._emit_changed, self.timing.debounce)
             try:
                 self.backend = self._make_backend(self.config, self.data_dir)
+                self.backend.secrets = dict(self.secrets)  # the manifest's secrets the user set, for the adapter
                 self.backend.on_credentials = self._credentials_rotated
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_history = self._history_from_backend
+                self.backend.on_history_for = self._history_for_account
                 self.backend.on_people_kinds = self._people_kinds_from_backend
                 self.backend.on_chat_gone = self._chat_gone
                 self.backend.on_doc_mention = self._doc_mention
@@ -274,9 +276,13 @@ class ConnectorApp:
                 self.agent.enabled = False
                 log.info("/agent and 代答 are off here (%s)", "the connector is off" if not self.connector_on else "a member hub")
             self.people = People(self)
+            if self.backend is not None:
+                self.backend.core_account = self.store.meta_get("account_id") or ""  # whose this store is
             creds = self._load_credentials()
             if creds is not None:
                 self._credentials = creds
+                if self.backend is not None:
+                    self.backend.saved_credentials = dict(creds)  # before any sign-in step can reach the adapter
                 self.creds = "present"
                 name = self.store.meta_get("account_name")
                 if name:
@@ -408,12 +414,22 @@ class ConnectorApp:
                 return False
             self._creds_sealed_seq = seq
             self._credentials = creds
+            if self.backend is not None:
+                self.backend.saved_credentials = dict(creds)
             return True
 
     def _history_from_backend(self, msgs: list) -> None:
         """Messages the adapter hands over as history: kept like a catch-up read, never acted on."""
         try:
             self.ingest(list(msgs), live=False)
+        except Exception:
+            if not self.closing.is_set():
+                log.exception("the adapter's history could not be kept")
+
+    def _history_for_account(self, msgs: list, account: str) -> None:
+        """History the adapter says is this account's: kept only while it is the one signed in here."""
+        try:
+            self.ingest(list(msgs), live=False, account=account)
         except Exception:
             if not self.closing.is_set():
                 log.exception("the adapter's history could not be kept")
@@ -762,9 +778,12 @@ class ConnectorApp:
                     self._names.clear()  # and the names it looked up
                     with self.lock:
                         self._account_epoch += 1
+                        self.account = None  # until this one is remembered: nothing said to be the other's is kept
 
     def _remember_account(self, acct: Account) -> None:
         self.account = acct
+        if self.backend is not None and acct.id:
+            self.backend.core_account = acct.id
         if self.store is not None:
             if acct.id:
                 self.store.meta_set("account_id", acct.id)
@@ -1010,15 +1029,19 @@ class ConnectorApp:
 
     # ------------------------------------------------------------------ storing messages
 
-    def ingest(self, msgs: List[Message], live: bool) -> List[dict]:
+    def ingest(self, msgs: List[Message], live: bool, account: str = "") -> List[dict]:
+        """account: whose the messages are, when the adapter says (another account's are never kept)."""
         if not msgs or self.store is None:
             return []
         with self.lock:
             epoch = self._account_epoch  # the account these messages were read for
+            if account and (self.account is None or self.account.id != account):
+                return []
 
         def same() -> bool:  # under _wipe_mu: the store still that account's
             with self.lock:
-                return epoch == self._account_epoch
+                return epoch == self._account_epoch and (
+                    not account or (self.account is not None and self.account.id == account))
         latest: Dict[str, float] = {}
         for m in msgs:  # a chat gone comes back with a newer message of someone's (joined again)
             if (m.type or "") != "SYSTEM" and (m.at or 0) > latest.get(m.chat_id, 0):
@@ -1131,8 +1154,8 @@ class ConnectorApp:
             out["error"] = error
         return out
 
-    def _login_start(self, renew: bool = False):
-        """A new QR sign-in: from here the adapter's rotations are written again (WeChat seals the accepted sign-in
+    def _login_register(self, renew: bool) -> None:
+        """A sign-in starts: from here the adapter's rotations are written again (WeChat seals the accepted sign-in
         before login_finish answers). The flow keeps the credentials generation it started in: a logout meanwhile
         ends it. renew: a QR the flow renews by itself, which never reopens what a logout closed."""
         with self._creds_mu:
@@ -1144,7 +1167,34 @@ class ConnectorApp:
             else:
                 self._creds_out = False
                 self._login_gen = self._creds_gen
+
+    def _login_start(self, renew: bool = False, registered: bool = False):
+        """A new QR sign-in (see _login_register; registered: done already for this step)."""
+        if not registered:
+            self._login_register(renew)
         return self.backend.login_start()
+
+    def _login_direct(self):
+        """A sign-in with nothing to scan (the adapter's account is signed in where it connects: AgentWechat): its
+        LoginDone, or None for a QR. The step registered the sign-in first (_login_register), once for both."""
+        direct = getattr(self.backend, "login_direct", None)
+        if direct is None:
+            return None
+        if self.creds == "error" and getattr(self.backend, "signs_in_elsewhere", False):
+            # the saved sign-in could not be read at start: read again first (a sign-in with nothing to scan takes
+            # whatever account is there; it must not take the place of one saved and unread). A QR sign-in is the
+            # user's own choice of account: it goes on as before
+            creds = self._load_credentials()
+            if creds is None and self.creds == "error":
+                raise RPCError("读取保存的登录信息失败，稍后再试（没有登录，以免换成别的账号）")
+            if creds is not None:
+                self._credentials = creds
+                self.backend.saved_credentials = dict(creds)
+                self.creds = "present"
+        try:
+            return direct()
+        except BackendError as e:
+            raise RPCError("没能登录：%s" % e.message)
 
     def m_login_step(self, params: dict) -> dict:
         if self.backend is None or self.store is None:
@@ -1156,8 +1206,12 @@ class ConnectorApp:
                 # a poll that arrives after the sign-in finished: still done (an empty step starts over)
                 return {"done": True, "account": self.me_name()}
             if not step or self._login is None:
+                self._login_register(renew=bool(step))  # a poll of a flow that ended: never past a logout
+                direct = self._login_direct()
+                if direct is not None:
+                    return self._signed_in(direct)
                 try:
-                    qr = self._login_start(renew=bool(step))  # a poll of a flow that ended: never past a logout
+                    qr = self._login_start(renew=bool(step), registered=True)
                 except BackendError as e:
                     raise RPCError("没能开始登录：%s" % e.message)
                 self._login = {"state": qr.state, "url": qr.url}
@@ -1192,46 +1246,60 @@ class ConnectorApp:
             except BackendError as e:
                 self._login = None
                 raise RPCError("登录没有完成：%s" % e.message)
-            voided = False
-            with self._creds_mu:
-                if self._creds_out or self._login_gen != self._creds_gen:
-                    voided = True  # a logout came while this QR was scanned: it stays signed out
-                else:
-                    # a rotation handed over before this sign-in is never written after it
-                    with self._creds_cv:
-                        self._creds_gen += 1
-                    try:
-                        self._save_credentials(done.credentials)
-                    except RPCError:
-                        self._login = None
-                        raise RPCError("登录成功了，但保存登录信息失败，请重新登录")
+            return self._signed_in(done)
+
+    def _signed_in(self, done) -> dict:
+        """A sign-in finished (a QR scanned, or one with nothing to scan): seal it and start the link. Under
+        _login_lock."""
+        voided = unsaved = False
+        with self._creds_mu:
+            if self._creds_out or self._login_gen != self._creds_gen:
+                voided = True  # a logout came while this QR was scanned: it stays signed out
+            else:
+                # a rotation handed over before this sign-in is never written after it
+                with self._creds_cv:
+                    self._creds_gen += 1
+                try:
+                    self._save_credentials(done.credentials)
                     self._credentials = done.credentials
+                    self.backend.saved_credentials = dict(done.credentials)
                     self._creds_out = False
-            if voided:
-                self._login = None
-                try:  # outside _creds_mu: the adapter may be sealing under its own lock and waiting for it
-                    self.backend.logout()
-                except Exception:
-                    log.exception("backend logout failed")
-                raise RPCError("登录过程中退出了登录，这次扫码作废，请重新扫码")
+                except RPCError:
+                    self._login = None
+                    unsaved = True
+        if unsaved:
+            # the adapter took this sign-in, the core keeps the one before: the adapter lets it go (outside
+            # _creds_mu, as for a voided one), so nothing is sent as an account the core does not know it has
+            try:
+                self.backend.logout()
+            except Exception:
+                log.exception("backend logout failed")
+            raise RPCError("登录成功了，但保存登录信息失败，请重新登录")
+        if voided:
             self._login = None
-            acct = done.account
-            self._bind_account(acct)
-            self.creds = "present"
-            self._remember_account(acct)
-            self._catchup_done.clear()
-            if not self.connector_on:
-                # signed in, but the user turned the connector off in Persona: nothing is received or sent
-                self.mark_changed("inbox", "chats")
-                return {"done": True, "account": acct.name or acct.id}
-            with self.lock:  # a logout sets _creds_out first, then stops links under this lock: never a link after it
-                if self._creds_out:
-                    raise RPCError("登录过程中退出了登录，这次扫码作废，请重新扫码")
-                self._start_link(restore=False)
-            # Report done once the link is really up and the first history is in (bounded); polls meanwhile wait.
-            deadline = time.monotonic() + self.timing.login_wait
-            if self._link_up.wait(max(0.0, deadline - time.monotonic())):
-                self._catchup_done.wait(max(0.0, deadline - time.monotonic()))
+            try:  # outside _creds_mu: the adapter may be sealing under its own lock and waiting for it
+                self.backend.logout()
+            except Exception:
+                log.exception("backend logout failed")
+            raise RPCError("登录过程中退出了登录，这次扫码作废，请重新扫码")
+        self._login = None
+        acct = done.account
+        self._bind_account(acct)
+        self.creds = "present"
+        self._remember_account(acct)
+        self._catchup_done.clear()
+        if not self.connector_on:
+            # signed in, but the user turned the connector off in Persona: nothing is received or sent
+            self.mark_changed("inbox", "chats")
+            return {"done": True, "account": acct.name or acct.id}
+        with self.lock:  # a logout sets _creds_out first, then stops links under this lock: never a link after it
+            if self._creds_out:
+                raise RPCError("登录过程中退出了登录，这次扫码作废，请重新扫码")
+            self._start_link(restore=False)
+        # Report done once the link is really up and the first history is in (bounded); polls meanwhile wait.
+        deadline = time.monotonic() + self.timing.login_wait
+        if self._link_up.wait(max(0.0, deadline - time.monotonic())):
+            self._catchup_done.wait(max(0.0, deadline - time.monotonic()))
         self.mark_changed("inbox", "chats")
         return {"done": True, "account": acct.name or acct.id}
 
@@ -1259,6 +1327,8 @@ class ConnectorApp:
                 self.hub_call("connector.secrets.delete", {"contribution": self.cid})
             except RPCError as e:
                 raise RPCError("退出登录时删除保存的登录信息失败（%s），请再试一次" % (e.code or "error"))
+            if self.backend is not None:
+                self.backend.saved_credentials = None  # gone for good now (a failed delete keeps it, for the checks)
         self.creds = "none"
         self.account = None
         self.mark_changed("inbox")

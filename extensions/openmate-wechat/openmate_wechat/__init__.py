@@ -47,6 +47,11 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
     if which != "native":
         raise BackendError("OPENMATE_BACKEND=%s 不认识：只有 native 和 fixture" % which, "config")
     from .backend import WeChatBackend
+
+    hub_url = str(config.get("hub_url") or "")
+    if hub_url.strip():  # through AgentWechat (hub.py): the program is not fetched nor run (the address as written)
+        return WeChatBackend(None, data_dir, ack_text=str(config.get("agent_ack_reaction") or ""),
+                             voice_cmd=str(config.get("voice_to_text") or ""), hub_url=hub_url)
     from .install import Installer
 
     inst = Installer(data_dir, str(config.get("native_path") or ""))

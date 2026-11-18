@@ -451,6 +451,10 @@ class Store:
                     if m.text:
                         db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ?",
                                    (m.text, (m.type or "TEXT").upper(), m.chat_id, m.id, m.text))
+                    if (m.type or "").upper() == "SYSTEM" and not m.media:
+                        # turned into a notice (a recall): what it carried is not offered any more
+                        db.execute("UPDATE messages SET media = '[]' WHERE chat_id = ? AND id = ? AND media != '[]'",
+                                   (m.chat_id, m.id))
                     if m.at_me or m.at_all:  # a history read may not know whom a message mentions (Feishu)
                         db.execute("UPDATE messages SET at_me = MAX(at_me, ?), at_all = MAX(at_all, ?) "
                                    "WHERE chat_id = ? AND id = ?",

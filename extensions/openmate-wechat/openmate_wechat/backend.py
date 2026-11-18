@@ -42,6 +42,7 @@ from openmate_core.backend import (
 )
 
 from . import media as wm
+from .hub import OTHER_ACCOUNT, PENDING_KEEP, BadSetting, HubClient, HubLink
 from .native import Native, NativeError, NativeGone
 
 log = logging.getLogger("openmate.wechat")
@@ -160,9 +161,10 @@ class Store:
         with self._mu:
             for t in ("messages", "chats", "names", "media"):
                 self._db.execute("DELETE FROM " + t)
-            self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at', 'catalog_cursor', 'catalog_after', "
+            self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'hub_cursor', 'groups_at', 'catalog_cursor', "
+                             "'catalog_after', "
                              "'catalog_stuck') "
-                             "OR key LIKE 'acked:%' "
+                             "OR key LIKE 'acked:%' OR key LIKE 'hub_unsure:%' "
                              "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%' "
                              "OR key LIKE 'gone:%' OR key LIKE 'member_at:%' OR key LIKE 'answered:%'")
         BUSINESS.clear()
@@ -198,6 +200,10 @@ class Store:
             self._db.execute("INSERT INTO chats (id, last_at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
                              "last_at=MAX(last_at, excluded.last_at)", (chat, at))
         return True, pos
+
+    def replace(self, mid: str, ev: dict) -> None:
+        with self._mu:
+            self._db.execute("UPDATE messages SET body=? WHERE id=?", (json.dumps(ev, ensure_ascii=False), mid))
 
     def message(self, mid: str) -> Optional[Tuple[dict, int]]:
         with self._mu:
@@ -313,12 +319,15 @@ class WeChatBackend(Backend):
     # counts as 处理完 here, as Feishu's 完成 does; a new message brings it back
     done_marks = True
 
-    def __init__(self, native_path: Any, data_dir: str, ack_text: str = "", voice_cmd: str = ""):
+    def __init__(self, native_path: Any, data_dir: str, ack_text: str = "", voice_cmd: str = "", hub_url: str = ""):
         """native_path: the program's path, or a callable that returns it (waiting for a download) or raises.
         ack_text: the line put in the chat when the user's /agent request is taken (the setting agent_ack_reaction; never
-        for 自动代答: Platform.ack_auto is off for WeChat); WeChat has no reactions, so the core's "reaction" is this message."""
+        for 自动代答: Platform.ack_auto is off for WeChat); WeChat has no reactions, so the core's "reaction" is this message.
+        hub_url: an AgentWechat hub to connect to instead of the program (hub.py); its token is the secret hub_token."""
         self.ack_text = (ack_text or "").strip()
         self._native_path = native_path
+        self.hub_url = hub_url or ""  # as written: its checks see what was typed (control characters too)
+        self._sealed: List[str] = []  # the accounts the core's saved sign-in names (restore tells them)
         os.makedirs(data_dir, exist_ok=True)
         self.store = Store(os.path.join(data_dir, "wechat.db"))
         self._native: Optional[Native] = None
@@ -363,14 +372,23 @@ class WeChatBackend(Backend):
         return p
 
     def _link(self, restore: bool = True, wait: float = 30.0) -> Native:
+        if self._closed:
+            raise BackendError("扩展正在关闭", "unreachable")  # nothing starts a link after close
+        if restore and self._foreign_store():
+            # nothing read or sent through it; a sign-in's own requests go on (a QR scanned again settles whose
+            # store this is, the way a sign-in always does)
+            raise BackendError(OTHER_ACCOUNT, "config")
         with self._mu:
+            if self._closed:
+                raise BackendError("扩展正在关闭", "unreachable")
             n = self._native
             if n is not None and n.alive():
                 if restore and self._ready_for is not n and self._state is not None:
                     self._call(n, "restore", 20, state=self._state)  # started for a QR: give it the sign-in first
                     self._ready_for = n
+                self._hub_ready(n, restore)
                 return n
-            n = Native(self._path(wait), self._persist)
+            n = self._hub_link() if self.hub_url else Native(self._path(wait), self._persist)
             n.epoch = -1 if self._signed_out else self._auth_epoch
             try:
                 n.start()
@@ -388,7 +406,59 @@ class WeChatBackend(Backend):
                     raise
             self._native = n  # only now: a program that could not take the sign-in is never reused
             self._ready_for = n if (restore and self._state is not None) else None
+            self._hub_ready(n, restore)
             return n
+
+    def _hub_link(self) -> HubLink:
+        token = str((self.secrets or {}).get("hub_token") or "").strip()
+        if not token:
+            raise BackendError("还没填 AgentWechat 访问密钥（扩展设置里的 hub_token）", "config")
+        try:
+            client = HubClient(self.hub_url, token)
+        except BadSetting as e:  # neither the address nor the token goes into the message: it is shown and logged
+            raise BackendError({
+                "token": "AgentWechat 访问密钥的格式不对（应是 wx tokens create 给出的那一串）",
+                "insecure": "AgentWechat 地址用 http 时只能是这台电脑（127.0.0.1 或 localhost）；别的电脑要用 https",
+            }.get(e.what, "AgentWechat 地址不对（例如 http://127.0.0.1:6174）"), "config")
+        link = HubLink(client, prefer=self.store.get("hub_account"))
+        link.expect = self._bound()  # the account served here: another one there is neither read nor sent as
+        # sends whose outcome was not known (this account's: another account's are wiped with it): their echo is ours
+        for key in self.store.keys("hub_unsure:"):
+            try:
+                u = json.loads(self.store.get(key) or "{}")
+            except ValueError:
+                u = {}
+            if not isinstance(u, dict) or time.time() - float(u.get("at") or 0) > PENDING_KEEP:
+                self.store.drop(key)
+                continue
+            link.remember_pending(str(u.get("chat") or ""), float(u.get("at") or 0), key[len("hub_unsure:"):])
+        link.on_settled = lambda k: self.store.drop("hub_unsure:" + k)
+        return link
+
+    def _hub_ready(self, n: Any, restore: bool) -> None:
+        """Through AgentWechat only the sign-in's own requests (restore, login_direct) use a link whose account was
+        not checked yet (another account there, or signed out here): nothing is read from or sent as it."""
+        if self.hub_url and restore and self._ready_for is not n:
+            raise BackendError("AgentWechat 的微信号还没确认", "unreachable")
+
+    def _bound(self) -> str:
+        """Through AgentWechat: the WeChat account this extension serves (bound once: never switched in place)."""
+        return self.store.get("account") or self.core_account or next(iter(self._sealed or self._saved_ids()), "")
+
+    def _known_accounts(self) -> set:
+        """Every account this extension is known to serve: its own store's, the core's store's, the saved sign-in's
+        (a sign-in, manual or restored, takes the hub's account only when it is the one of them)."""
+        return {x for x in [self.store.get("account"), self.core_account] + list(self._sealed) + self._saved_ids() if x}
+
+    def _saved_ids(self) -> List[str]:
+        """The accounts the core's saved sign-in names (set by the core as soon as it read it)."""
+        c = self.saved_credentials if isinstance(self.saved_credentials, dict) else {}
+        st = c.get("state") if isinstance(c.get("state"), dict) else {}
+        return [str(x) for x in (c.get("account"), st.get("own_username"), st.get("username")) if x]
+
+    def _cursor_key(self) -> str:
+        """The program's sync key and the hub's log cursor are not the same thing: each kept under its own key."""
+        return "hub_cursor" if self.hub_url else "cursor"
 
     def _mark_ready(self, n: Native) -> None:
         """n took the sign-in: only that program counts as signed in (a later one started meanwhile does not)."""
@@ -485,7 +555,33 @@ class WeChatBackend(Backend):
         acct = self._adopt(r.get("account") or {})
         return LoginDone(credentials={"v": 1, "state": st}, account=acct)
 
+    @property
+    def signs_in_elsewhere(self) -> bool:  # type: ignore[override]
+        return bool(self.hub_url)
+
+    def login_direct(self) -> Optional[LoginDone]:
+        """Through AgentWechat the account is signed in there (in its desktop app): 登录 here just checks that and
+        takes it. None without a hub: the QR."""
+        if not self.hub_url:
+            return None
+        n = self._link(restore=False, wait=5.0)
+        known = self._known_accounts()
+        if len(known) > 1:
+            raise BackendError(OTHER_ACCOUNT, "config")
+        n.expect = next(iter(known), "") or n.expect
+        r = self._call(n, "restore", 15)  # another account there: refused (config), nothing taken
+        self._begin_sign_in(n)
+        self._mark_ready(n)
+        acct = self._adopt(r.get("account") or {})
+        self.store.put("hub_account", str((r.get("account") or {}).get("hub_account") or ""))
+        return LoginDone(credentials={"v": 1, "hub": True, "account": acct.id}, account=acct)
+
     def restore(self, credentials: Dict) -> Account:
+        if self.hub_url:
+            c = credentials if isinstance(credentials, dict) else {}
+            st = c.get("state") if isinstance(c.get("state"), dict) else {}
+            sealed = [str(x) for x in (c.get("account"), st.get("own_username"), st.get("username")) if x]
+            return self._restore_hub(sealed)
         st = credentials.get("state") if isinstance(credentials, dict) else None
         if not isinstance(st, dict):
             raise CredentialsExpired(EXPIRED)
@@ -505,6 +601,10 @@ class WeChatBackend(Backend):
                 raise CredentialsExpired(EXPIRED)
         self._mark_ready(n)
         account = self._adopt(r.get("account") or {})
+        self._after_restore()
+        return account
+
+    def _after_restore(self) -> None:
         # official accounts learnt before (perhaps after the core was told "user" for them)
         self._tell_kinds({b: "bot" for b in BUSINESS})
         cb = self.on_chat_gone
@@ -513,18 +613,54 @@ class WeChatBackend(Backend):
                 cb(key[5:])  # groups left before: the core may not have heard (it keeps the first time it did)
             except Exception:
                 log.exception("a group gone could not be handed to the core")
+
+    def _restore_hub(self, sealed: Optional[List[str]] = None) -> Account:
+        """Whatever was saved (a QR sign-in's, from before the hub, or the hub's): the hub's account, as it is now.
+        Not signed in there: the link waits for it (not "expired": signing in again is done in AgentWechat)."""
+        with self._auth_mu:
+            if self._signed_out:
+                raise CredentialsExpired("已在这里退出登录，请重新登录")
+            epoch = self._auth_epoch
+        self._sealed = [x for x in sealed or [] if x]  # a sign-in here later checks against them too
+        known = self._known_accounts()
+        if len(known) > 1:
+            raise BackendError(OTHER_ACCOUNT, "config")  # known to disagree: the hub is not even asked
+        n = self._link(restore=False)
+        if len(known) == 1:
+            n.expect = next(iter(known))
+        r = self._call(n, "restore", 15)
+        acct = r.get("account") or {}
+        if known and known != {str(acct.get("id") or "")}:
+            # another WeChat account is signed in there now: never taken by itself (it would wipe this one's data
+            # here, and send as it); signing out here and in again takes it. Nothing of this link is kept
+            with self._mu:
+                if self._native is n:
+                    self._native = None
+                    self._ready_for = None
+            n.close()
+            raise BackendError(OTHER_ACCOUNT, "config")
+        with self._auth_mu:
+            if self._signed_out or self._auth_epoch != epoch:
+                raise CredentialsExpired("已在这里退出登录，请重新登录")  # signed out while this waited
+            self._mark_ready(n)
+        account = self._adopt(acct)
+        self.store.put("hub_account", str(acct.get("hub_account") or ""))
+        self._after_restore()
         return account
 
     def _adopt(self, account: dict) -> Account:
         me = str(account.get("id") or "")
-        if me and self.store.get("account") not in ("", me):
-            self.fetcher.reset()  # its fetches queued or running keep nothing
-            self.store.wipe()  # another account: none of the previous one's messages or names
-            shutil.rmtree(self.fetcher.root, ignore_errors=True)  # nor its pictures and files
-            os.makedirs(self.fetcher.root, mode=0o700, exist_ok=True)
-        if me:
-            self.store.put("account", me)
-        self.me, self.me_name = me, str(account.get("name") or me)
+        with self._auth_mu:  # a send's receipt is kept under it too: never into another account's store
+            if self.hub_url and me and self.store.get("account") not in ("", me):
+                raise BackendError(OTHER_ACCOUNT, "config")  # never switched in place through the hub
+            if me and self.store.get("account") not in ("", me):
+                self.fetcher.reset()  # its fetches queued or running keep nothing
+                self.store.wipe()  # another account: none of the previous one's messages or names
+                shutil.rmtree(self.fetcher.root, ignore_errors=True)  # nor its pictures and files
+                os.makedirs(self.fetcher.root, mode=0o700, exist_ok=True)
+            if me:
+                self.store.put("account", me)
+            self.me, self.me_name = me, str(account.get("name") or me)
         return Account(id=me, name=self.me_name)
 
     def logout(self) -> None:
@@ -535,12 +671,19 @@ class WeChatBackend(Backend):
             self._state = None
             if n is not None:
                 n.epoch = -1
+        with self._mu:
+            self._ready_for = None  # nothing in flight sends or reads as the account after this
+        with self._mu:
+            if self.hub_url and self._native is n:
+                self._native = None  # the hub link closes below: a send waiting in it never goes
         if n is not None and n.alive():
             try:
                 n.call("logout", timeout=12)
             except NativeError:
                 pass
-        self.store.put("cursor", "")
+        if self.hub_url and n is not None:
+            n.close()
+        self.store.put(self._cursor_key(), "")
 
     # ---------------------------------------------------------------- the live link
 
@@ -549,9 +692,10 @@ class WeChatBackend(Backend):
         with self._mu:
             self._gen += 1
             gen = self._gen
+        me = self.me  # this listen's account: what it hands over is said to be its
         events = n.subscribe(gen)  # this listen's own queue: an older listen never takes its events
         try:
-            self._call(n, "listen", 10, cursor=self.store.get("cursor"), gen=gen)
+            self._call(n, "listen", 10, cursor=self.store.get(self._cursor_key()), gen=gen)
         except BackendError:
             n.unsubscribe(gen)
             raise
@@ -574,13 +718,19 @@ class WeChatBackend(Backend):
                     continue  # an older listen's last words (another account's, maybe): never ours to act on
                 kind = ev.get("event")
                 if kind == "message":
-                    if not self._on_event(ev, on_message):
+                    if not self._on_event(ev, on_message, me):
                         held = True
+                        if self.hub_url:
+                            # the hub's stream goes on in memory: listening again from the kept cursor brings it back
+                            # (kept, not handed over: it is handed over then; what came after it is caught up)
+                            raise BackendError("一条微信消息没交给 Persona，正在重新连接再交一次", "unreachable")
                 elif kind == "cursor":
                     if not held:
-                        self.store.put("cursor", str(ev.get("cursor") or ""))  # after the messages before it
+                        # after the messages before it
+                        self.store.put(self._cursor_key(), str(ev.get("cursor") or ""))
                 elif kind == "link":
-                    on_link("up" if ev.get("up") else "down", "" if ev.get("up") else "连接断开，正在重连")
+                    on_link("up" if ev.get("up") else "down",
+                            "" if ev.get("up") else str(ev.get("why") or "连接断开，正在重连"))
                     if ev.get("up"):
                         self._refresh_groups(full=self._groups_stale())
                 elif kind == "read":  # read on the phone or another device: handled up to then
@@ -606,7 +756,7 @@ class WeChatBackend(Backend):
                 except NativeError:
                     pass
 
-    def _on_event(self, ev: dict, on_message: OnMessage) -> bool:
+    def _on_event(self, ev: dict, on_message: OnMessage, me: str = "") -> bool:
         """Keep the message; give a live one to the core first (so a history read can't take it before /agent and
         自动代答 see it). False when the core could not take it."""
         mid, chat = str(ev.get("id") or ""), str(ev.get("chat") or "")
@@ -618,6 +768,12 @@ class WeChatBackend(Backend):
         seen = self.store.seen(mid)
         if inline and isinstance(ev.get("media"), dict) and seen is None:
             self.fetcher.keep_inline(mid, ev["media"], str(inline))
+        if ev.get("update") and seen is None:
+            return True  # a recall of a message never kept here
+        if me and self.store.get("account") not in ("", me):
+            return True  # read for another account than this store's now (signed in again meanwhile): not kept
+        if seen is not None and (ev.get("hub_id") or ev.get("update")):
+            self._renew(mid, ev, me)
         if seen is not None and seen[1]:
             return True  # kept already, and handed over when it was live
         if is_group(chat) and ev.get("type") != "SYSTEM":
@@ -627,7 +783,7 @@ class WeChatBackend(Backend):
                 log.info("WeChat group %s is back (a new message)", chat)
         new_group = is_group(chat) and self.store.chat(chat) is None
         try:
-            taken = self._keep_and_hand_over(ev, seen, on_message)
+            taken = self._keep_and_hand_over(ev, seen, on_message, me)
             if taken and isinstance(ev.get("media"), dict):
                 self.fetcher.want(mid, ev["media"])  # once the core has it: the new text reaches it as an update
             return taken
@@ -635,15 +791,42 @@ class WeChatBackend(Backend):
             if new_group:  # made or joined just now: kept by now, its name is read in the background
                 self._refresh_groups(full=False)
 
-    def _keep_and_hand_over(self, ev: dict, seen, on_message: OnMessage) -> bool:
+    def _renew(self, mid: str, ev: dict, me: str = "") -> None:
+        """A message kept already, seen again through AgentWechat: the hub's own id it was kept without (our send,
+        kept before its echo; one kept before the hub) so it can be quoted, or its new text (recalled)."""
+        got = self.store.message(mid)
+        if got is None:
+            return
+        old, pos = got
+        new = dict(old)
+        if ev.get("hub_id") and not old.get("hub_id"):
+            new["hub_id"] = str(ev["hub_id"])
+            om = old.get("media")
+            if isinstance(ev.get("media"), dict) and isinstance(om, dict) and not om.get("hub"):
+                new["media"] = ev["media"]  # kept from the program: fetched through the hub from now on
+                new["native_media"] = om  # and through the program again if the hub is left
+        if ev.get("update"):
+            new.update(type=ev.get("type") or old.get("type"), text=str(ev.get("text") or ""), quotable=False)
+            if new.pop("media", None) is not None:
+                self.fetcher.forget(mid)  # recalled: its picture or file is not served from here any more
+        if new == old:
+            return
+        self.store.replace(mid, new)
+        if ev.get("update") and (self.store.seen(mid) or (0, False))[1]:
+            try:
+                self._to_history([self._message(new, pos)], me)  # the core renews the text it keeps
+            except Exception:
+                log.exception("the core did not take a WeChat message's new text")
+
+    def _keep_and_hand_over(self, ev: dict, seen, on_message: OnMessage, me: str = "") -> bool:
         mid, chat = str(ev.get("id") or ""), str(ev.get("chat") or "")
         if seen is None and ev.get("origin") != "live":
             # caught up after a reconnect, or our own send's echo: history only, to the core too (a chat new while
             # the link was down reaches the inbox), never acted on
             new, pos = self.store.add_message(ev)
-            if new and self.on_history is not None:
+            if new and (self.on_history is not None or self.on_history_for is not None):
                 try:
-                    self.on_history([self._message(ev, pos)])
+                    self._to_history([self._message(ev, pos)], me)
                 except Exception:
                     log.exception("the core did not keep a caught-up WeChat message")
             return True
@@ -681,10 +864,22 @@ class WeChatBackend(Backend):
 
     # ---------------------------------------------------------------- reads
 
+    def _foreign_store(self) -> bool:
+        """This store holds another account than the core's (its own store's, or the one its saved sign-in names: a
+        switch cut half-way, data restored in part): nothing is read from it, by any entry (history, chats, search,
+        names, kinds, groups, done states, media), and nothing but a sign-in's own requests goes through a link."""
+        own = self.store.get("account")
+        theirs = {x for x in [self.core_account] + self._saved_ids() if x}
+        return bool(own and theirs and theirs != {own})
+
     def history(self, chat_id: str, before_position: Optional[int] = None, limit: int = 50) -> List[Message]:
+        if self._foreign_store():
+            return []
         return [self._message(ev, pos) for ev, pos in self.store.messages(chat_id, before_position, limit)]
 
     def recent_chats(self, limit: int) -> List[Chat]:
+        if self._foreign_store():
+            return []
         out = []
         for cid, name, members in self.store.chats(limit):
             out.append(Chat(id=cid, kind="group" if is_group(cid) else "dm", name=name,
@@ -692,12 +887,17 @@ class WeChatBackend(Backend):
         return out
 
     def search(self, query: str, limit: int = 20) -> List[Person]:
+        if self._foreign_store():
+            return []
         out = []
         for cid, name in self.store.search(query.strip(), limit):
             out.append(Person(kind="group" if is_group(cid) else "user", id=cid, name=name or cid))
         return out
 
     def chat_info(self, chat_id: str) -> Chat:
+        if self._foreign_store():
+            group = is_group(chat_id)
+            return Chat(id=chat_id, kind="group" if group else "dm", name="", peer_id="" if group else chat_id)
         row = self.store.chat(chat_id)
         age = time.time() - row[1] if row is not None else 0.0
         # no name yet: asked again after NAME_RETRY (not on every message); a name: renewed after NAME_TTL
@@ -833,6 +1033,8 @@ class WeChatBackend(Backend):
         return "%s|%s" % (chat_id if chat_id and is_group(chat_id) else "", user_id)
 
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
+        if self._foreign_store():
+            return ""
         if not user_id:
             return ""
         if user_id == self.me and self.me_name:
@@ -861,11 +1063,15 @@ class WeChatBackend(Backend):
         return (found[1] if found else "") or user_id
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        if self._foreign_store():
+            return {}
         """Kinds as known now, asking WeChat about direct chats' undescribed accounts; a failed request answers as
         the id looks (自动代答's check never fails on one)."""
         return self._kinds(user_ids, strict=False)
 
     def ask_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        if self._foreign_store():
+            raise BackendError(OTHER_ACCOUNT, "unreachable")
         """For the archive rule: the same, but a request that failed raises (the core then waits, it does not take
         the account as asked about)."""
         return self._kinds(user_ids, strict=True)
@@ -907,6 +1113,8 @@ class WeChatBackend(Backend):
                 log.exception("the core did not take a WeChat read")
 
     def chat_done_states(self, chat_ids: List[str]) -> Dict[str, Optional[float]]:
+        if self._foreign_store():
+            return {}
         """Done (its time) when the chat was read on the phone after the last message from someone else; None only
         when a read is known and a message came after it. A chat with no read seen here is left out: not knowing is
         not "not done" (a None would undo the user's own 恢复 on the WeChat page)."""
@@ -923,11 +1131,15 @@ class WeChatBackend(Backend):
             last = self.store.last_incoming(cid, at_me=is_group(cid))
             if not last:
                 continue
-            # the same second cannot tell which came first: then it still needs the user
-            out[cid] = float(read) if read > last else None
+            # the same second cannot tell which came first: then it still needs the user. AgentWechat's read names
+            # the last message it covered (its time, inclusive)
+            covered = read > last or (bool(self.hub_url) and read == last)
+            out[cid] = float(read) if covered else None
         return out
 
     def group_candidates(self, limit: int) -> List[Chat]:
+        if self._foreign_store():
+            return []
         """Every group known here: the contacts' groups and every group with a message, from the local cache."""
         out = []
         for gid, name, members in self.store.groups(limit):
@@ -1061,16 +1273,23 @@ class WeChatBackend(Backend):
         if not (self.store.seen(mid) or (0, False))[1]:
             return  # not handed over yet: the hand-over reads the new text itself
         try:
-            self.on_history([self._message(ev, pos)])
+            self._to_history([self._message(ev, pos)], self.store.get("account"))
         except Exception:
             log.exception("the core did not take a WeChat message's new text")
+
+    def _media_of(self, ev: dict) -> Any:
+        """The media description to fetch with: the hub's through the hub, the program's without it."""
+        m = ev.get("media")
+        if not self.hub_url and isinstance(m, dict) and m.get("hub") and isinstance(ev.get("native_media"), dict):
+            return ev["native_media"]
+        return m
 
     def _media_upkeep(self) -> None:
         """At each connect: fetches left half-done by a restart go on; local copies past their days go (once a day)."""
         for mid in self.fetcher.pending():
             got = self.store.message(mid)
-            if got is not None and isinstance(got[0].get("media"), dict):
-                self.fetcher.want(mid, got[0]["media"], force=True)
+            if got is not None and isinstance(self._media_of(got[0]), dict):
+                self.fetcher.want(mid, self._media_of(got[0]), force=True)
         self._media_prune_due()
 
     def _media_prune_due(self) -> None:
@@ -1080,13 +1299,15 @@ class WeChatBackend(Backend):
                 self._media_fetched(mid)
 
     def fetch_media(self, mid: str, again: bool = False, wait: float = 200.0) -> Tuple[dict, Optional[dict], str]:
+        if self._foreign_store():
+            raise BackendError(OTHER_ACCOUNT, "not_found")
         """(the kept event, the fetch state, the message's text) of a message, fetching its media first when that has
         not been done (or again). BackendError(not_found) for a message not kept here."""
         got = self.store.message(mid)
         if got is None:
             raise BackendError("这里没有这条微信消息：%s" % mid, "not_found")
         ev, pos = got
-        m = ev.get("media")
+        m = self._media_of(ev)
         if isinstance(m, dict) and m.get("kind") in wm.KINDS:
             st = self.fetcher.state(mid)
             if st is None or again or st["state"] == "pending":
@@ -1139,6 +1360,8 @@ class WeChatBackend(Backend):
         raises SendRejected."""
         if not text.strip():
             raise SendRejected("消息内容是空的")
+        with self._auth_mu:
+            epoch, me = self._auth_epoch, self.me  # the sign-in this send belongs to
         params: Dict[str, Any] = {"chat": chat_id, "text": text, "key": "om-" + uuid.uuid4().hex}
         got = self.store.message(reply_to) if reply_to else None
         if got is not None and got[0].get("chat") == chat_id:
@@ -1148,63 +1371,107 @@ class WeChatBackend(Backend):
             name = ""
             if is_group(chat_id) and sender and not mine:
                 name = self._mention_name(sender, chat_id)  # their group nickname, shown in the quote too
-                if mention and (chat_id.endswith("@chatroom") or not ev.get("quotable")):
+                if mention and (chat_id.endswith("@chatroom") or (not ev.get("quotable") and not self.hub_url)):
                     params["mentions"] = [{"id": sender, "name": name}]  # answering someone in a group: @ them
-            if ev.get("quotable"):  # a text message: quoted (anything else gets the plain answer)
+            wecom_hub = bool(self.hub_url) and is_group(chat_id) and not chat_id.endswith("@chatroom")
+            if ev.get("quotable") and not wecom_hub:  # a text message: quoted (anything else gets the plain answer)
                 params["quote"] = {"server_id": str(ev.get("id")), "sender": sender, "outgoing": mine,
                                    "display_name": name or (self.me_name if mine else sender),
                                    "content": str(ev.get("content") or ""), "created_at": int(ev.get("at") or 0),
                                    "msgsource": str(ev.get("msgsource") or "")}
+                if ev.get("hub_id"):
+                    params["quote"]["hub_id"] = str(ev["hub_id"])  # AgentWechat quotes by its own id too
+                if ev.get("envelope"):
+                    params["quote"]["envelope"] = True
         try:
             n = self._link()
         except BackendError as e:
             raise SendRejected("微信组件没准备好，没有发送：%s" % e.message)
+        if self.hub_url and self._ready_for is not n:
+            # AgentWechat's account was not taken (not yet, or another one is signed in there): nothing goes out
+            raise SendRejected("AgentWechat 的微信号还没确认，没有发送")
+        unsure = ""
+        with self._auth_mu:
+            if self._signed_out or self._auth_epoch != epoch or self.me != me:
+                raise SendRejected("登录状态变了（退出或换了账号），没有发送")
+            if self.hub_url:  # kept before it goes, in this account's store: an echo after a crash is still ours
+                unsure = "hub_unsure:" + params["key"]
+                self.store.put(unsure, json.dumps({"chat": chat_id, "at": time.time()}, ensure_ascii=False))
         try:
             r = n.call("send", timeout=SEND_WAIT, **params)
         except NativeGone as e:
             raise BackendError("发送结果不确定（%s），不会自动重发" % e.message, "unknown")
         except NativeError as e:
+            if unsure:
+                self.store.drop(unsure)
             raise SendRejected("没有发送：%s" % e.message)  # refused before anything was transmitted
         status = r.get("status")
+        if unsure and status in ("rejected", "not_sent"):
+            self.store.drop(unsure)  # surely not sent
         if status == "sent":
             mid = str(r.get("message_id") or "")
-            try:
-                self._keep_own_send(chat_id, mid, text, params, int(r.get("created_at") or 0), notice)
-            except Exception:
-                log.exception("a sent WeChat message could not be kept here (it went out)")
+            with self._auth_mu:  # checked and kept in one go: a sign-out or account switch waits for it
+                if self._signed_out or self._auth_epoch != epoch or self.me != me:
+                    log.info("a WeChat send went out as the account signed in before: not kept under this one")
+                    return mid
+                try:
+                    self._keep_own_send(chat_id, mid, text, params, int(r.get("created_at") or 0), notice,
+                                        str(r.get("hub_id") or ""), quoted=r.get("quoted", True) is not False,
+                                        mentioned=r.get("mentioned", True) is not False, me=me)
+                    if unsure and mid:
+                        self.store.drop(unsure)  # kept by its id now: its echo is told by that
+                except Exception:
+                    log.exception("a sent WeChat message could not be kept here (it went out)")
             return mid
         if status in ("rejected", "not_sent"):
             raise SendRejected(str(r.get("message") or "微信没有接受这条消息"))
         raise BackendError("发送结果不确定：%s；不会自动重发" % (r.get("message") or "微信没有确认"), "unknown")
 
     def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any], sent_at: int = 0,
-                       notice: bool = False) -> None:
+                       notice: bool = False, hub_id: str = "", quoted: bool = True, mentioned: bool = True,
+                       me: Optional[str] = None) -> None:
         """WeChat does not echo this device's sends back: keep the sent message, and give it to the core as history
         (the inbox sees the reply, the conversation page and the knowledge base have it). Never acted on."""
         if not mid:
             return
-        names = [m.get("name") for m in params.get("mentions") or [] if m.get("name")]
+        names = [m.get("name") for m in params.get("mentions") or [] if m.get("name")] if mentioned else []
         shown = "".join("@%s\u2005" % n for n in names) + text
         ev = {"event": "message", "origin": "local_send", "id": mid, "chat": chat_id, "group": is_group(chat_id),
               # the ack line ("处理中") is a notice: shown in the chat, never an answer (the 需要我 it was for stays
               # until a real one) and never archived
-              "sender": self.me, "mine": True, "type": "SYSTEM" if notice else "TEXT", "text": shown,
+              "sender": self.me if me is None else me, "mine": True, "type": "SYSTEM" if notice else "TEXT",
+              "text": shown,
               "at": sent_at or int(time.time()),
-              "parent": str((params.get("quote") or {}).get("server_id") or ""),
+              "parent": str((params.get("quote") or {}).get("server_id") or "") if quoted else "",
               # plain text can be quoted as such; a quote reply went out as WeChat's quote message, not as text
-              "quotable": not params.get("quote"), "content": shown, "msgsource": ""}
+              "quotable": not (params.get("quote") and quoted), "content": shown, "msgsource": ""}
+        if hub_id:
+            ev["hub_id"] = hub_id
         new, pos = self.store.add_message(ev)
+        owner = self.me if me is None else me
+        if not new and notice:
+            # its echo came first (through AgentWechat) and was kept as text: the notice it is
+            got = self.store.message(mid)
+            if got is not None and got[0].get("type") != "SYSTEM":
+                self.store.replace(mid, dict(got[0], type="SYSTEM"))
         if new and self.on_history is not None:
             msg = self._message(ev, pos)
-            threading.Thread(target=self._history_to_core, args=([msg],), name="matewechat-own-send",
+            threading.Thread(target=self._history_to_core, args=([msg], owner), name="matewechat-own-send",
                              daemon=True).start()
 
-    def _history_to_core(self, msgs: List[Message]) -> None:
+    def _history_to_core(self, msgs: List[Message], owner: str = "") -> None:
         try:
-            if self.on_history is not None:
-                self.on_history(msgs)
+            self._to_history(msgs, owner)
         except Exception:
             log.exception("the core did not keep a sent WeChat message")
+
+    def _to_history(self, msgs: List[Message], owner: str = "") -> None:
+        """History for the core, said whose (the core drops it when another account is signed in by then)."""
+        cb = self.on_history_for
+        if cb is not None and owner:
+            cb(msgs, owner)
+        elif self.on_history is not None:
+            self.on_history(msgs)
 
     def create_chat(self, user_id: str) -> str:
         if not user_id or is_group(user_id):
