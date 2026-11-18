@@ -267,6 +267,32 @@ class MediaTest(Base):
         self.assertEqual(f.state(gone[0])["state"], "gone")
 
 
+    def test_a_video_fetched_again_with_only_its_cover_keeps_the_video(self):
+        small = {"kind": "video", "aes_key": KEY, "url": "VID", "thumb": "TH", "size": 2048, "seconds": 9}
+        b, _, _ = self.run_events([media_msg("v2", "VIDEO", small)],
+                                  lambda g, k: any("视频：" in t for t in self.texts(k, "v2")))
+        f = b.fetcher
+        old = f.state("v2")["files"]
+        f.fetch = lambda mid, media: ({"cover": old["cover"]}, "视频没能下载：网络")
+        f.want("v2", small, force=True)
+        f.wait("v2", 5)
+        self.assertEqual(f.state("v2")["files"].get("video"), old["video"], "the video from before stays")
+        self.assertEqual(b.media("wx:v2", 1 << 20)[0], "video/mp4")
+
+    def test_room_is_never_made_from_a_message_being_fetched(self):
+        b, _, _ = self.run_events([media_msg("r1", "IMAGE", image()), media_msg("r2", "IMAGE", image())],
+                                  lambda g, k: all(any("本地文件" in t for t in self.texts(k, m)) for m in ("r1", "r2")))
+        f = b.fetcher
+        with f._cv:
+            f._busy.update({"r1", "r2"})
+        f._room_at = 0.0
+        self.assertEqual(f.make_room(most=1), [], "both busy: nothing removed")
+        with f._cv:
+            f._busy.difference_update({"r1", "r2"})
+        f._room_at = 0.0
+        self.assertEqual(sorted(f.make_room(most=1)), ["r1", "r2"])
+
+
 class RecordTextTest(unittest.TestCase):
     def test_long_records_are_cut(self):
         items = [{"type": "1", "who": "A", "text": "x" * 10} for _ in range(wm.RECORD_LINES + 5)]

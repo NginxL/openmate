@@ -39,6 +39,7 @@ MOST = 25 * 1024 * 1024  # one ordinary CDN transfer (matewechat-native's limit 
 MEDIA_KEEP_DAYS = 30
 MEDIA_TOTAL_MOST = 2 << 30  # the local copies together: beyond it the oldest go first (checked before each fetch)
 ROOM_EVERY = 60.0  # how often the total is measured
+MEDIA_WAIT = 900.0  # one CDN transfer may take this long (25 MB on a slow line; it waits for a free slot too)
 VOICE_TEXT_WAIT = 120.0
 FRAME_WAIT = 30.0
 RECORD_LINES = 60
@@ -330,20 +331,27 @@ class Fetcher:
                 for gone in self.make_room():
                     self._tell(gone)
                 files, note = self.fetch(mid, media)
+                # the check and the write under one lock: reset() (before the wipe of another account) waits for it
                 with self._cv:
                     stale = epoch != self._epoch
+                    if not stale:
+                        # what this fetch got, over what is still on disk from before (a cover fetched again while
+                        # the video failed keeps the video)
+                        kept = self._still_there(before.get("files"))
+                        if files or kept:
+                            merged = dict(kept)
+                            merged.update(files)
+                            self._set(mid, "done", merged, note if files else "")  # kept from before: no reason
+                        else:
+                            self._set(mid, "failed", {}, note)
                 if stale:
                     self._remove(mid, files)  # another account signed in meanwhile: nothing of this one's kept
-                else:
-                    if not files and self._present(before.get("files")):
-                        files, note = before["files"], ""  # a fetch again that failed keeps the copy from before
-                    self._set(mid, "done" if files else "failed", files, note)
             except Exception as e:  # noqa: BLE001
                 log.exception("fetching a WeChat message's media failed")
                 with self._cv:
                     stale = epoch != self._epoch
-                if not stale:
-                    self._set(mid, "failed", {}, "下载出错：%s" % type(e).__name__)
+                    if not stale and not self._still_there((before or {}).get("files")):
+                        self._set(mid, "failed", {}, "下载出错：%s" % type(e).__name__)  # a copy from before stays
             finally:
                 with self._cv:
                     self._busy.discard(mid)
@@ -358,9 +366,19 @@ class Fetcher:
         except Exception:
             log.exception("the new text of a WeChat media message could not be passed on")
 
-    def _present(self, files: Any) -> bool:
-        return isinstance(files, dict) and any(
-            isinstance(p, str) and p.startswith(self.root + os.sep) and os.path.isfile(p) for p in files.values())
+    def _still_there(self, files: Any) -> dict:
+        """The entries of a files record whose copies are still on disk (frames: the ones still there)."""
+        out: dict = {}
+        if not isinstance(files, dict):
+            return out
+        for k, p in files.items():
+            if isinstance(p, str) and p.startswith(self.root + os.sep) and os.path.isfile(p):
+                out[k] = p
+            elif isinstance(p, list):
+                there = [x for x in p if isinstance(x, str) and x.startswith(self.root + os.sep) and os.path.isfile(x)]
+                if there:
+                    out[k] = there
+        return out
 
     # ---- one message
 
@@ -375,7 +393,7 @@ class Fetcher:
         if isinstance(md5, str) and md5:
             params["md5"] = md5
         try:
-            self._call("media", 240, **params)
+            self._call("media", MEDIA_WAIT, **params)
             return True, ""
         except Exception as e:  # noqa: BLE001
             return False, reason(e)
@@ -555,22 +573,26 @@ class Fetcher:
 
     # ---- local copies age out
 
-    def _remove(self, mid: str, files: Any) -> None:
-        """This message's local copies off the disk (only under root)."""
+    def _remove(self, mid: str, files: Any) -> int:
+        """This message's local copies off the disk (only under root); the bytes freed."""
         paths = files if isinstance(files, dict) else {}
-        for k in ("image", "audio", "cover", "video", "file"):
-            p = paths.get(k)
-            if isinstance(p, str) and p.startswith(self.root + os.sep) and os.path.isfile(p):
-                os.remove(p)
-        for p in paths.get("frames") or []:
-            if isinstance(p, str) and p.startswith(self.root + os.sep) and os.path.isfile(p):
-                os.remove(p)
+        doomed = [paths.get(k) for k in ("image", "audio", "cover", "video", "file")]
+        doomed += list(paths.get("frames") or [])
+        doomed += [self.path(mid, "-inline.jpg"), self.path(mid, "-inline.png")]
         folder = self.path(mid, "")
         if os.path.isdir(folder):
+            doomed += [os.path.join(top, n) for top, _, names in os.walk(folder) for n in names]
+        freed = 0
+        for p in dict.fromkeys(x for x in doomed if isinstance(x, str)):
+            if p.startswith(self.root + os.sep) and os.path.isfile(p):
+                try:
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+                except OSError:
+                    pass
+        if os.path.isdir(folder):
             shutil.rmtree(folder, ignore_errors=True)
-        for leftover in (self.path(mid, "-inline.jpg"), self.path(mid, "-inline.png")):
-            if os.path.isfile(leftover):
-                os.remove(leftover)
+        return freed
 
     def _drop(self, rows: List[Tuple[str, str]]) -> List[str]:
         gone = []
@@ -609,17 +631,18 @@ class Fetcher:
         if over <= 0:
             return []
         gone: List[str] = []
-        for mid, files in self._db("SELECT id, files FROM media WHERE state='done' ORDER BY at", (), True):
+        for mid, _ in self._db("SELECT id, files FROM media WHERE state='done' ORDER BY at", (), True):
             if over <= 0:
                 break
-            try:
-                paths = json.loads(files or "{}")
-            except ValueError:
-                paths = {}
-            size = sum(os.path.getsize(p) for p in paths.values()
-                       if isinstance(p, str) and p.startswith(self.root + os.sep) and os.path.isfile(p))
-            gone += self._drop([(mid, files)])
-            over -= size
+            with self._cv:  # never one being fetched or waiting to be: its new copies are not old ones
+                if mid in self._busy or any(q[0] == mid for q in self._queue):
+                    continue
+                st = self.state(mid)  # read again: what the row says now
+                if not st or st["state"] != "done":
+                    continue
+                over -= self._remove(mid, st["files"])
+                self._set(mid, "gone", {}, "")
+            gone.append(mid)
         if gone:
             log.info("WeChat media: %d old local copies removed to stay under %d MB", len(gone), most >> 20)
         return gone

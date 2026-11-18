@@ -1012,20 +1012,16 @@ fn op_media(app: &App, p: &Value) -> Result<Value> {
             let d = descriptor.clone();
             // a slot is held by the download itself until it really ends (a timed-out one goes on underneath):
             // never more than MEDIA_SLOTS transfers at once
-            let got = app.rt.block_on(async {
-                tokio::time::timeout(
-                    Duration::from_secs(110),
-                    tokio::task::spawn_blocking(move || {
-                        let _slot = media_slot();
-                        cdn.download(&d)
-                    }),
-                )
-                .await
-            });
+            // no overall timeout: a slow transfer of a big file may take minutes (the backend waits that long), a
+            // dead connection ends with the CDN client's own per-request timeout; either way the slot is held until
+            // the transfer really ends, and a small file waits for a slot instead of failing
+            let got = app.rt.block_on(tokio::task::spawn_blocking(move || {
+                let _slot = media_slot();
+                cdn.download(&d)
+            }));
             match got {
-                Ok(Ok(r)) => r,
-                Ok(Err(_)) => Err(anyhow!("download stopped")),
-                Err(_) => Err(err("network", "下载超时")),
+                Ok(r) => r,
+                Err(_) => Err(anyhow!("download stopped")),
             }
         })();
         match attempt {
