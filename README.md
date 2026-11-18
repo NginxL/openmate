@@ -1,6 +1,6 @@
 # OpenMate
 
-OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认。有三种回复不再逐条确认，但每一条都会记进 Persona 的“以你身份发出的消息”记录：你自己发起的 `/agent` 请求的回复；你勾选的群里有人真正 @ 你时的自动代答；飞书文档评论里 @ 你时的文档代答（默认关闭，要单独打开）。
+OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认。有三种回复不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（发出后扩展立刻退出等少数情况下，可能缺记一条）：你自己发起的 `/agent` 请求的回复；你勾选的群里有人真正 @ 你时的自动代答；飞书文档评论里 @ 你时的文档代答（默认关闭，要单独打开）。
 
 第一个扩展是**飞书**（`openmate-feishu`）。第二个是**微信**（`openmate-wechat`，一期做 `/agent`、群里自动代答和收图片等媒体，见下文）。钉钉以后再做。
 
@@ -102,10 +102,10 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 - **与飞书 / Lark 官方无关。** OpenMate 是独立的开源项目，不是飞书或 Lark 的产品，也没有得到它们的认可；图标是本项目自己画的。
 - **不分发 LarkAgentX。** 本仓库和发布包里都不包含 LarkAgentX，需要你自己安装并遵守它的条款。
 - **微信扩展用的也是非官方协议。** 它以一台新电脑的身份登录你的微信：你已登录的电脑版微信可能会下线；账号被限制的可能无法排除，请自己判断。与腾讯官方无关，“微信”是腾讯的商标。
-- 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。下面三种回复不再逐条确认，每一条都记进 Persona 的“以你身份发出的消息”记录：
+- 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。下面三种回复不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（极少数情况下可能缺记一条）：
   - `/agent`：只响应你自己发的消息；
   - 群里自动代答：只在你勾选的群、有人真正 @ 你时，用访客会话（读不到你的私人知识库）回复，每群每天有上限；
-  - 文档代答：飞书文档评论里 @ 你时回复，默认关闭，要在设置里单独打开；只有 lark-cli 登录的就是这个飞书账号时才会发。
+  - 文档代答：飞书文档评论里 @ 你时回复，默认关闭，要在设置里单独打开；它经 lark-cli 发出，发之前核对 lark-cli 登录的账号和飞书登录的账号同名（目前只能比对显示名，同名的另一个账号拦不住）。
 
 ## 开发
 
@@ -130,10 +130,12 @@ tests/                         用假的平台后端和假的 hub 驱动完整�
 OpenMate is a set of open-source (MIT) [Persona](https://github.com/nwverse/persona) extensions that bridge chat apps
 into Persona: direct and group messages flow into the Inbox and knowledge base, and Persona's assistant and Agents can
 answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first. Three kinds
-of reply go out unconfirmed, each recorded in Persona's sent-as-user ledger (the connector declares `sends_as_user`):
+of reply go out unconfirmed, and are recorded in Persona's sent-as-user ledger after they go (one can be missing when
+the extension exits right after sending; the connector declares `sends_as_user`):
 the replies to your own `/agent` requests; the automatic answers when someone really @-mentions you in a group you
 marked (a guest conversation, capped per group and day); and, off unless you turn it on, the answers to a Feishu
-document comment that @-mentions you (only while lark-cli is signed in as this very account). The first extension is Feishu / Lark (`openmate-feishu`, connector
+document comment that @-mentions you (through lark-cli, only while lark-cli's account has the same display name: another account of the same name
+is not told apart yet). The first extension is Feishu / Lark (`openmate-feishu`, connector
 `matefeishu`); the second is WeChat (`openmate-wechat`, connector `matewechat`: phase one is `/agent`, answering
 real @-mentions in the groups you mark, and pictures, voice notes, videos, files and forwarded chat records fetched
 into local files the assistant can read, over this repository's `native/matewechat-native`, built on thisnick/agent-wechat's

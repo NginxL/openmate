@@ -205,6 +205,9 @@ def published_changed(ref: str, out: str) -> list:
             continue
         before = subprocess.run(["git", "-C", ROOT, "show", "%s:%s" % (ref, rel)], capture_output=True).stdout
         path = os.path.join(out, rel)
+        if os.path.islink(path):
+            problems.append("%s was published (%s) and is now a link: published packages stay files" % (rel, ref))
+            continue
         if not os.path.exists(path):
             problems.append("%s was published (%s) and is gone: published packages stay" % (rel, ref))
             continue
@@ -222,6 +225,8 @@ def main(argv):
     ap.add_argument("--published", metavar="REF", default="",
                     help="with --check: also fail when a package that git REF has (published) was changed or removed")
     args = ap.parse_args(argv)
+    if args.published:
+        args.check = True  # never writes: it only checks
     try:
         problems = run(os.path.abspath(args.out), check=args.check, allow_replace=args.allow_replace)
         if args.published:

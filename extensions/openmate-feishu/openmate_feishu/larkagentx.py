@@ -58,7 +58,7 @@ MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 RENDER_VERSION = "8"  # 7: a text whose content is empty takes the links of its preview hang points; 8: DLP marks
 DLP_IN_PROGRESS, DLP_BLOCK = (1, "IN_PROGRESS"), (3, "BLOCK")  # Message.ContentState.dlpReviewState
 DLP_BLOCKED_TEXT = "[飞书的安全策略拦下了这条消息，内容看不到]"
-REFILL_AFTER = (600.0, 3600.0, 6 * 3600.0)  # a text held for review is read again after these
+REFILL_AFTER = (600.0, 3000.0, 18000.0)  # a text held for review: read again 10 min, 1 h and 6 h after it came
 RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
@@ -453,6 +453,9 @@ class LarkXBackend(Backend):
     heartbeat = 30.0
 
     def __init__(self, lx: types.SimpleNamespace, region: str):
+        self._closing_ev = threading.Event()  # set by close(): every later re-read ends
+        self._refill_gen = 0  # moved on by a logout: a re-read of the account before hands nothing over
+        self._refilling: Set[str] = set()  # message ids with a re-read under way (one each)
         self.lx = lx
         self.region_name = region
         self.region = lx.region.get_region(region)
@@ -681,6 +684,7 @@ class LarkXBackend(Backend):
 
     def logout(self) -> None:
         with self._lock:
+            self._refill_gen += 1  # the re-reads under way are this account's: they hand nothing over now
             old = self._client
             self._auth = self._client = self._me = self._creds = None
             self._own = None
@@ -694,7 +698,7 @@ class LarkXBackend(Backend):
             self._close_client(old)
 
     def close(self) -> None:
-        self._closed_event().set()  # the later re-reads of texts held for review stop
+        self._closing_ev.set()  # the later re-reads of texts held for review stop
         self.logout()
 
     # ------------------------------------------------------------ the live link
@@ -1121,6 +1125,10 @@ class LarkXBackend(Backend):
                 failed = failed or self._net(e, "读取表情回应")
                 out.unasked.update(part)
                 continue
+            if _packet_only(resp, ("messageReactions", "selfReactionStatus", "reactions")):
+                failed = failed or BackendError("飞书没有给出表情回应", "unreachable")
+                out.unasked.update(part)  # a status alone: these stay unknown
+                continue
             answered = True
             out.update(reacted_by(resp, me.id, set(part), ignore))
         if failed is not None and not answered:
@@ -1514,47 +1522,64 @@ class LarkXBackend(Backend):
             ent = entities.get(m.id)
             if ent is None:
                 continue
+            dlp = dlp_state(ent)  # first: a text Feishu holds is never shown through its preview links either
+            if dlp in DLP_BLOCK:
+                m.text = DLP_BLOCKED_TEXT  # Feishu's data-loss policy keeps it from this client: said, never worked around
+                note_flags(m.type, entity_flags(ent))
+                continue
+            if dlp in DLP_IN_PROGRESS:
+                m.review = True  # held for review: left empty, read again later
+                note_flags(m.type, entity_flags(ent))
+                continue
             links = hang_links(ent)
             if links:
                 m.text = " ".join(links)
-                continue
-            dlp = dlp_state(ent)
-            if dlp in DLP_BLOCK:
-                m.text = DLP_BLOCKED_TEXT  # Feishu's data-loss policy keeps it from this client: said, never worked around
-            elif dlp in DLP_IN_PROGRESS:
-                m.review = True  # held for review: left empty, read again later
-            note_flags(m.type, entity_flags(ent))
+            else:
+                note_flags(m.type, entity_flags(ent))
 
     def _refill_later(self, msg: Message) -> None:
         """A pushed text read as nothing: its entity read again in the background, handed to the core as history (the
-        stored row then takes the text); one Feishu holds for review is read again later (REFILL_AFTER)."""
+        stored row then takes the text); one Feishu holds for review is read again 10 min, 1 h and 6 h after it came.
+        One re-read per message; a logout or close ends it, and a re-read of an account signed out hands nothing over."""
         cb = self.on_history
         if cb is None:
             return
+        with self._lock:
+            if msg.id in self._refilling or len(self._refilling) > 500:
+                return
+            self._refilling.add(msg.id)
+            gen = self._refill_gen
+        started = time.monotonic()
+
+        def mine() -> bool:
+            with self._lock:
+                return gen == self._refill_gen and self._me is not None
 
         def run():
-            for delay in (0.0,) + REFILL_AFTER:
-                if delay and self._closed_event().wait(delay):
-                    return
-                try:
-                    got = [m for m in self.history(msg.chat_id, msg.position + 1, 1) if m.id == msg.id]
-                except Exception as e:
-                    log.info("a pushed message read as nothing was not read again (%s)", type(e).__name__)
-                    return
-                filled = [m for m in got if (m.text or "").strip()]
-                if filled:
-                    cb(filled)
-                    return
-                if not any(getattr(m, "review", False) for m in got):
-                    return  # nothing more to wait for
+            try:
+                for at in (0.0,) + REFILL_AFTER:
+                    left = at - (time.monotonic() - started)
+                    if left > 0 and self._closing_ev.wait(left):
+                        return
+                    if not mine():
+                        return
+                    try:
+                        got = [m for m in self.history(msg.chat_id, msg.position + 1, 1) if m.id == msg.id]
+                    except Exception as e:  # a network failure: the next time comes as planned
+                        log.info("a pushed message read as nothing was not read again (%s)", type(e).__name__)
+                        continue
+                    filled = [m for m in got if (m.text or "").strip()]
+                    if filled:
+                        if mine():
+                            cb(filled)
+                        return
+                    if got and not any(getattr(m, "review", False) for m in got):
+                        return  # read, and nothing held: nothing more to wait for
+            finally:
+                with self._lock:
+                    self._refilling.discard(msg.id)
 
         threading.Thread(target=run, name="openmate-larkx-refill", daemon=True).start()
-
-    def _closed_event(self) -> threading.Event:
-        ev = getattr(self, "_closing_ev", None)
-        if ev is None:
-            ev = self._closing_ev = threading.Event()
-        return ev
 
     def _chat_raw(self, client, chat_id: str) -> dict:
         try:

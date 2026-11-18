@@ -52,6 +52,7 @@ _SCHEMA = [
         UNIQUE (chat_id, id))""",
     "CREATE INDEX IF NOT EXISTS messages_chat_position ON messages (chat_id, position)",
     "CREATE INDEX IF NOT EXISTS messages_chat_root ON messages (chat_id, root_id)",
+    "CREATE INDEX IF NOT EXISTS messages_chat_root_pos ON messages (chat_id, root_id, position, seq)",
     "CREATE INDEX IF NOT EXISTS messages_id ON messages (id)",
     # the account's own lines and the @me it got, per chat: 需要我 finds the last of each without a scan
     "CREATE INDEX IF NOT EXISTS messages_chat_mine ON messages (chat_id, position, seq) WHERE mine = 1",
@@ -483,12 +484,13 @@ class Store:
 
     def thread_messages(self, chat_id: str, root_id: str, limit: int) -> List[dict]:
         """The thread rooted at root_id (its root first), the newest limit messages, oldest first."""
-        rows = self._all(
+        rows = self._all(  # the newest replies through their index (limited there), then the root by id
             "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE seq IN ("
-            "SELECT seq FROM messages WHERE chat_id = ? AND root_id = ? "
+            "SELECT seq FROM (SELECT seq FROM messages INDEXED BY messages_chat_root_pos WHERE chat_id = ? "
+            "AND root_id = ? ORDER BY position DESC, seq DESC LIMIT ?) "
             "UNION SELECT seq FROM messages WHERE chat_id = ? AND id = ?) "
             "ORDER BY position DESC, seq DESC LIMIT ?",
-            (chat_id, root_id, chat_id, root_id, limit),
+            (chat_id, root_id, limit, chat_id, root_id, limit),
         )
         return [_message_row(r) for r in reversed(rows)]
 

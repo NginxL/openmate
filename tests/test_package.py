@@ -122,7 +122,9 @@ class PackageTest(unittest.TestCase):
         data = os.path.join(inst, "data")
         env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENMATE_", "PERSONA_"))}
         env.update(OPENMATE_BACKEND="fixture", PERSONA_EXTENSION_DATA=data)
-        p = subprocess.Popen([sys.executable, os.path.join(inst, "bin", ext)], stdin=subprocess.PIPE,
+        with open(os.path.join(inst, "persona-extension.json"), encoding="utf-8") as f:
+            command = json.load(f)["runtime"]["command"]  # started as the host starts it: the file itself
+        p = subprocess.Popen([os.path.join(inst, command)], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=inst)
         hub = StdioHub(p.stdout, p.stdin)
         try:

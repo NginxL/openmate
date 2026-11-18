@@ -207,9 +207,12 @@ class Fresh:
     def get(self, wait: Optional[float] = None) -> Any:
         """The value. With wait, a read that has to be waited for is waited for that long at most (the page has 20
         seconds in all): NotYet when it is still on its way (it goes on in the background), its error when it failed."""
+        self._looked = self.clock()  # someone looks (a draw, a tool): the warm loop keeps reading
+        return self._get(wait)
+
+    def _get(self, wait: Optional[float] = None) -> Any:
         k = self.key()
         again = False
-        self._looked = self.clock()
         with self._mu:
             if self._usable(k, self.ahead):
                 return self._kept[2]
@@ -308,27 +311,29 @@ class Fresh:
         """Read now in the background, so that the first draw does not wait; with every, keep reading that often (a
         page opened after a long while then shows a read at most that old, and does not wait either). One loop per
         value however many pages ask; while nobody has looked for WARM_IDLE it rests (a draw then reads, bounded)."""
+        owner = False
         with self._mu:
             if every and self._warming:
                 return
             if every:
-                self._warming = True
+                self._warming = owner = True  # this loop owns the flag; a one-off warm never clears it
 
         def run():
             first = True
             while True:
+                if stop is not None and stop.is_set():
+                    break
                 if first or self.clock() - self._looked < WARM_IDLE:
-                    looked = self._looked
                     try:
-                        self.get()
+                        self._get()  # its own read is not someone looking
                     except Exception as e:
                         log.debug("%s: a read failed (%s)", self.name, e.__class__.__name__)
-                    self._looked = looked  # its own read is not someone looking
                 first = False
                 if not every or (stop.wait(every) if stop is not None else time.sleep(every)):
-                    with self._mu:
-                        self._warming = False
-                    return
+                    break
+            if owner:
+                with self._mu:
+                    self._warming = False
 
         self.spawn(run)
 

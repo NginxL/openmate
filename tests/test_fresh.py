@@ -146,6 +146,50 @@ class FreshTest(unittest.TestCase):
         self.assertEqual(calls, [p, q])
 
 
+class WarmOwnerTest(unittest.TestCase):
+    def test_a_stopped_warm_does_not_read_and_a_one_off_keeps_the_loop(self):
+        src = Source()
+        f = Fresh(src, ahead=0, stale=900, clock=lambda: 1000.0, spawn=lambda fn: threading.Thread(target=fn, daemon=True).start())
+        stop = threading.Event()
+        stop.set()
+        f.warm(every=0.02, stop=stop)
+        time.sleep(0.1)
+        self.assertEqual(src.n, 0, "stopped already: no read")
+        live = threading.Event()
+        self.addCleanup(live.set)
+        f.warm(every=0.02, stop=live)  # a loop
+        wait_until(lambda: src.n >= 1, what="the loop reads")
+        f.warm()  # a one-off ends and must not free the loop's place
+        time.sleep(0.1)
+        self.assertTrue(f._warming)
+        spawned = []
+        f.spawn = lambda fn: spawned.append(fn)
+        f.warm(every=0.02, stop=live)
+        self.assertEqual(spawned, [], "no second loop")
+
+    def test_a_draw_during_the_warm_read_counts_as_looking(self):
+        from openmate_core import ui as ui_mod
+
+        now = [5000.0]
+        gate = threading.Event()
+
+        def read():
+            gate.wait(2)
+            return "v"
+
+        f = Fresh(read, ahead=0, stale=900, clock=lambda: now[0], spawn=lambda fn: threading.Thread(target=fn, daemon=True).start())
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        f.warm(every=60.0, stop=stop)  # its first read waits at the gate
+        time.sleep(0.05)
+        now[0] += ui_mod.WARM_IDLE + 10
+        threading.Thread(target=lambda: f.get(wait=0.01), daemon=True).start()  # someone looks meanwhile
+        time.sleep(0.05)
+        gate.set()
+        time.sleep(0.1)
+        self.assertGreaterEqual(f._looked, now[0], "the draw's look is not undone by the warm read")
+
+
 class BoundedWaitTest(unittest.TestCase):
     def test_a_first_read_is_waited_for_a_bounded_time(self):
         import threading

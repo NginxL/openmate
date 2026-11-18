@@ -648,6 +648,41 @@ class ReadTest(Base):
         self.assertTrue(getattr(msgs[1], "review", False))
         self.assertTrue(any('"dlpReviewState": 3' in line for line in logs.output), logs.output)
 
+    def test_a_held_text_is_not_shown_through_its_preview(self):
+        url = "https://example.com/held"
+        S.history["670"] = {1: frame_msg("671", "670", 1, {}), 2: frame_msg("672", "670", 2, {})}
+        S.chats["670"] = {"id": "670", "type": 2, "name": "示例群", "lastMessagePosition": 2}
+        hang = {"h": {"url": url}}
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {
+            "1": {"id": "671", "contentState": {"dlpReviewState": 3}, "urlPreviewHangPointMap": hang},
+            "2": {"id": "672", "contentState": {"dlpReviewState": 1}, "urlPreviewHangPointMap": hang}}}
+        msgs = self.b.history("670", None, 10)
+        self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT)
+        self.assertEqual(msgs[1].text, "")
+        self.assertTrue(getattr(msgs[1], "review", False), "still read again later")
+
+    def test_a_re_read_is_one_per_message_and_ends_with_the_account(self):
+        got = []
+        self.b.on_history = got.append
+        gate = threading.Event()
+        real = self.b.history
+
+        def slow(chat_id, before=None, limit=50):
+            gate.wait(2)
+            return [larkagentx.Message(id="681", chat_id="680", position=1, sender_id="7002", text="审核过了")]
+
+        self.b.history = slow
+        msg = larkagentx.Message(id="681", chat_id="680", position=1, sender_id="7002", type="TEXT", text="")
+        for _ in range(5):
+            self.b._refill_later(msg)  # the same message pushed again and again
+        self.assertEqual(len(self.b._refilling), 1, "one re-read")
+        self.b.logout()  # signed out before the answer came
+        gate.set()
+        time.sleep(0.3)
+        self.b.history = real
+        self.assertEqual(got, [], "nothing handed over for an account signed out")
+        self.assertEqual(self.b._refilling, set())
+
     def test_a_text_read_as_nothing_is_noted(self):
         empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}
         S.history["610"] = {1: frame_msg("611", "610", 1, empty)}
@@ -731,6 +766,24 @@ class ReadTest(Base):
     def test_an_empty_business_answer_is_none(self):
         S.api_answers["chats.PullRecentChatsRequest"] = {"hasMore": False}  # protobuf leaves empty lists out
         self.assertEqual(self.b.recent_chats(5), [])
+
+    def test_reactions_a_status_packet_leaves_unknown(self):
+        client, _ = self.b._signed_in()
+        orig = client.api
+        self.addCleanup(setattr, client, "api", orig)
+        calls = []
+
+        def answer(kind, data=None, raw=None):
+            calls.append(list(data["messageIds"]))
+            return {"messageReactions": []} if len(calls) == 1 else {"status": 200, "cmd": 24}  # the 2nd: a packet
+
+        client.api = answer
+        ids = [str(900 + i) for i in range(larkagentx.REACTIONS_ASK_MOST + 2)]
+        got = self.b.my_reactions(ids)
+        self.assertEqual(got.unasked, set(calls[1]), "the batch answered by a packet alone is unknown")
+        client.api = lambda kind, data=None, raw=None: {"status": 200, "cmd": 24}
+        with self.assertRaises(BackendError):
+            self.b.my_reactions(["901"])  # nothing answered at all: an error, as before
 
     def test_done_cards_both_forms(self):
         f = larkagentx.done_cards
