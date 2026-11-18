@@ -54,6 +54,7 @@ GROUPS_SPACING = 60.0
 GROUPS_CHECK_EVERY = 600.0
 GROUP_NAME_PAUSE = 0.3
 CATALOG_STUCK_MOST = 3  # reads in a row that could not go on from the catalog's stopping point before starting over
+CATALOG_BACKOFF = 900.0  # after such a read the next one waits this long per failure in a row
 MEMBER_EVERY = 6 * 3600.0  # each group's member list is read this often: one the account left (unseen) goes
 MEMBER_MOST = 50  # at most this many groups' member lists per round
 KINDS_LOOKUP_MOST = 20  # people_kinds asks WeChat about at most this many undescribed ids per call
@@ -985,9 +986,11 @@ class WeChatBackend(Backend):
                         stuck = int(self.store.get("catalog_stuck") or 0) + 1 if r.get("catalog_stuck") else 0
                         if stuck >= CATALOG_STUCK_MOST:
                             cursor, stuck = "", 0  # the same stopping point failed reads in a row: start over
+                        # after a failed resume the next try waits (scheduled and event refreshes alike)
+                        wait = max(float(r.get("catalog_wait") or 0), CATALOG_BACKOFF * stuck)
                         self.store.put("catalog_stuck", str(stuck))
                         self.store.put("catalog_cursor", cursor)
-                        self.store.put("catalog_after", str(time.time() + float(r.get("catalog_wait") or 0)))
+                        self.store.put("catalog_after", str(time.time() + wait))
                     if r.get("complete") and r.get("catalog_complete", True) and not paused:
                         self.store.put("groups_at", str(time.time()))  # both read to the end: good for GROUPS_EVERY
                     log.info("WeChat groups: %d in all (%s in the group catalog%s; contacts %s, %s), %d new here",

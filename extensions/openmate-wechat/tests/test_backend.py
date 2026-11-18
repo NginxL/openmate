@@ -620,8 +620,11 @@ class GroupCatalogTest(Base):
         b.restore({"state": {"k": "v1"}})
         b._groups_work(True)  # first read: from the start, stops with a stopping point
         for _ in range(wb.CATALOG_STUCK_MOST - 1):
+            b.store.put("catalog_after", "0")  # past the backoff
             b._groups_work(True)
             self.assertEqual(b.store.get("catalog_cursor"), "cGFnZTI=", "a failure alone keeps the stopping point")
+            self.assertGreater(float(b.store.get("catalog_after")), time.time() + 60, "and the next try waits")
+        b.store.put("catalog_after", "0")
         b._groups_work(True)
         self.assertEqual(b.store.get("catalog_cursor"), "", "the same one failed reads in a row: start over")
 

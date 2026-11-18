@@ -615,8 +615,8 @@
       "packages": [
         {
           "url": "packages/openmate-wechat/0.1.21/openmate-wechat-0.1.21.tar.gz",
-          "sha256": "457906e1583ab8eff9dcd9f60ba2658f58c3c7134540c68b5f5bf7620df8f902",
-          "size": 146621
+          "sha256": "7f5e6adf93617ea4d468344cc697f82e296de0142427ec614d2da4a6320a4ef8",
+          "size": 146722
         }
       ]
     }

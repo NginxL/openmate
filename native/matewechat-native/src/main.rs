@@ -888,6 +888,7 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
     let resumed = cursor != vec![0u8];
     let mut first = true;
     let mut stuck = false; // the stopping point it was given could not be read from (refused, or a busy server)
+    let mut asked = false; // whether a catalog request went out at all this time
     // the backend leaves the catalog out while the server's pause is not over
     let read_catalog = p.get("catalog").and_then(Value::as_bool).unwrap_or(true);
     for _ in 0..(if read_catalog { 100 } else { 0 }) {
@@ -895,6 +896,7 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
             break;
         }
         let c = cursor.clone();
+        asked = true;
         let page = match app
             .rt
             .block_on(async { tokio::time::timeout(Duration::from_secs(20), client.group_inventory(&c)).await })
@@ -909,6 +911,7 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
             }
             Err(_) => {
                 log("group catalog read timed out");
+                stuck = resumed && first; // a timeout tells no more than an error: the stopping point is kept
                 break;
             }
         };
@@ -946,7 +949,7 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
     Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total,
               "catalog": catalog, "catalog_complete": catalog_complete, "names": names,
               "catalog_cursor": if catalog_complete { String::new() } else { B64.encode(&cursor) },
-              "catalog_wait": catalog_wait, "catalog_read": read_catalog, "catalog_stuck": stuck}))
+              "catalog_wait": catalog_wait, "catalog_read": asked, "catalog_stuck": stuck}))
 }
 
 // ---------------------------------------------------------------- media
