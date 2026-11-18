@@ -429,6 +429,63 @@ class KindsLaterTest(Base):
         self.assertEqual(len(self.requests("contacts")), n, "not again before NAME_RETRY")
 
 
+class GroupGoneTest(Base):
+    def setUp(self):
+        super().setUp()
+        self._pause, wb.GROUP_NAME_PAUSE = wb.GROUP_NAME_PAUSE, 0.0
+        self._spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUP_NAME_PAUSE", self._pause)
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", self._spacing)
+
+    def test_a_group_removed_in_wechat_leaves_the_lists_until_a_newer_message(self):
+        now = int(time.time())
+        b = self.backend([msg("a1", "5@chatroom", "wxid_bob", "早", at=now - 100),
+                          {"event": "removed", "id": "5@chatroom"}, {"event": "removed", "id": "wxid_carl"}])
+        gone = []
+        b.on_chat_gone = gone.append
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: gone)
+        self.assertEqual(gone, ["5@chatroom"], "a person removed is not a group gone")
+        self.assertNotIn("5@chatroom", [g.id for g in b.group_candidates(50)])
+        b._on_event(msg("a0", "5@chatroom", "wxid_bob", "早些的", at=now - 50), lambda m: True)
+        self.assertNotIn("5@chatroom", [g.id for g in b.group_candidates(50)], "older than its removal: still gone")
+        b._on_event(msg("a2", "5@chatroom", "wxid_bob", "欢迎回来", at=now + 60), lambda m: True)
+        self.assertIn("5@chatroom", [g.id for g in b.group_candidates(50)], "a newer message: joined again")
+
+    def test_a_group_whose_full_member_list_lacks_the_account_is_gone(self):
+        os.environ["FAKE_LEFT"] = "7@chatroom"
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend()
+        gone = []
+        b.on_chat_gone = gone.append
+        b.restore({"state": {"k": "v1"}})
+        for gid in ("7@chatroom", "8@chatroom"):
+            b.store.add_message(msg("m" + gid, gid, "wxid_bob", "hi"))
+        b._groups_work(True)
+        self.assertEqual(gone, ["7@chatroom"])
+        n = len(self.requests("room"))
+        b._groups_work(True)
+        self.assertEqual(len(self.requests("room")), n, "each group's list is read every MEMBER_EVERY, not each round")
+        b.close()
+        b2 = self.backend()
+        told = []
+        b2.on_chat_gone = told.append
+        b2.restore({"state": {"k": "v1"}})
+        self.assertEqual(told, ["7@chatroom"], "told again at start (the core may not have heard)")
+
+    def test_a_partial_member_list_proves_nothing(self):
+        os.environ["FAKE_LEFT"] = "7@chatroom"
+        os.environ["FAKE_ROOM_PARTIAL"] = "1"
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend()
+        gone = []
+        b.on_chat_gone = gone.append
+        b.restore({"state": {"k": "v1"}})
+        b.store.add_message(msg("m7", "7@chatroom", "wxid_bob", "hi"))
+        b._groups_work(True)
+        self.assertEqual(gone, [])
+
+
 class ReadTest(Base):
     def test_a_chat_read_on_the_phone_after_the_last_message_is_done(self):
         now = int(time.time())

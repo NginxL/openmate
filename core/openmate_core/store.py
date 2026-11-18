@@ -83,6 +83,8 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS dismissed (key TEXT PRIMARY KEY, version TEXT NOT NULL, at REAL NOT NULL)",
     # groups the user marked for 自动代答: an @me there is answered by the Agent as the user, with no confirmation
     "CREATE TABLE IF NOT EXISTS autoreply (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
+    # groups the account left or deleted (Backend.on_chat_gone): out of every list until a newer message brings one back
+    "CREATE TABLE IF NOT EXISTS gone (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
@@ -296,13 +298,15 @@ class Store:
         return _chat_row(r) if r else None
 
     def chats_since(self, since: float, limit: int) -> List[dict]:
-        rows = self._all("SELECT * FROM chats WHERE last_at >= ? ORDER BY last_at DESC, id LIMIT ?", (since, limit))
+        rows = self._all("SELECT * FROM chats WHERE last_at >= ? AND id NOT IN (SELECT chat_id FROM gone) "
+                         "ORDER BY last_at DESC, id LIMIT ?", (since, limit))
         return [_chat_row(r) for r in rows]
 
     def groups_i_spoke_in(self, limit: int) -> List[dict]:
         """Group chats with the account's own messages, the one it wrote in last first (mine_at: that time)."""
         rows = self._all("SELECT c.*, MAX(m.at) AS mine_at FROM messages m JOIN chats c ON c.id = m.chat_id "
                          "WHERE m.mine = 1 AND m.type != 'SYSTEM' AND c.kind != 'dm' "
+                         "AND c.id NOT IN (SELECT chat_id FROM gone) "
                          "GROUP BY m.chat_id ORDER BY mine_at DESC, c.id LIMIT ?",
                          (int(limit),))
         out = []
@@ -315,11 +319,13 @@ class Store:
     def chats_recent(self, limit: int, query: str = "") -> List[dict]:
         if query:
             rows = self._all(
-                "SELECT * FROM chats WHERE name LIKE ? OR id = ? ORDER BY last_at DESC, id LIMIT ?",
+                "SELECT * FROM chats WHERE (name LIKE ? OR id = ?) AND id NOT IN (SELECT chat_id FROM gone) "
+                "ORDER BY last_at DESC, id LIMIT ?",
                 ("%" + query.replace("%", "").replace("_", "") + "%", query, limit),
             )
         else:
-            rows = self._all("SELECT * FROM chats ORDER BY last_at DESC, id LIMIT ?", (limit,))
+            rows = self._all("SELECT * FROM chats WHERE id NOT IN (SELECT chat_id FROM gone) "
+                             "ORDER BY last_at DESC, id LIMIT ?", (limit,))
         return [_chat_row(r) for r in rows]
 
     # ---- messages ----
@@ -524,6 +530,32 @@ class Store:
         rows = self._all("SELECT * FROM runs WHERE created >= ? ORDER BY created DESC LIMIT ?", (since, limit))
         return [self._run_row(r) for r in rows]
 
+    def chat_gone(self, chat_id: str, now: Optional[float] = None) -> None:
+        """The account left or deleted this chat: out of the lists, and no longer marked for 自动代答."""
+        at = now or time.time()
+
+        def run(db):
+            # told again (at a start): the first time stays, so a message after it still brings the chat back
+            db.execute("INSERT OR IGNORE INTO gone (chat_id, at) VALUES (?, ?)", (chat_id, at))
+            db.execute("DELETE FROM autoreply WHERE chat_id = ?", (chat_id,))
+
+        self._tx(run)
+
+    def chats_back(self, latest: Dict[str, float]) -> int:
+        """Chats with a message newer than when they went (joined again): back in the lists. How many came back."""
+        gone = {r["chat_id"] for r in self._all("SELECT chat_id FROM gone")} if latest else set()
+        latest = {c: at for c, at in latest.items() if c in gone}  # nearly always none: no write then
+        if not latest:
+            return 0
+        n = [0]
+
+        def run(db):
+            for cid, at in latest.items():
+                n[0] += db.execute("DELETE FROM gone WHERE chat_id = ? AND at < ?", (cid, at)).rowcount
+
+        self._tx(run)
+        return n[0]
+
     def autoreply_chats(self) -> List[str]:
         return [r["chat_id"] for r in self._all("SELECT chat_id FROM autoreply ORDER BY at")]
 
@@ -596,7 +628,7 @@ class Store:
 
         def run(db):
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
-            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota"):
+            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             db.execute("DELETE FROM meta WHERE key IN ('initial_history_done')")

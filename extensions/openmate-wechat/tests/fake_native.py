@@ -97,7 +97,10 @@ def answer(req):
     if op == "room":
         if not isinstance(req.get("room_id"), str):
             return fail("input", "缺少 room_id")
-        return ok(room_id=req.get("room_id"), member_count=3, members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
+        left = set(os.environ.get("FAKE_LEFT", "").split(","))  # groups the account is no longer in
+        unknown = os.environ.get("FAKE_ROOM_PARTIAL", "") == "1"  # WeChat gave no full id list
+        return ok(room_id=req.get("room_id"), member_count=3, me_in=None if unknown else req.get("room_id") not in left,
+                  members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
     if op == "groups":
         return ok(groups=json.loads(os.environ.get("FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')),

@@ -363,6 +363,33 @@ class KindsAndNamesLaterTest(unittest.TestCase):
         self.assertNotEqual(h.app.store.get_chat(cid)["name"], cid)
 
 
+class ChatGoneTest(unittest.TestCase):
+    def test_a_gone_group_leaves_every_list_and_its_mark_until_a_newer_message(self):
+        from openmate_core.backend import Message
+
+        h = wechat(self)
+        st = h.app.store
+        st.autoreply_set(TEAM, True)
+        self.assertIn(TEAM, [c["id"] for c in st.chats_recent(500)])
+        self.assertEqual(h.app.backend.on_chat_gone, h.app._chat_gone)
+        h.app.backend.on_chat_gone(TEAM)
+        self.assertNotIn(TEAM, [c["id"] for c in st.chats_recent(500)])
+        self.assertNotIn(TEAM, [c["id"] for c in st.chats_since(0, 500)])
+        self.assertNotIn(TEAM, [c["id"] for c in st.groups_i_spoke_in(500)])
+        self.assertNotIn(TEAM, st.autoreply_chats(), "no longer marked for 自动代答")
+        self.assertNotIn("auto:" + TEAM, str(page(h)))
+        h.app.backend.on_chat_gone(TEAM)  # told again: the first time stays
+        old = time.time() - 3600
+        h.app.ingest([Message(id="g-old", chat_id=TEAM, position=int(old * 1000), sender_id="user_example_a",
+                              text="早先的", at=old)], live=False)
+        self.assertNotIn(TEAM, [c["id"] for c in st.chats_recent(500)], "older than when it went")
+        now = time.time() + 5
+        h.app.ingest([Message(id="g-new", chat_id=TEAM, position=int(now * 1000), sender_id="user_example_a",
+                              text="又拉你进来了", at=now)], live=False)
+        self.assertIn(TEAM, [c["id"] for c in st.chats_recent(500)], "a newer message: back")
+        self.assertNotIn(TEAM, st.autoreply_chats(), "but not marked again by itself")
+
+
 class GroupCandidatesTest(unittest.TestCase):
     def test_every_listed_group_can_be_switched_on(self):
         from openmate_core.backend import Chat

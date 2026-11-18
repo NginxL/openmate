@@ -462,6 +462,14 @@ fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &Atomic
     }
 }
 
+/// A sync command this program does not read: named in the log once per run (what WeChat sends, for later work).
+fn note_command(id: i32) {
+    static SEEN: std::sync::OnceLock<Mutex<std::collections::HashSet<i32>>> = std::sync::OnceLock::new();
+    if SEEN.get_or_init(|| Mutex::new(Default::default())).lock().map(|mut s| s.insert(id)).unwrap_or(false) {
+        log(&format!("sync command {id} seen (not read)"));
+    }
+}
+
 /// Sync until the server says there is no more. After a reset (-2006) everything up to the first normal last page
 /// from the new cursor is catch-up (history the server sends again, never a request); a reset on that page goes on.
 fn drain(
@@ -486,7 +494,16 @@ fn drain(
             return Ok(()); // a stopped listener says nothing more
         }
         for command in &batch.commands {
+            if command.id == 4 {
+                // DelContact: a contact or a group gone from the account (a group quit or deleted on the phone)
+                match message::deleted_contact(&command.payload) {
+                    Ok(id) => app.out.line(&json!({"event": "removed", "gen": gen, "id": id, "origin": origin})),
+                    Err(e) => log(&format!("a contact removal could not be read: {e:#}")),
+                }
+                continue;
+            }
             if command.id != 5 {
+                note_command(command.id);
                 continue;
             }
             let m = match wire::decode_add_message(&command.payload, &own) {
@@ -759,7 +776,12 @@ fn op_room(app: &App, p: &Value) -> Result<Value> {
         .map(|m| json!({"id": m.username, "nickname": m.nickname, "display": m.room_display_name}))
         .collect();
     let count = roster.full_member_ids.as_ref().map(|ids| ids.len()).unwrap_or(0);
-    Ok(json!({"room_id": roster.room_id, "members": members, "member_count": count, "owner": roster.owner}))
+    // whether the account is still in it, from the full id list only (the member records may be a part): null
+    // when WeChat gave no full list
+    let own = app.own();
+    let me_in = roster.full_member_ids.as_ref().filter(|_| !own.is_empty()).map(|ids| ids.iter().any(|i| *i == own));
+    Ok(json!({"room_id": roster.room_id, "members": members, "member_count": count, "owner": roster.owner,
+              "me_in": me_in}))
 }
 
 /// Every group in the account's contacts (the 通讯录 list WeChat pages out at sign-in); groups never saved there show

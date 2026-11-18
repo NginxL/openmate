@@ -50,6 +50,8 @@ GROUPS_EVERY = 6 * 3600.0  # the contacts' group list is read again this often (
 GROUPS_SPACING = 60.0
 GROUPS_CHECK_EVERY = 600.0
 GROUP_NAME_PAUSE = 0.3
+MEMBER_EVERY = 6 * 3600.0  # each group's member list is read this often: one the account left (unseen) goes
+MEMBER_MOST = 50  # at most this many groups' member lists per round
 KINDS_LOOKUP_MOST = 20  # people_kinds asks WeChat about at most this many undescribed ids per call
 SURE_PEOPLE = ("@openim", "@qy_u")  # WeCom accounts: people's (WeChat gives them no verify flag)
 SEND_WAIT = 45.0
@@ -76,6 +78,7 @@ SCHEMA = (
 
 
 GROUP_SQL = "(id GLOB '*@chatroom*' OR id GLOB '*@im.chatroom' OR id GLOB '*@qy_g')"  # literal, as is_group
+HERE_SQL = "id NOT IN (SELECT substr(key, 6) FROM kv WHERE key GLOB 'gone:*')"  # not a group the account left
 
 
 def is_group(chat_id: str) -> bool:
@@ -137,12 +140,17 @@ class Store:
         with self._mu:
             self._db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, value))
 
+    def drop(self, key: str) -> None:
+        with self._mu:
+            self._db.execute("DELETE FROM kv WHERE key=?", (key,))
+
     def wipe(self) -> None:
         with self._mu:
             for t in ("messages", "chats", "names"):
                 self._db.execute("DELETE FROM " + t)
             self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%' "
-                             "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%'")
+                             "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%' "
+                             "OR key LIKE 'gone:%' OR key LIKE 'member_at:%'")
         BUSINESS.clear()
         PERSONS.clear()
 
@@ -226,13 +234,13 @@ class Store:
     def groups(self, limit: int) -> List[Tuple[str, str, int]]:
         """(id, name, members) of every group kept: the ones with messages, newest first, then the rest by name."""
         with self._mu:
-            return self._db.execute("SELECT id, name, members FROM chats WHERE " + GROUP_SQL +
+            return self._db.execute("SELECT id, name, members FROM chats WHERE " + GROUP_SQL + " AND " + HERE_SQL +
                                     " ORDER BY last_at DESC, name = '', name, id LIMIT ?", (limit,)).fetchall()
 
     def unnamed_groups(self, older_than: float, limit: int) -> List[str]:
         with self._mu:
             return [r[0] for r in self._db.execute(
-                "SELECT id FROM chats WHERE " + GROUP_SQL + " AND name = '' AND named_at < ? "
+                "SELECT id FROM chats WHERE " + GROUP_SQL + " AND " + HERE_SQL + " AND name = '' AND named_at < ? "
                 "ORDER BY last_at DESC LIMIT ?", (older_than, limit)).fetchall()]
 
     def unclassified_people(self, known: set, limit: int) -> List[str]:
@@ -423,6 +431,12 @@ class WeChatBackend(Backend):
         account = self._adopt(r.get("account") or {})
         # official accounts learnt before (perhaps after the core was told "user" for them)
         self._tell_kinds({b: "bot" for b in BUSINESS})
+        cb = self.on_chat_gone
+        for key in self.store.keys("gone:") if cb is not None else []:
+            try:
+                cb(key[5:])  # groups left before: the core may not have heard (it keeps the first time it did)
+            except Exception:
+                log.exception("a group gone could not be handed to the core")
         return account
 
     def _adopt(self, account: dict) -> Account:
@@ -487,6 +501,10 @@ class WeChatBackend(Backend):
                     self._on_read(str(ev.get("chat") or ""), int(ev.get("at") or 0))
                 elif kind == "contacts":  # a contact change: a group made, joined or renamed among them
                     self._refresh_groups(full=True)
+                elif kind == "removed":  # a contact or group gone from the account (a group quit on the phone)
+                    rid = str(ev.get("id") or "")
+                    if is_group(rid):
+                        self._group_gone(rid, "removed in WeChat")
                 elif kind == "auth_lost":
                     raise CredentialsExpired(EXPIRED)
         finally:
@@ -506,6 +524,11 @@ class WeChatBackend(Backend):
         seen = self.store.seen(mid)
         if seen is not None and seen[1]:
             return True  # kept already, and handed over when it was live
+        if is_group(chat) and ev.get("type") != "SYSTEM":
+            gone = self.store.get("gone:" + chat)
+            if gone and float(ev.get("at") or 0) > float(gone or 0):
+                self.store.drop("gone:" + chat)  # joined again: listed again (the core does the same)
+                log.info("WeChat group %s is back (a new message)", chat)
         new_group = is_group(chat) and self.store.chat(chat) is None
         try:
             return self._keep_and_hand_over(ev, seen, on_message)
@@ -637,6 +660,46 @@ class WeChatBackend(Backend):
             cb(dict(kinds))
         except Exception:
             log.exception("kinds could not be handed to the core")
+
+    def _group_gone(self, gid: str, why: str) -> None:
+        """The account left or deleted this group: out of the lists here and in the core."""
+        if self.store.get("gone:" + gid):
+            return
+        self.store.put("gone:" + gid, str(time.time()))
+        log.info("WeChat group %s is gone (%s)", gid, why)
+        cb = self.on_chat_gone
+        if cb is not None:
+            try:
+                cb(gid)
+            except Exception:
+                log.exception("a group gone could not be handed to the core")
+
+    def _check_members(self, me: str) -> None:
+        """Each group's full member list, every MEMBER_EVERY: a group the account is no longer in is gone (one left
+        while this was not listening, or whose removal never came). Only a full list without the account counts."""
+        now = time.time()
+        due = []
+        for gid, _, _ in self.store.groups(2000):
+            if not gid.endswith("@chatroom"):
+                continue  # WeChat reads member lists of ordinary groups only
+            try:
+                at = float(self.store.get("member_at:" + gid) or 0)
+            except ValueError:
+                at = 0.0
+            if now - at > MEMBER_EVERY:
+                due.append(gid)
+        for gid in due[:MEMBER_MOST]:
+            if self._closed or self.me != me:
+                return
+            self.store.put("member_at:" + gid, str(time.time()))
+            try:
+                r = self._call(self._link(), "room", 20, room_id=gid)
+            except BackendError as e:
+                log.info("the member list of WeChat group %s was not read: %s", gid, e.message)
+            else:
+                if r.get("me_in") is False:
+                    self._group_gone(gid, "not in its member list")
+            time.sleep(GROUP_NAME_PAUSE)
 
     def _roster(self, chat_id: str) -> Tuple[List[dict], int]:
         try:
@@ -794,6 +857,7 @@ class WeChatBackend(Backend):
                         self.store.set_chat_name(gid, found.get(gid, ("", ""))[0])
                     time.sleep(GROUP_NAME_PAUSE)  # gently: a person's account reading its own groups
                 # direct chats kept before kinds were read: learn person / official account (once per run each)
+                self._check_members(me)
                 todo = self.store.unclassified_people(PERSONS | BUSINESS | self._kind_tried, 200)
                 for i in range(0, len(todo), 2):
                     if self._closed or self.me != me:

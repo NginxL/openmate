@@ -133,6 +133,25 @@ fn app_message(content: &str) -> (&'static str, String, String, String, String) 
     }
 }
 
+/// The identity a DelContact sync command removes: field 1 holds it as a nested string (field 1), as the daemon
+/// reads it; fields 2 and 3, when there, are small numbers.
+pub fn deleted_contact(payload: &[u8]) -> anyhow::Result<String> {
+    use wechat_protocol::protobuf as p;
+    let fields = p::decode(payload)?;
+    let nested = p::decode(p::data(&fields, 1)?)?;
+    let id = std::str::from_utf8(p::data(&nested, 1)?)?.to_string();
+    anyhow::ensure!(
+        !id.is_empty() && id.len() <= 512 && !id.chars().any(|c| c.is_control() || c.is_whitespace()),
+        "not an identity"
+    );
+    for n in [2, 3] {
+        if let Some(v) = p::optional(&fields, n)? {
+            anyhow::ensure!(matches!(v, p::Value::Varint(x) if *x <= u32::MAX as u64), "not a removal");
+        }
+    }
+    Ok(id)
+}
+
 /// A read the account made on another device (the phone): WeChat syncs it as the account's own type-51 control
 /// `<msg><op id="1|2|5"><username>chat</username><name>lastMessage</name><arg>…</arg></op></msg>` (1 read up to a message, 2 opened, 5 left the chat; the
 /// shapes agent-wechat's daemon reads). The chat and when; None for anything else.
@@ -383,6 +402,15 @@ mod tests {
         assert_eq!(read_control(&elsewhere, "wxid_me"), None, "the outer chat must be the one it names");
         let other = Raw { from: "wxid_bob", outgoing: false, ..r };
         assert_eq!(read_control(&other, "wxid_me"), None);
+        // DelContact: {1: {1: "id"}, 2: 0}
+        let id = b"123@chatroom";
+        let mut inner = vec![0x0a, id.len() as u8];
+        inner.extend_from_slice(id);
+        let mut payload = vec![0x0a, inner.len() as u8];
+        payload.extend_from_slice(&inner);
+        payload.extend_from_slice(&[0x10, 0x00]);
+        assert_eq!(deleted_contact(&payload).unwrap(), "123@chatroom");
+        assert!(deleted_contact(&[0x0a, 0x02, 0x0a, 0x00]).is_err(), "an empty identity");
         let unnamed = Raw { content: "<msg><op id='2'><username>1@chatroom</username></op></msg>", ..r };
         assert_eq!(read_control(&unnamed, "wxid_me"), None, "only the lastMessage controls");
         let op9 = Raw { content: "<msg><op id='9'><username>x</username></op></msg>", ..r };

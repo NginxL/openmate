@@ -221,6 +221,7 @@ class ConnectorApp:
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_history = self._history_from_backend
                 self.backend.on_people_kinds = self._people_kinds_from_backend
+                self.backend.on_chat_gone = self._chat_gone
                 self.backend.on_doc_mention = self._doc_mention
                 self.backend.on_chats_done = self._chats_done
                 self.backend.on_reacted = self._reacted
@@ -410,6 +411,17 @@ class ConnectorApp:
         self.today_api = api
 
     # ------------------------------------------------------------------ the service's done mark (Feishu's 完成)
+
+    def _chat_gone(self, chat_id: str) -> None:
+        """The account left or deleted a chat in the service: out of the lists until a newer message."""
+        if self.store is None or self.closing.is_set() or not chat_id:
+            return
+        try:
+            self.store.chat_gone(str(chat_id))
+            self.mark_changed("inbox")
+        except Exception:
+            if not self.closing.is_set():
+                log.exception("a chat gone could not be kept")
 
     def _people_kinds_from_backend(self, kinds: Dict[str, str]) -> None:
         """The backend learnt what someone is after it was asked (an official account found later): kept, and the
@@ -730,6 +742,12 @@ class ConnectorApp:
     def ingest(self, msgs: List[Message], live: bool) -> List[dict]:
         if not msgs or self.store is None:
             return []
+        latest: Dict[str, float] = {}
+        for m in msgs:  # a chat gone comes back with a newer message of someone's (joined again)
+            if (m.type or "") != "SYSTEM" and (m.at or 0) > latest.get(m.chat_id, 0):
+                latest[m.chat_id] = float(m.at or 0)
+        if latest:
+            self.store.chats_back(latest)
         for chat_id in {m.chat_id for m in msgs}:
             known = self.store.get_chat(chat_id)
             # no name, or only the id as a stand-in (kept by older versions): ask the backend again
