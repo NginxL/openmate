@@ -61,10 +61,17 @@ class HubSideError(Exception):
 
 
 def _sends_as_user() -> set:
-    """The connector ids the extension's manifest says send as the user (what the hub reads at install)."""
-    with open(os.path.join(ROOT, "extensions", EXT, "persona-extension.json"), encoding="utf-8") as f:
-        m = json.load(f)
-    return {c["id"] for c in (m.get("contributes") or {}).get("connectors") or [] if c.get("sends_as_user") is True}
+    """The connector ids the extensions' manifests say send as the user (what the hub reads at install)."""
+    out = set()
+    base = os.path.join(ROOT, "extensions")
+    for ext in sorted(os.listdir(base)):
+        path = os.path.join(base, ext, "persona-extension.json")
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            m = json.load(f)
+        out |= {c["id"] for c in (m.get("contributes") or {}).get("connectors") or [] if c.get("sends_as_user") is True}
+    return out
 
 
 class StdioHub:
@@ -392,8 +399,11 @@ class Harness:
     def __init__(self, test, config: Optional[dict] = None, timing: Optional[Timing] = None,
                  world: Optional[FixtureWorld] = None, http: Optional[FakeHubHTTP] = None, data_dir: Optional[str] = None,
                  secrets: Optional[Dict[str, str]] = None, hub_url: Optional[str] = None, initialize: bool = True,
-                 backend_factory=None):
+                 backend_factory=None, platform=None):
         self.test = test
+        self.platform = platform or openmate_feishu.platform()
+        self.cid = self.platform.connector_id
+        self.ext = self.platform.extension_id
         self.config = dict(config or {})
         self.timing = timing or fast()
         self.world = world or FixtureWorld()
@@ -410,7 +420,7 @@ class Harness:
         r2, w2 = os.pipe()
         self._files = [os.fdopen(r1, "rb"), os.fdopen(w2, "wb"), os.fdopen(r2, "rb"), os.fdopen(w1, "wb")]
         factory = backend_factory or (lambda cfg, d: FixtureBackend(self.world))
-        self.app = ConnectorApp(openmate_feishu.platform(), timing=self.timing, backend_factory=factory, env={})
+        self.app = ConnectorApp(self.platform, timing=self.timing, backend_factory=factory, env={})
         self.peer = Peer(self._files[0], self._files[1], self.app.handle, on_event=self.app.on_event,
                          after=self.app.after)
         self.app.attach(self.peer)
@@ -435,11 +445,11 @@ class Harness:
             "hub": {"build": 202611130000, "extension_points": {"connectors": 2}, "role": "center",
                     "timezone": "Asia/Shanghai", "locale": "zh-Hans", "url": self.hub_url, "token": TOKEN,
                     "scopes": ["agents.control", "agents.read", "assistant.ask", "kb.read"]},
-            "extension": {"id": EXT, "version": "0.1.0", "dir": ROOT, "data_dir": self.data_dir},
+            "extension": {"id": self.ext, "version": "0.1.0", "dir": ROOT, "data_dir": self.data_dir},
             "config": self.config,
             "secrets": {},
             "granted": {},
-            "active": {"connectors": [CID]},
+            "active": {"connectors": [self.cid]},
         }
         params.update(over)
         res = self.hub.request("initialize", params)
@@ -447,14 +457,14 @@ class Harness:
         return res
 
     def c(self, method: str, **params) -> Any:
-        params.setdefault("contribution", CID)
+        params.setdefault("contribution", self.cid)
         return self.hub.request("connector." + method, params)
 
     def status(self) -> dict:
         return self.c("status")
 
     def tool(self, name: str, **args) -> str:
-        return self.c("tools.call", name=CID + "_" + name, args=args)["text"]
+        return self.c("tools.call", name=self.cid + "_" + name, args=args)["text"]
 
     def sign_in(self) -> dict:
         p = self.c("login.step", step="", values={})

@@ -50,6 +50,7 @@ QUIET_KINDS = ("auto", "doc")  # runs nobody asked for in the chat: only the Age
 # Someone else's words drive these: they run as guest conversations (only the reply tool, none of the assistant's powers)
 GUEST_KINDS = QUIET_KINDS
 GUEST_RUNNING_MOST = 3  # 自动代答 and 文档代答 under way at once
+GUEST_ROOM = "guest-room"  # the lock a guest run's quota check and its reservation share
 DOC_TEXT_MOST = 8000  # characters of a document a 文档代答 guest gets
 DEFAULT_ACK = "THINKING"  # the reaction that says a request was taken (Feishu's 🤔)
 DEFAULT_DONE = "DONE"  # what replaces it when the turn ended (Feishu's ✅ 完成)
@@ -386,14 +387,15 @@ class AgentRunner:
         if kind != "user":
             log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
             return
-        why = self._guest_room(chat_id, "auto", now)
-        if why:
-            log.info("自动代答: not answered (%s); left for the user", why)
-            return
-        run = self._new_run(row, strip_leading_mentions(text).strip(), now)
-        run["kind"] = "auto"
-        run["asker"] = row.get("sender_name") or ""
-        self.store.run_put(run)
+        with self._lock(GUEST_ROOM):  # the check and the reservation at once: two @s together never pass one place
+            why = self._guest_room(chat_id, "auto", now)
+            if why:
+                log.info("自动代答: not answered (%s); left for the user", why)
+                return
+            run = self._new_run(row, strip_leading_mentions(text).strip(), now)
+            run["kind"] = "auto"
+            run["asker"] = row.get("sender_name") or ""
+            self.store.run_put(run)
         self._prune()
         self._start_run(run, row)
 
@@ -418,17 +420,24 @@ class AgentRunner:
             log.info("文档代答: not answered (the sender is %s)", kind or "unknown")
             return
         doc_chat = "doc:" + hashlib.sha256(m.doc_url.encode("utf-8")).hexdigest()[:16]
-        why = self._guest_room(doc_chat, "doc", now)
-        if why:
-            log.info("文档代答: not answered (%s)", why)
-            return
         asker = m.from_name
         if not asker and m.from_id and self.app.backend is not None:
             try:
                 asker = self.app.backend.user_name(m.from_id)
             except Exception:
                 asker = ""
-        run = {
+        with self._lock(GUEST_ROOM):  # the check and the reservation at once
+            why = self._guest_room(doc_chat, "doc", now)
+            if why:
+                log.info("文档代答: not answered (%s)", why)
+                return
+            run = self._doc_run(m, doc_chat, asker, now)
+            self.store.run_put(run)
+        self._prune()
+        self._start_run(run, None)
+
+    def _doc_run(self, m, doc_chat: str, asker: str, now: float) -> dict:
+        return {
             "id": "omr_" + secrets.token_hex(10),
             "chat_id": doc_chat,
             "request_id": m.id,
@@ -442,9 +451,6 @@ class AgentRunner:
             "kind": "doc", "asker": asker or "", "doc_url": m.doc_url, "doc_title": m.doc_title or "",
             "comment_id": m.comment_id or "",
         }
-        self.store.run_put(run)
-        self._prune()
-        self._start_run(run, None)
 
     def _doc_prompt(self, run: dict) -> str:
         loc = "《%s》 %s" % (run.get("doc_title") or "（无标题）", run["doc_url"])
@@ -1129,6 +1135,8 @@ class AgentRunner:
             raise RPCError("这个 /agent 请求已经过期了")
         if not text.strip():
             raise RPCError("回复内容是空的")
+        if progress and run.get("kind") in GUEST_KINDS:  # an answer for someone else is one message, no progress
+            return "代答只回复一次，不发进度；直接不带 progress 回复最终内容"
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message
             if not self._can_edit():  # every update would be one more message in the chat, as the user
                 return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
@@ -1138,6 +1146,8 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur["state"] in ("stopped", "failed"):
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
+            if cur.get("kind") in GUEST_KINDS and int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0:
+                raise RPCError("代答只回复一次，这条已经回复过了")
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
         body = self.with_suffix(text, cur)

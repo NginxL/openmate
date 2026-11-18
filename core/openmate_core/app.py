@@ -88,6 +88,7 @@ class ConnectorApp:
         self.creds = "loading"  # loading | none | present | error
         self.creds_error = ""
         self._credentials: Optional[dict] = None
+        self._creds_mu = threading.Lock()
         self.account: Optional[Account] = None
         self.link = "idle"  # idle | connecting | up | down | expired | error
         self.link_reason = ""
@@ -207,6 +208,7 @@ class ConnectorApp:
             try:
                 self.backend = self._make_backend(self.config, self.data_dir)
                 self.backend.on_credentials = self._credentials_rotated
+                self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_doc_mention = self._doc_mention
             except BackendError as e:
                 self.setup_error = e.message
@@ -292,6 +294,17 @@ class ConnectorApp:
                 log.warning("saving refreshed credentials failed (%s)", e.code or "error")
 
         threading.Thread(target=run, name="openmate-creds", daemon=True).start()
+
+    def _credentials_rotated_now(self, creds: dict) -> bool:
+        """Seal rotated credentials before the adapter uses them: in the caller's thread, one at a time."""
+        with self._creds_mu:
+            try:
+                self._save_credentials(creds)
+            except RPCError as e:
+                log.warning("saving rotated credentials failed (%s)", e.code or "error")
+                return False
+            self._credentials = creds
+            return True
 
     # ------------------------------------------------------------------ the sent-as-user ledger
 

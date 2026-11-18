@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Launcher of the OpenMate WeChat extension: the hub runs it and speaks the protocol on its stdin / stdout.
+
+In a package the core sits next to openmate_wechat/; in the source tree it is ../../core.
+"""
+
+import os
+import sys
+
+if sys.version_info < (3, 9):
+    sys.stderr.write("openmate-wechat needs Python 3.9 or newer\n")
+    sys.exit(1)
+
+sys.dont_write_bytecode = True
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+if not os.path.isdir(os.path.join(ROOT, "openmate_core")):
+    sys.path.insert(0, os.path.normpath(os.path.join(ROOT, "..", "..", "core")))
+
+from openmate_wechat import main  # noqa: E402
+
+sys.exit(main())

@@ -511,7 +511,8 @@ class Store:
         the hub's archive cursor stays valid. The send journal stays: request ids are the hub's."""
 
         def run(db):
-            for table in ("chats", "messages", "names", "runs", "seen"):
+            # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
+            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM meta WHERE key IN ('initial_history_done')")
 

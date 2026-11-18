@@ -179,6 +179,10 @@ class Backend(abc.ABC):
     #: Set by the core: call it with new credentials when the service rotated them (a refreshed session), so the core
     #: seals them in the hub. Never write credentials anywhere yourself.
     on_credentials: Optional[Callable[[Dict], None]] = None
+    #: Set by the core too: seal these credentials now and say whether it worked (True) — one at a time, in the order
+    #: called. For a service that must not use rotated credentials before they are stored (WeChat); on_credentials
+    #: stays the fire-and-forget form.
+    on_credentials_sync: Optional[Callable[[Dict], bool]] = None
 
     #: Set by the core: call it with a DocMention when the live link hears the user was @-mentioned in a document's
     #: comment (from the listener's own thread; it returns at once).
