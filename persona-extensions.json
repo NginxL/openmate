@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.11.21",
+        "version": "0.11.22",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -368,9 +368,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.11.21/openmate-feishu-0.11.21.tar.gz",
-          "sha256": "5b529a49151f6919e456c5cfaf1fbdc479eef9c62a2aa6c3a3af5142a6ba0f60",
-          "size": 184976
+          "url": "packages/openmate-feishu/0.11.22/openmate-feishu-0.11.22.tar.gz",
+          "sha256": "45df89f98a30d4d6a9bf50a7d165fb8a907d41de08fb10fe1ee2c564e861fb83",
+          "size": 192804
         }
       ]
     },
@@ -379,7 +379,7 @@
         "manifest_version": 1,
         "id": "openmate-wechat",
         "name": "微信（OpenMate）",
-        "version": "0.1.22",
+        "version": "0.1.23",
         "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -614,9 +614,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-wechat/0.1.22/openmate-wechat-0.1.22.tar.gz",
-          "sha256": "c8ff3e9e3e294a58f6d263a887d383fc2e93e5723dc74954600d2f1d9e347e22",
-          "size": 153667
+          "url": "packages/openmate-wechat/0.1.23/openmate-wechat-0.1.23.tar.gz",
+          "sha256": "404b99548f69296c93bad8414aa050914b6de2731cb068f8a073cba1a7311fd6",
+          "size": 156956
         }
       ]
     }
