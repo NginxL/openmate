@@ -291,6 +291,12 @@ class Backend(abc.ABC):
         can tell; {} when it cannot. Read-only; the core asks in the background, at most 50 at a time."""
         return {}
 
+    def group_candidates(self, limit: int) -> List[Chat]:
+        """Every group the account is in that the service can list (for the 自动代答 switches), the newest first; []
+        when it cannot. Quick and offline: the adapter's own cache, kept fresh in the background (a group made or
+        joined shows up there), since the page calls it while it draws."""
+        return []
+
     @abc.abstractmethod
     def media(self, ref: str, max_bytes: int) -> Tuple[str, bytes]:
         """(mime, bytes) of a media ref; BackendError(kind="too_large") when it is bigger than max_bytes."""

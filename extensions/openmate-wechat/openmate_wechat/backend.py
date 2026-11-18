@@ -45,6 +45,9 @@ log = logging.getLogger("openmate.wechat")
 
 EXPIRED = "微信登录已失效，需要重新扫码登录"
 NAME_TTL = 6 * 3600.0
+GROUPS_EVERY = 6 * 3600.0  # the contacts' group list is read again this often (and on every contact change)
+GROUPS_SPACING = 60.0
+GROUP_NAME_PAUSE = 0.3
 SEND_WAIT = 45.0
 # Accounts that are WeChat's own or a program, never a person (official accounts are gh_…, ClawBot bots …@im.bot)
 SERVICE_IDS = {"filehelper", "weixin", "weibo", "fmessage", "floatbottle", "medianote", "qmessage", "tmessage",
@@ -184,6 +187,33 @@ class Store:
                              "ON CONFLICT(id) DO UPDATE SET name=excluded.name, named_at=excluded.named_at, "
                              "members=excluded.members", (chat_id, name, time.time(), members))
 
+    def add_groups(self, ids: List[str]) -> int:
+        """Groups from the contacts list: kept (with no message yet) so they can be marked; how many were new."""
+        with self._mu:
+            n = 0
+            for gid in ids:
+                cur = self._db.execute("INSERT OR IGNORE INTO chats (id, last_at) VALUES (?, 0)", (gid,))
+                n += cur.rowcount or 0
+            return n
+
+    def groups(self, limit: int) -> List[Tuple[str, str, int]]:
+        """(id, name, members) of every group kept: the ones with messages, newest first, then the rest by name."""
+        with self._mu:
+            return self._db.execute("SELECT id, name, members FROM chats WHERE id LIKE '%@chatroom' "
+                                    "ORDER BY last_at DESC, name = '', name, id LIMIT ?", (limit,)).fetchall()
+
+    def unnamed_groups(self, older_than: float, limit: int) -> List[str]:
+        with self._mu:
+            return [r[0] for r in self._db.execute(
+                "SELECT id FROM chats WHERE id LIKE '%@chatroom' AND name = '' AND named_at < ? "
+                "ORDER BY last_at DESC LIMIT ?", (older_than, limit)).fetchall()]
+
+    def set_chat_name(self, chat_id: str, name: str) -> None:
+        """A name read now ("" when WeChat has none: an unnamed group), without touching the member count."""
+        with self._mu:
+            self._db.execute("UPDATE chats SET name = CASE WHEN ? != '' THEN ? ELSE name END, named_at = ? WHERE id = ?",
+                             (name, name, time.time(), chat_id))
+
     def name(self, key: str) -> Optional[Tuple[str, str, float]]:
         with self._mu:
             return self._db.execute("SELECT name, mention, at FROM names WHERE key=?", (key,)).fetchone()
@@ -218,6 +248,9 @@ class WeChatBackend(Backend):
         self.me = ""
         self.me_name = ""
         self._gen = 0
+        self._groups_mu = threading.Lock()
+        self._groups_busy = False
+        self._groups_full_at = 0.0  # the last time the contacts' group list was read (this run)
         self._ready_for: Optional[Native] = None  # the program that has the sign-in (restored or just signed in)
 
     # ---------------------------------------------------------------- the program
@@ -386,6 +419,10 @@ class WeChatBackend(Backend):
                         self.store.put("cursor", str(ev.get("cursor") or ""))  # after the messages before it
                 elif kind == "link":
                     on_link("up" if ev.get("up") else "down", "" if ev.get("up") else "连接断开，正在重连")
+                    if ev.get("up"):
+                        self._refresh_groups(full=self._groups_stale())
+                elif kind == "contacts":  # a contact change: a group made, joined or renamed among them
+                    self._refresh_groups(full=True)
                 elif kind == "auth_lost":
                     raise CredentialsExpired(EXPIRED)
         finally:
@@ -405,6 +442,9 @@ class WeChatBackend(Backend):
         seen = self.store.seen(mid)
         if seen is not None and seen[1]:
             return True  # kept already, and handed over when it was live
+        if is_group(chat) and self.store.chat(chat) is None:
+            # a group new here (made or joined just now): kept below, then its name is read in the background
+            threading.Timer(1.0, self._refresh_groups, kwargs={"full": False}).start()
         if seen is None and ev.get("origin") != "live":
             self.store.add_message(ev)  # caught up after a reconnect, or our own send's echo: history only
             return True
@@ -475,6 +515,9 @@ class WeChatBackend(Backend):
 
     def _lookup_names(self, ids: List[str]) -> Dict[str, Tuple[str, str]]:
         """id → (shown name: remark or nickname, mention name: nickname) from WeChat."""
+        ids = [i for i in ids if i]  # never ask WeChat about nobody (a system line has no sender)
+        if not ids:
+            return {}
         try:
             r = self._call(self._link(), "contacts", 20, ids=ids[:40])
         except BackendError:
@@ -508,6 +551,8 @@ class WeChatBackend(Backend):
         return "%s|%s" % (chat_id if chat_id and is_group(chat_id) else "", user_id)
 
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
+        if not user_id:
+            return ""
         if user_id == self.me and self.me_name:
             return self.me_name
         key = self._name_key(user_id, chat_id)
@@ -540,6 +585,54 @@ class WeChatBackend(Backend):
             if k:
                 out[uid] = k
         return out
+
+    def group_candidates(self, limit: int) -> List[Chat]:
+        """Every group known here: the contacts' groups and every group with a message, from the local cache."""
+        out = []
+        for gid, name, members in self.store.groups(limit):
+            out.append(Chat(id=gid, kind="group", name=name or ("未命名的群（%s）" % gid.split("@", 1)[0][-4:]),
+                            members=members))
+        return out
+
+    def _groups_stale(self) -> bool:
+        try:
+            at = float(self.store.get("groups_at") or 0)
+        except ValueError:
+            at = 0.0
+        return time.time() - at > GROUPS_EVERY
+
+    def _refresh_groups(self, full: bool) -> None:
+        """In the background, one at a time: read the contacts' groups (full, at most once a minute), then the names
+        of the groups that have none yet."""
+        with self._groups_mu:
+            if self._groups_busy:
+                return
+            if full and time.time() - self._groups_full_at < GROUPS_SPACING:
+                full = False
+            self._groups_busy = True
+            if full:
+                self._groups_full_at = time.time()
+        threading.Thread(target=self._groups_work, args=(full,), name="matewechat-groups", daemon=True).start()
+
+    def _groups_work(self, full: bool) -> None:
+        try:
+            if full:
+                r = self._call(self._link(), "groups", 180)
+                ids = [str(g) for g in r.get("groups") or [] if is_group(str(g))]
+                new = self.store.add_groups(ids)
+                self.store.put("groups_at", str(time.time()))
+                log.info("WeChat groups: %d in the contacts, %d new here", len(ids), new)
+            for gid in self.store.unnamed_groups(time.time() - NAME_TTL, 400):
+                found = self._lookup_names([gid]).get(gid)
+                self.store.set_chat_name(gid, found[0] if found else "")
+                time.sleep(GROUP_NAME_PAUSE)  # gently: a person's account reading its own groups
+        except BackendError as e:
+            log.info("WeChat groups were not read now: %s", e.message)
+        except Exception:
+            log.exception("reading the WeChat groups failed")
+        finally:
+            with self._groups_mu:
+                self._groups_busy = False
 
     def media(self, ref: str, max_bytes: int) -> Tuple[str, bytes]:
         raise BackendError("这一版还不能查看微信里的图片和文件", "not_found")

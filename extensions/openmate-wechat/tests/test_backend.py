@@ -326,6 +326,54 @@ class AckTest(Base):
         self.assertEqual(self.requests("send"), [])
 
 
+class GroupsTest(Base):
+    def setUp(self):
+        super().setUp()
+        self._spacing, wb.GROUPS_SPACING, wb.GROUP_NAME_PAUSE = wb.GROUPS_SPACING, 0.0, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", self._spacing)
+
+    def wait(self, cond, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline and not cond():
+            time.sleep(0.05)
+        return cond()
+
+    def test_every_contacts_group_is_listed_and_named(self):
+        b = self.backend([{"event": "link", "up": True}, {"sleep": 1.5}])
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: l)
+        self.assertTrue(self.wait(lambda: {c.name for c in b.group_candidates(50)} == {"群g1", "群g2"}))
+        self.assertTrue(all(c.kind == "group" for c in b.group_candidates(50)))
+
+    def test_a_contact_change_reads_the_groups_again(self):
+        os.environ["FAKE_GROUPS"] = '["g1@chatroom"]'
+        b = self.backend([{"event": "link", "up": True}, {"sleep": 0.6}, {"event": "contacts"}, {"sleep": 1.5}])
+        b.restore({"state": {"k": "v1"}})
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: b.listen(lambda m: None, lambda s, r: None, stop), daemon=True)
+        t.start()
+        self.wait(lambda: len(self.requests("groups")) >= 1)
+        os.environ["FAKE_GROUPS"] = '["g1@chatroom", "g9@chatroom"]'  # read by the next program call only via env:
+        self.wait(lambda: len(self.requests("groups")) >= 2, 4)
+        stop.set()
+        t.join(5)
+        self.assertGreaterEqual(len(self.requests("groups")), 2, "the contact change made it read the list again")
+
+    def test_a_group_first_seen_in_a_message_is_listed_and_named(self):
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend([{"event": "link", "up": True}, msg("n1", "new7@chatroom", "wxid_bob", "大家好")])
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: g)
+        self.assertTrue(self.wait(lambda: "群new7" in {c.name for c in b.group_candidates(50)}))
+
+    def test_no_lookup_for_an_empty_id(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        self.assertEqual(b.user_name(""), "")
+        self.assertEqual(b._lookup_names(["", ""]), {})
+        self.assertEqual(self.requests("contacts"), [])
+
+
 class NamesTest(Base):
     def test_names_and_kinds(self):
         b = self.backend()

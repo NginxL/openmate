@@ -452,8 +452,10 @@ fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &Atomic
             }
         }
         if let Some(n) = conn.poll(Duration::from_secs(1))? {
-            if n.command != 356 {
-                // 356 is a contact change; names are read when shown
+            if n.command == 356 {
+                // a contact change (a group made, joined or renamed among them): the backend reads its group list again
+                app.out.line(&json!({"event": "contacts", "gen": gen}));
+            } else {
                 drain(app, &mut conn, cursor, 1, "live", gen, stop)?;
             }
         }
@@ -703,6 +705,32 @@ fn op_room(app: &App, p: &Value) -> Result<Value> {
     Ok(json!({"room_id": roster.room_id, "members": members, "member_count": count, "owner": roster.owner}))
 }
 
+/// Every group in the account's contacts (the 通讯录 list WeChat pages out at sign-in); groups never saved there show
+/// up only once they have a message.
+fn op_groups(app: &App) -> Result<Value> {
+    let client = app.client()?;
+    let (mut contacts, mut rooms) = (0u32, 0u32);
+    let mut groups = std::collections::BTreeSet::new();
+    for _ in 0..200 {
+        let page = app
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(20), client.init_contacts(contacts, rooms)).await })
+            .map_err(|_| anyhow!("读通讯录超时"))??;
+        for u in page.usernames {
+            if message::is_group(&u) {
+                groups.insert(u);
+            }
+        }
+        let moved = page.contact_sequence != contacts || page.room_sequence != rooms;
+        contacts = page.contact_sequence;
+        rooms = page.room_sequence;
+        if !page.more || !moved {
+            break;
+        }
+    }
+    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>()}))
+}
+
 // ---------------------------------------------------------------- main
 
 fn answer(app: &App, id: &Value, result: Result<Value>) {
@@ -742,6 +770,7 @@ fn handle(app: Arc<App>, req: Value) {
         "send" => op_send(&app, &req),
         "contacts" => op_contacts(&app, &req),
         "room" => op_room(&app, &req),
+        "groups" => op_groups(&app),
         "logout" => op_logout(&app),
         _ => Err(err("unsupported", &format!("不认识的操作 {op}"))),
     };

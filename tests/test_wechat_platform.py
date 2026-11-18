@@ -234,6 +234,20 @@ class MarksAndMentionsTest(unittest.TestCase):
         self.assertTrue(sent.startswith("【前提】下面只指测试环境。\n可以发布。"), sent)
 
 
+class GroupCandidatesTest(unittest.TestCase):
+    def test_every_listed_group_can_be_switched_on(self):
+        from openmate_core.backend import Chat
+
+        h = wechat(self)
+        h.app.backend.group_candidates = lambda limit: [Chat(id="quiet@chatroom", kind="group", name="安静的群")]
+        sec = [x for x in page(h)["sections"] if x.get("title") == "自动代答"][0]
+        row = [r for r in sec["items"] if r["key"] == "auto:quiet@chatroom"][0]
+        self.assertEqual(row["title"], "安静的群")
+        act(h, "autoreply", {"auto:quiet@chatroom": "true"})
+        self.assertIn("quiet@chatroom", h.app.store.autoreply_chats())
+        self.assertEqual(h.app.store.get_chat("quiet@chatroom")["name"], "安静的群")
+
+
 class FeishuUnchangedTest(unittest.TestCase):
     """What the shared core keeps doing for Feishu (it can edit): progress, and more than one /agent reply."""
 

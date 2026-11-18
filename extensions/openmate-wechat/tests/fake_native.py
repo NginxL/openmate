@@ -85,13 +85,18 @@ def answer(req):
             return ok(status="uncertain", message="no receipt")
         return ok(status="sent", message_id="srv_%d" % rid)
     if op == "contacts":
-        return ok(contacts=[{"id": i, "nickname": "昵称" + i[-1], "remark": ("备注" + i[-1]) if i == "wxid_bob" else None}
+        if any(not i for i in req.get("ids", [])):
+            return fail("input", "Empty contact identity")
+        return ok(contacts=[{"id": i, "nickname": ("群" + i.split("@")[0]) if i.endswith("@chatroom") else "昵称" + i[-1],
+                             "remark": ("备注" + i[-1]) if i == "wxid_bob" else None}
                             for i in req.get("ids", [])])
     if op == "room":
         if not isinstance(req.get("room_id"), str):
             return fail("input", "缺少 room_id")
         return ok(room_id=req.get("room_id"), member_count=3, members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
+    if op == "groups":
+        return ok(groups=json.loads(os.environ.get("FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')))
     if op == "hello":
         return ok(protocol=int(os.environ.get("FAKE_PROTOCOL", "2")), version="fake")
     if op in ("stop", "logout"):
