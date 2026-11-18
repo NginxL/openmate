@@ -86,6 +86,7 @@ class StdioHub:
         self.secrets: Dict[str, str] = {}
         self.secrets_fail = False
         self.secrets_delay = 0.0
+        self.save_hook: Optional[Callable[[dict], None]] = None  # run before a secrets.save is stored (to delay one)
         self.cli: Optional[Callable[[dict], Any]] = None  # params → result; raise HubSideError for an error answer
         self.sent_records: List[dict] = []  # sent.record calls the hub accepted
         self.sent_calls = 0
@@ -132,6 +133,8 @@ class StdioHub:
                 if method.endswith(".load"):
                     result = {"data": self.secrets[c]} if c in self.secrets else {}
                 elif method.endswith(".save"):
+                    if self.save_hook is not None:
+                        self.save_hook(secret_json(params["data"]))
                     self.secrets[c] = params["data"]
                     result = {}
                 else:

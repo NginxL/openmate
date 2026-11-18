@@ -90,7 +90,18 @@ class ConnectorApp:
         self.creds = "loading"  # loading | none | present | error
         self.creds_error = ""
         self._credentials: Optional[dict] = None
+        # Every write of the sealed credentials holds _creds_mu, so they land in order. _creds_gen moves on at each
+        # sign-in and logout: a rotation handed over before one is never written after it. From a logout until the
+        # next sign-in starts (_creds_out) none is written at all, so logout's delete stays the last write.
+        # _creds_seq numbers rotations as they are handed over: an older one never overwrites a newer.
         self._creds_mu = threading.Lock()
+        self._creds_gen = 0
+        self._creds_out = False
+        self._creds_seq = 0
+        self._creds_sealed_seq = 0
+        self._creds_cv = threading.Condition()
+        self._creds_next: Optional[tuple] = None  # (gen, seq, creds): the newest rotation the writer has not taken
+        self._creds_writer: Optional[threading.Thread] = None
         self.account: Optional[Account] = None
         self.link = "idle"  # idle | connecting | up | down | expired | error
         self.link_reason = ""
@@ -323,16 +334,51 @@ class ConnectorApp:
         data = base64.b64encode(json.dumps(creds, ensure_ascii=False).encode("utf-8")).decode("ascii")
         self.hub_call("connector.secrets.save", {"contribution": self.cid, "data": data})
 
+    def _rotation(self, creds: dict) -> tuple:
+        with self._creds_cv:
+            self._creds_seq += 1
+            return self._creds_gen, self._creds_seq, dict(creds)
+
     def _credentials_rotated(self, creds: dict) -> None:
-        """The adapter's session was refreshed: seal the new credentials (in the background)."""
-        def run():
+        """The adapter's session was refreshed: seal the new credentials in the background. One writer takes the
+        newest handed over (older ones it has not started are skipped), so the hub never ends on stale ones."""
+        rot = self._rotation(creds)
+        with self._creds_cv:
+            self._creds_next = rot
+            if self._creds_writer is None:
+                self._creds_writer = threading.Thread(target=self._creds_write_loop, name="openmate-creds",
+                                                      daemon=True)
+                self._creds_writer.start()
+
+    def _creds_write_loop(self) -> None:
+        while True:
+            with self._creds_cv:
+                rot, self._creds_next = self._creds_next, None
+                if rot is None:
+                    self._creds_writer = None
+                    return
+            try:
+                self._seal_rotation(*rot)
+            except Exception:
+                log.exception("saving refreshed credentials failed")
+
+    def _seal_rotation(self, gen: int, seq: int, creds: dict) -> bool:
+        """Write rotated credentials unless a sign-in or logout came after they were handed over, or newer ones are
+        already written."""
+        with self._creds_mu:
+            if gen != self._creds_gen or self._creds_out:
+                log.info("rotated credentials from a session that ended: not saved")
+                return False
+            if seq <= self._creds_sealed_seq:
+                return True  # newer ones are sealed already
             try:
                 self._save_credentials(creds)
-                self._credentials = creds
             except RPCError as e:
-                log.warning("saving refreshed credentials failed (%s)", e.code or "error")
-
-        threading.Thread(target=run, name="openmate-creds", daemon=True).start()
+                log.warning("saving rotated credentials failed (%s)", e.code or "error")
+                return False
+            self._creds_sealed_seq = seq
+            self._credentials = creds
+            return True
 
     def _history_from_backend(self, msgs: list) -> None:
         """Messages the adapter hands over as history: kept like a catch-up read, never acted on."""
@@ -343,15 +389,9 @@ class ConnectorApp:
                 log.exception("the adapter's history could not be kept")
 
     def _credentials_rotated_now(self, creds: dict) -> bool:
-        """Seal rotated credentials before the adapter uses them: in the caller's thread, one at a time."""
-        with self._creds_mu:
-            try:
-                self._save_credentials(creds)
-            except RPCError as e:
-                log.warning("saving rotated credentials failed (%s)", e.code or "error")
-                return False
-            self._credentials = creds
-            return True
+        """Seal rotated credentials before the adapter uses them: in the caller's thread, in order with every other
+        write. False when they were not written (a failure, or a logout or sign-in came first)."""
+        return self._seal_rotation(*self._rotation(creds))
 
     # ------------------------------------------------------------------ the sent-as-user ledger
 
@@ -875,6 +915,13 @@ class ConnectorApp:
             out["error"] = error
         return out
 
+    def _login_start(self):
+        """A new QR sign-in: from here the adapter's rotations are written again (WeChat seals the accepted sign-in
+        before login_finish answers)."""
+        with self._creds_mu:
+            self._creds_out = False
+        return self.backend.login_start()
+
     def m_login_step(self, params: dict) -> dict:
         if self.backend is None or self.store is None:
             raise RPCError(self.setup_error or "扩展还没准备好，请稍后再试")
@@ -886,7 +933,7 @@ class ConnectorApp:
                 return {"done": True, "account": self.me_name()}
             if not step or self._login is None:
                 try:
-                    qr = self.backend.login_start()
+                    qr = self._login_start()
                 except BackendError as e:
                     raise RPCError("没能开始登录：%s" % e.message)
                 self._login = {"state": qr.state, "url": qr.url}
@@ -900,7 +947,7 @@ class ConnectorApp:
                 # this attempt failed for a reason the user can act on (WeChat: confirm on the same LAN): a new QR
                 # with the reason, not "expired"
                 try:
-                    qr = self.backend.login_start()
+                    qr = self._login_start()
                 except BackendError as e2:
                     raise RPCError("扫码没成功（%s），换新二维码时出错：%s" % (e.message, e2.message))
                 self._login = {"state": qr.state, "url": qr.url}
@@ -909,7 +956,7 @@ class ConnectorApp:
                 return self._qr_prompt(flow["url"], p.login_hint_scanned)
             if status == "expired":
                 try:
-                    qr = self.backend.login_start()
+                    qr = self._login_start()
                 except BackendError as e:
                     raise RPCError("二维码过期了，换新的时出错：%s" % e.message)
                 self._login = {"state": qr.state, "url": qr.url}
@@ -921,15 +968,20 @@ class ConnectorApp:
             except BackendError as e:
                 self._login = None
                 raise RPCError("登录没有完成：%s" % e.message)
-            try:
-                self._save_credentials(done.credentials)
-            except RPCError:
-                self._login = None
-                raise RPCError("登录成功了，但保存登录信息失败，请重新登录")
+            with self._creds_mu:
+                # a rotation handed over before this sign-in is never written after it
+                with self._creds_cv:
+                    self._creds_gen += 1
+                try:
+                    self._save_credentials(done.credentials)
+                except RPCError:
+                    self._login = None
+                    raise RPCError("登录成功了，但保存登录信息失败，请重新登录")
+                self._credentials = done.credentials
+                self._creds_out = False
             self._login = None
             acct = done.account
             self._bind_account(acct)
-            self._credentials = done.credentials
             self.creds = "present"
             self._remember_account(acct)
             self._catchup_done.clear()
@@ -942,6 +994,12 @@ class ConnectorApp:
         return {"done": True, "account": acct.name or acct.id}
 
     def m_logout(self, params: dict) -> dict:
+        with self._creds_mu:
+            # from here no rotation is written: the delete below is the last write of the credentials
+            with self._creds_cv:
+                self._creds_gen += 1
+            self._creds_out = True
+            self._credentials = None
         with self.lock:
             self._gen += 1
             self._link_stop.set()
@@ -954,11 +1012,11 @@ class ConnectorApp:
                 self.backend.logout()
             except Exception:
                 log.exception("backend logout failed")
-        try:
-            self.hub_call("connector.secrets.delete", {"contribution": self.cid})
-        except RPCError as e:
-            raise RPCError("退出登录时删除保存的登录信息失败（%s），请再试一次" % (e.code or "error"))
-        self._credentials = None
+        with self._creds_mu:  # after any write in flight; none comes after it
+            try:
+                self.hub_call("connector.secrets.delete", {"contribution": self.cid})
+            except RPCError as e:
+                raise RPCError("退出登录时删除保存的登录信息失败（%s），请再试一次" % (e.code or "error"))
         self.creds = "none"
         self.account = None
         self.mark_changed("inbox")
