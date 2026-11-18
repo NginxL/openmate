@@ -503,8 +503,12 @@ class WeChatBackend(Backend):
                     self._refresh_groups(full=True)
                 elif kind == "removed":  # a contact or group gone from the account (a group quit on the phone)
                     rid = str(ev.get("id") or "")
-                    if is_group(rid):
+                    if is_group(rid) and ev.get("origin") == "live":
                         self._group_gone(rid, "removed in WeChat")
+                    elif is_group(rid):
+                        # caught up after a gap: it may have been joined again since; its member list says now
+                        self.store.put("member_at:" + rid, "0")
+                        self._refresh_groups(full=False)
                 elif kind == "auth_lost":
                     raise CredentialsExpired(EXPIRED)
         finally:
@@ -679,7 +683,7 @@ class WeChatBackend(Backend):
         while this was not listening, or whose removal never came). Only a full list without the account counts."""
         now = time.time()
         due = []
-        for gid, _, _ in self.store.groups(2000):
+        for gid, _, _ in self.store.groups(5000):
             if not gid.endswith("@chatroom"):
                 continue  # WeChat reads member lists of ordinary groups only
             try:
@@ -687,8 +691,9 @@ class WeChatBackend(Backend):
             except ValueError:
                 at = 0.0
             if now - at > MEMBER_EVERY:
-                due.append(gid)
-        for gid in due[:MEMBER_MOST]:
+                due.append((at, gid))
+        due.sort()  # never read first, then the longest ago: every group's turn comes
+        for _, gid in due[:MEMBER_MOST]:
             if self._closed or self.me != me:
                 return
             self.store.put("member_at:" + gid, str(time.time()))

@@ -440,7 +440,8 @@ class GroupGoneTest(Base):
     def test_a_group_removed_in_wechat_leaves_the_lists_until_a_newer_message(self):
         now = int(time.time())
         b = self.backend([msg("a1", "5@chatroom", "wxid_bob", "早", at=now - 100),
-                          {"event": "removed", "id": "5@chatroom"}, {"event": "removed", "id": "wxid_carl"}])
+                          {"event": "removed", "id": "5@chatroom", "origin": "live"},
+                          {"event": "removed", "id": "wxid_carl", "origin": "live"}])
         gone = []
         b.on_chat_gone = gone.append
         b.restore({"state": {"k": "v1"}})
@@ -472,6 +473,36 @@ class GroupGoneTest(Base):
         b2.on_chat_gone = told.append
         b2.restore({"state": {"k": "v1"}})
         self.assertEqual(told, ["7@chatroom"], "told again at start (the core may not have heard)")
+
+    def test_a_removal_caught_up_after_a_gap_waits_for_the_member_list(self):
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend([msg("r1", "6@chatroom", "wxid_bob", "早"), {"event": "removed", "id": "6@chatroom",
+                                                                     "origin": "catchup"}])
+        gone = []
+        b.on_chat_gone = gone.append
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: self.requests("room"))
+        deadline = time.time() + 3
+        while time.time() < deadline and not self.requests("room"):
+            time.sleep(0.05)
+        self.assertEqual(gone, [], "joined again meanwhile: its member list has the account")
+        self.assertIn("6@chatroom", [r["room_id"] for r in self.requests("room")])
+
+    def test_every_group_gets_its_member_list_read_in_turn(self):
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        now = int(time.time())
+        for i in range(5):
+            b.store.add_message(msg("x%d" % i, "%d@chatroom" % (100 + i), "wxid_bob", "hi", at=now - i))
+        most, wb.MEMBER_MOST = wb.MEMBER_MOST, 2
+        self.addCleanup(setattr, wb, "MEMBER_MOST", most)
+        every, wb.MEMBER_EVERY = wb.MEMBER_EVERY, 0.0
+        self.addCleanup(setattr, wb, "MEMBER_EVERY", every)
+        for _ in range(3):
+            b._check_members(b.me)
+        asked = [r["room_id"] for r in self.requests("room")]
+        self.assertEqual(sorted(set(asked)), ["%d@chatroom" % (100 + i) for i in range(5)], "none left out")
 
     def test_a_partial_member_list_proves_nothing(self):
         os.environ["FAKE_LEFT"] = "7@chatroom"

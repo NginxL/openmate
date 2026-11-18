@@ -531,6 +531,9 @@ fn drain(
                 app.out.line(&json!({"event": "read", "gen": gen, "chat": chat, "at": at, "origin": origin}));
                 continue;
             }
+            if raw.message_type == 51 {
+                continue; // the other status notices (a chat opened, a device handing over): never a message to show
+            }
             let (mut event, _) = message::normalize(&raw, &own, origin);
             if m.outgoing {
                 let text = event.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
