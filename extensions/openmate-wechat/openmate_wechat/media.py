@@ -31,6 +31,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .native import clean_env
+
 log = logging.getLogger("openmate.wechat.media")
 
 MOST = 25 * 1024 * 1024  # one ordinary CDN transfer (matewechat-native's limit too)
@@ -437,8 +439,9 @@ class Fetcher:
         except ValueError:
             return "", "语音转文字命令写得不对"
         try:
+            # the same allow-listed environment as the WeChat program: the hub's token never reaches a local tool
             r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               timeout=VOICE_TEXT_WAIT, check=False)
+                               timeout=VOICE_TEXT_WAIT, check=False, env=clean_env())
         except (OSError, subprocess.SubprocessError) as e:
             return "", "命令运行不了（%s）" % type(e).__name__
         text = r.stdout.decode("utf-8", "replace").strip()
@@ -490,7 +493,8 @@ class Fetcher:
             try:
                 subprocess.run([ff, "-nostdin", "-v", "error", "-y", "-ss", "%.2f" % at, "-i", video, "-frames:v", "1",
                                 "-vf", "scale='min(1280,iw)':-2", path], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=FRAME_WAIT, check=False)
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=FRAME_WAIT, check=False,
+                               env=clean_env())
             except (OSError, subprocess.SubprocessError):
                 continue
             if os.path.isfile(path) and os.path.getsize(path) > 0:
