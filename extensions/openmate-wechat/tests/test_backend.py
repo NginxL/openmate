@@ -303,6 +303,29 @@ class SendTest(Base):
         self.assertNotIsInstance(c.exception, SendRejected)
 
 
+class AckTest(Base):
+    def test_the_ack_line_quotes_the_request_without_an_at(self):
+        b = self.backend()
+        b.ack_text = "🤖 贾维斯处理中..."
+        b.restore({"state": {"k": "v1"}})
+        b.store.add_message(msg("a1", "1@chatroom", "wxid_bob", "@我 帮我看看", at_me=True))
+        b.react("1@chatroom", "a1", "🤖 贾维斯处理中...")
+        r = self.requests("send")[-1]
+        self.assertEqual((r["chat"], r["text"], r["quote"]["server_id"]), ("1@chatroom", "🤖 贾维斯处理中...", "a1"))
+        self.assertNotIn("mentions", r, "the answer @s them, the ack does not")
+        n = len(self.requests("send"))
+        b.react("1@chatroom", "a1", "DONE")  # a Feishu code: not a WeChat message
+        b.unreact("1@chatroom", "a1", "🤖 贾维斯处理中...")  # nothing to take back
+        self.assertEqual(len(self.requests("send")), n)
+        self.assertEqual(self.requests("recall"), [])
+
+    def test_no_ack_line_set_sends_nothing(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b.react("1@chatroom", "a1", "THINKING")
+        self.assertEqual(self.requests("send"), [])
+
+
 class NamesTest(Base):
     def test_names_and_kinds(self):
         b = self.backend()
@@ -327,6 +350,7 @@ class NamesTest(Base):
         self.assertEqual(v("@运营 例子 @Bob Smith\u2005/agent x"), "@运营 例子 @Bob Smith\u2005/agent x",
                          "never past a typed @")
         self.assertEqual(v("@Alice@Acme Chen\u2005/agent 整理"), "/agent 整理", "a name may hold @")
+        self.assertEqual(v("@运营 举例：@张三\u2005/agent 写周报"), "@运营 举例：@张三\u2005/agent 写周报")
 
     def test_proxy_variables_never_reach_the_program(self):
         env = clean_env({"PATH": "/bin", "https_proxy": "http://127.0.0.1:7897", "ALL_PROXY": "socks5://x"})

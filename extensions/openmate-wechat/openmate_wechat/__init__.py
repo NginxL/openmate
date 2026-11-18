@@ -21,10 +21,10 @@ EXTENSION_ID = "openmate-wechat"
 CONNECTOR_ID = "matewechat"
 CHATS_PAGE = "wechat-chats"
 CHATS_CARD = "wechat-chats-today"
-# One of WeChat's real @s: "@name" ended by U+2005. A name may hold "@" (Alice@Acme) but never a space before an "@":
-# that is a typed "@x …" before it, which stays.
+# One of WeChat's real @s: "@name" ended by U+2005. A name may hold "@" only inside an address-like word (Alice@Acme);
+# any other "@" in it is a typed "@x …" before the real one, and then nothing is taken off.
 AT_ONE = re.compile("^\\s*@([^\u2005\\n]{1,1024}?)\u2005")
-TYPED_AT = re.compile("\\s@")
+TYPED_AT = re.compile("(?<![A-Za-z0-9._-])@")  # an "@" not inside an address-like name (Alice@Acme) is a typed one
 
 
 def mark_view(text: str) -> str:
@@ -51,7 +51,8 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
 
     inst = Installer(data_dir, str(config.get("native_path") or ""))
     inst.start()  # in the background: the extension answers the hub meanwhile
-    return WeChatBackend(inst.path, data_dir)  # path(wait): waits that long for a download in progress
+    # path(wait): waits that long for a download in progress
+    return WeChatBackend(inst.path, data_dir, ack_text=str(config.get("agent_ack_reaction") or ""))
 
 
 def platform(manifest_path: str = "") -> Platform:

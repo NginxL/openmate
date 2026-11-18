@@ -87,8 +87,8 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 
 `openmate-wechat`（连接器 `matewechat`）只做两件事，和飞书的同名功能一致：
 
-- **`/agent`**：你自己在微信任意会话里（手机或任何设备）发 `/agent …`，Agent 用你的全部权限处理，以你的身份把结果回复到原会话。要先在设置里打开“启用 /agent”。微信不能编辑消息，所以只回复一次最终结果，没有中途进度和表情回应。
-- **群里自动代答**：在 Persona 的“微信”页里勾选的群，有人真正 @ 你（不是手打名字）时，AI 用访客会话以你的身份引用并 @ 对方回复一次；只 @所有人、私聊、公众号不代答；每群每小时、每天有上限。
+- **`/agent`**：你自己在微信任意会话里（手机或任何设备）发 `/agent …`，Agent 用你的全部权限处理，以你的身份把结果回复到原会话。要先在设置里打开“启用 /agent”。微信不能编辑消息、没有表情回应：接单时先引用你的消息发一句“接单提示”（默认“🤖 处理中...”，可改可关，不撤回），然后只回复一次最终结果，没有中途进度。
+- **群里自动代答**：在 Persona 的“微信”页里勾选的群，有人真正 @ 你（不是手打名字）时，先引用对方的话发一句“接单提示”，再由 AI 用访客会话以你的身份引用并 @ 对方回复一次；只 @所有人、私聊、公众号不代答；每群每小时、每天有上限。
 
 连接微信的是本仓库 `native/matewechat-native`（Rust）编译出的小程序，它用 [thisnick/agent-wechat](https://github.com/thisnick/agent-wechat)（MIT）的协议库 `wechat-protocol`（crates.io 2.7.0，只用公开接口）。扩展首次启动时从本仓库的 GitHub release 下载它，并按扩展里钉死的 SHA-256 校验；第三方许可全文见 `native/THIRD-PARTY-NOTICES.md`。只支持 Apple 芯片的 Mac，请在手机旁边的 Mac 上用，不要放在服务器上。和飞书扩展一样，装好后要在 hub 机器上关掉它的沙箱（`personad extension sandbox openmate-wechat off`）：沙箱里它打不开自己的数据库，也起不了连微信的程序。
 

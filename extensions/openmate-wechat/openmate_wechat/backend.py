@@ -203,8 +203,11 @@ class Store:
 class WeChatBackend(Backend):
     render_version = "1"
 
-    def __init__(self, native_path: Any, data_dir: str):
-        """native_path: the program's path, or a callable that returns it (waiting for a download) or raises."""
+    def __init__(self, native_path: Any, data_dir: str, ack_text: str = ""):
+        """native_path: the program's path, or a callable that returns it (waiting for a download) or raises.
+        ack_text: the line put in the chat when a /agent or 自动代答 request is taken (the setting agent_ack_reaction);
+        WeChat has no reactions, so the core's "reaction" is this message."""
+        self.ack_text = (ack_text or "").strip()
         self._native_path = native_path
         os.makedirs(data_dir, exist_ok=True)
         self.store = Store(os.path.join(data_dir, "wechat.db"))
@@ -543,9 +546,21 @@ class WeChatBackend(Backend):
 
     # ---------------------------------------------------------------- writes
 
-    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def react(self, chat_id: str, message_id: str, reaction: str) -> None:
+        """The request was taken: the ack line, quoting the request, as the account (no @: the answer will @ them).
+        Only the configured line goes out; any other "reaction" (a Feishu code such as DONE) is not a WeChat thing."""
+        if not self.ack_text or reaction.strip() != self.ack_text:
+            return
+        self.send(chat_id, self.ack_text, reply_to=message_id, mention=False)
+
+    def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
+        """Nothing to take back: the ack line stays (a recall works only for 2 minutes and leaves a notice)."""
+
+    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+             mention: bool = True) -> str:
         """Text as the account into chat_id (root names no other chat on WeChat). reply_to is quoted; in a group, its
-        sender is @-ed too when it is someone else. Only a send that surely did not go out raises SendRejected."""
+        sender is @-ed too when it is someone else (unless mention is False). Only a send that surely did not go out
+        raises SendRejected."""
         if not text.strip():
             raise SendRejected("消息内容是空的")
         params: Dict[str, Any] = {"chat": chat_id, "text": text, "key": "om-" + uuid.uuid4().hex}
@@ -555,7 +570,7 @@ class WeChatBackend(Backend):
             sender = str(ev.get("sender") or "")
             mine = bool(ev.get("mine")) or sender == self.me
             name = ""
-            if is_group(chat_id) and sender and not mine:  # answering someone in a group: @ them for real
+            if mention and is_group(chat_id) and sender and not mine:  # answering someone in a group: @ them
                 name = self._mention_name(sender, chat_id)
                 params["mentions"] = [{"id": sender, "name": name}]
             if ev.get("quotable"):  # a text message: quoted (anything else gets the plain answer)

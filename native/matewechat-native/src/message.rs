@@ -96,7 +96,8 @@ fn xml_text<'a>(node: roxmltree::Node<'a, 'a>, path: &[&str]) -> Option<String> 
         cur = cur.children().find(|c| c.is_element() && c.tag_name().name() == *name)?;
     }
     let text: String = cur.descendants().filter(|n| n.is_text()).filter_map(|n| n.text()).collect();
-    Some(text.trim().to_owned())
+    // ordinary whitespace only: a real @'s U+2005 at the end of a quote's text marks it for the @ parsing
+    Some(text.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\u{3000}').to_owned())
 }
 
 /// An app message (type 49): (OpenMate type, text, quoted server id, quoted sender, quoted text).
@@ -304,6 +305,13 @@ mod tests {
         let (e, _) = normalize(&raw("wxid_bob", "wxid_bob", false, 1, "hello", None), "wxid_me", "live");
         assert_eq!(e["sender"], "wxid_bob");
         assert_eq!(e["group"], false);
+    }
+
+    #[test]
+    fn quote_reply_keeps_a_real_mention_end() {
+        let xml = "<msg><appmsg><title>@我\u{2005}</title><type>57</type><refermsg><svrid>1</svrid></refermsg></appmsg></msg>";
+        let (e, _) = normalize(&raw("1@chatroom", "1@chatroom", false, 49, &format!("wxid_bob:\n{xml}"), None), "wxid_me", "live");
+        assert_eq!(e["text"], "@我\u{2005}");
     }
 
     #[test]

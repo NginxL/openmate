@@ -132,7 +132,8 @@ def model_label(model: str) -> str:
     return out + (" 1M" if one_m else "")
 
 
-_BUILTIN_MARK = re.compile("^(?:%s)(?:$|\\s|·)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
+_BUILTIN_MARK = re.compile("^(?:%s)(?:$|\\s|·|，|,)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
+_GENERIC_MARK = re.compile("^%s(?:$|\\s*·|\\s*[：:])" % re.escape(AI_MARKS[2]))  # another AI's "🤖 AI · …" / "🤖 AI：…"
 
 
 def fill_header(template: str, model: str, effort: str) -> str:
@@ -310,6 +311,13 @@ class AgentRunner:
                 out.append(re.compile(re.escape(line).replace("\x01", ".+?").replace("\x02", ".+?")))
         return out
 
+    def _is_own_mark_line(self, line: str) -> bool:
+        """A line that is one of our marks exactly: a configured header as fill_header renders it, or the old end
+        mark. "🤖 AI 回复 API 仍不允许上线。" is an answer, not a mark."""
+        line = line.lstrip("> ").strip()
+        return line in (DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]) \
+            or any(p.fullmatch(line) for p in self._header_patterns())
+
     def _is_mark_line(self, line: str) -> bool:
         """WeChat: a line that is an AI mark (a built-in one as a word: "🤖 AI 代答功能…" is text; or a whole
         configured header)."""
@@ -343,7 +351,9 @@ class AgentRunner:
             return
         if self.is_agent_text(text) or self._echo(text):
             return
-        body = strip_leading_mentions(self._mark_view(text)).strip()
+        view = getattr(self.app.platform, "mark_view", None)
+        # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after any leading @s
+        body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
         if body.lower() in STOP_WORDS:
             if self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"])):
                 threading.Thread(target=self._on_stop, args=(row,), name="openmate-agent-stop", daemon=True).start()
@@ -406,7 +416,7 @@ class AgentRunner:
         if row.get("at") and abs(now - row["at"]) > self.app.timing.agent_fresh:
             return
         text = row.get("text") or ""
-        if self.is_agent_text(text) or ai_marked(self._mark_view(text), AI_MARKS):
+        if self.is_agent_text(text) or self._other_ai(text):
             return
         if not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
             return
@@ -1106,8 +1116,8 @@ class AgentRunner:
         if getattr(self.app.platform, "mark_view", None) is None:  # Feishu: as it always cleaned
             marks = self._header_marks()
             is_mark = lambda line: any(line.lstrip("> ").strip().startswith(m) for m in marks)  # noqa: E731
-        else:  # WeChat: only a whole mark line goes, an answer's own "【结论】…" stays
-            is_mark = self._is_mark_line
+        else:  # WeChat: only a line that is a mark as we render it (or the old end mark) goes; answers stay whole
+            is_mark = self._is_own_mark_line
         while t and is_mark(t.split("\n", 1)[0]):
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
         while t and is_mark(t.rsplit("\n", 1)[-1]):
@@ -1239,6 +1249,14 @@ class AgentRunner:
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
         return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
+
+    def _other_ai(self, text: str) -> bool:
+        """Another AI's message: Feishu, any line starting "🤖 AI"; WeChat, its first or last line is "🤖 AI" as a mark
+        (alone, or before "·" or a colon), so a person's "🤖 AI 代答功能什么时候上线？" is still a question."""
+        if getattr(self.app.platform, "mark_view", None) is None:
+            return ai_marked(text, AI_MARKS)
+        first, last = mark_lines(self._mark_view(text))
+        return any(_GENERIC_MARK.match(x.lstrip("> ").strip()) for x in (first, last))
 
     def _mark_view(self, text: str) -> str:
         """The text as the AI-mark check reads it: the platform's view (WeChat: without the "@name " a reply that @s

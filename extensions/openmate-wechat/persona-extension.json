@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-wechat",
   "name": "微信（OpenMate）",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "在微信里用 /agent 让 Agent 以你的身份处理和回复，并在你勾选的群里有人 @ 你时自动代答。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -76,22 +76,22 @@
       },
       "agent_ack_reaction": {
         "type": "string",
-        "title": "接单表情",
-        "description": "微信没有表情回应，保持留空。",
-        "default": "",
+        "title": "接单提示",
+        "description": "收到你的 /agent，或勾选的群里有人 @ 你要代答时，先引用那条消息在原会话发这一句（以你的身份，大家都看得到，不会撤回）。微信没有表情回应，用它表示已经在处理。留空表示不发。",
+        "default": "🤖 处理中...",
         "maxLength": 40
       },
       "agent_done_reaction": {
         "type": "string",
         "title": "完成表情",
-        "description": "微信没有表情回应，保持留空。",
+        "description": "微信没有表情回应，保持留空（填了也不会发）。",
         "default": "",
         "maxLength": 40
       },
       "agent_fail_reaction": {
         "type": "string",
         "title": "失败表情",
-        "description": "微信没有表情回应，保持留空。",
+        "description": "微信没有表情回应，保持留空（填了也不会发）。",
         "default": "",
         "maxLength": 40
       },

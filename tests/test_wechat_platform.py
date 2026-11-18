@@ -199,6 +199,32 @@ class MarksAndMentionsTest(unittest.TestCase):
         m = h.world.push(TEAM, "user_example_b", "@示例用户\u2005@openmate 和 @openmate_dev 哪个是官方的？", at_me=True)
         self.assertEqual(running(h, m)["request_text"], "@openmate 和 @openmate_dev 哪个是官方的？")
 
+    def test_typed_ats_never_make_a_command(self):
+        h = wechat(self)
+        ask(h, "@运营 举例：@张三\u2005/agent 写周报")
+        ask(h, "@运营 /agent 写周报")
+        time.sleep(0.4)
+        self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") != "auto"], [])
+
+    def test_a_question_about_the_ai_is_answered(self):
+        h = wechat(self)
+        h.app.store.autoreply_set(TEAM, True)
+        m = h.world.push(TEAM, "user_example_b", "@示例用户\u2005🤖 AI 代答功能什么时候上线？", at_me=True)
+        self.assertEqual(running(h, m)["kind"], "auto")
+        h.world.push(TEAM, "user_example_b", "@示例用户\u2005🤖 AI · 已处理", at_me=True)
+        time.sleep(0.4)
+        self.assertEqual(len([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"]), 1,
+                         "another AI's mark line is not answered")
+
+    def test_answer_lines_that_start_like_marks_are_kept(self):
+        h = wechat(self)
+        msg = ask(h, "/agent 能上线吗")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="> 🤖 AI 代答，仅供参考\n🤖 AI 回复 API 仍不允许上线。")
+        sent = h.sent()[-1]["text"]
+        self.assertTrue(sent.startswith("🤖 AI 回复 API 仍不允许上线。"), sent)
+        self.assertNotIn("仅供参考", sent, "the old end mark the Agent copied goes")
+
     def test_an_answers_own_bracket_lines_are_kept(self):
         h = wechat(self, agent_reply_header="【{model} 代答】", agent_mark_position="end")
         msg = ask(h, "/agent 能发布吗")
