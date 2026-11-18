@@ -328,6 +328,23 @@ class AckTest(Base):
         self.assertEqual(self.requests("send"), [])
 
 
+class ReadTest(Base):
+    def test_a_chat_read_on_the_phone_after_the_last_message_is_done(self):
+        now = int(time.time())
+        b = self.backend([msg("r1", "wxid_bob", "wxid_bob", "在吗", at=now - 60),
+                          {"event": "read", "chat": "wxid_bob", "at": now - 30}])
+        hints = []
+        b.on_chats_done = hints.append
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: hints)
+        self.assertEqual(hints, [{"wxid_bob": float(now - 30)}])
+        self.assertEqual(b.chat_done_states(["wxid_bob", "wxid_ann"]), {"wxid_bob": float(now - 30), "wxid_ann": None})
+        b.store.add_message(msg("r2", "wxid_bob", "wxid_bob", "还有一件事", at=now))
+        self.assertEqual(b.chat_done_states(["wxid_bob"]), {"wxid_bob": None}, "a new message brings it back")
+        b._on_read("wxid_bob", now - 100)
+        self.assertEqual(b.store.get("read:wxid_bob"), str(now - 30), "an older read never moves it back")
+
+
 class GroupsTest(Base):
     def setUp(self):
         super().setUp()

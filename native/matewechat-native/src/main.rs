@@ -509,6 +509,11 @@ fn drain(
                 created_at: m.created_at,
                 msgsource: source.as_deref(),
             };
+            if let Some((chat, at)) = message::read_control(&raw, &own) {
+                // read on the phone (or another device): the backend counts the chat as handled up to then
+                app.out.line(&json!({"event": "read", "gen": gen, "chat": chat, "at": at, "origin": origin}));
+                continue;
+            }
             let (mut event, _) = message::normalize(&raw, &own, origin);
             if m.outgoing {
                 let text = event.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
@@ -713,6 +718,7 @@ fn op_groups(app: &App) -> Result<Value> {
     let mut groups = std::collections::BTreeSet::new();
     let deadline = Instant::now() + Duration::from_secs(150); // within the backend's wait: never a page after it gave up
     let mut complete = false;
+    let mut total = 0usize; // every contact the pages named (friends, groups, official accounts)
     for _ in 0..200 {
         if Instant::now() >= deadline {
             break;
@@ -721,6 +727,7 @@ fn op_groups(app: &App) -> Result<Value> {
             .rt
             .block_on(async { tokio::time::timeout(Duration::from_secs(20), client.init_contacts(contacts, rooms)).await })
             .map_err(|_| anyhow!("读通讯录超时"))??;
+        total += page.usernames.len();
         for u in page.usernames {
             if message::is_group(&u) {
                 groups.insert(u);
@@ -737,7 +744,7 @@ fn op_groups(app: &App) -> Result<Value> {
             break;
         }
     }
-    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete}))
+    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total}))
 }
 
 // ---------------------------------------------------------------- main

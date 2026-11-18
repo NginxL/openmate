@@ -124,7 +124,8 @@ class Store:
         with self._mu:
             for t in ("messages", "chats", "names"):
                 self._db.execute("DELETE FROM " + t)
-            self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%'")
+            self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%' "
+                             "OR key LIKE 'read:%'")
 
     def seen(self, mid: str) -> Optional[Tuple[int, bool]]:
         """(position, delivered) of a kept message, None when new."""
@@ -215,6 +216,17 @@ class Store:
                 "SELECT id FROM chats WHERE id LIKE '%@chatroom' AND name = '' AND named_at < ? "
                 "ORDER BY last_at DESC LIMIT ?", (older_than, limit)).fetchall()]
 
+    def last_incoming(self, chat: str) -> int:
+        """When someone else last wrote in the chat (0: never, as far as kept here)."""
+        with self._mu:
+            rows = self._db.execute("SELECT body FROM messages WHERE chat=? ORDER BY position DESC LIMIT 200",
+                                    (chat,)).fetchall()
+        for (body,) in rows:
+            ev = json.loads(body)
+            if not ev.get("mine") and ev.get("type") != "SYSTEM":
+                return int(ev.get("at") or 0)
+        return 0
+
     def set_chat_name(self, chat_id: str, name: str) -> None:
         """A name read now ("" when WeChat has none: an unnamed group), without touching the member count."""
         with self._mu:
@@ -239,6 +251,9 @@ class Store:
 
 class WeChatBackend(Backend):
     render_version = "1"
+    # a chat read on the phone (WeChat syncs the read to every device) after the last message from someone else
+    # counts as 处理完 here, as Feishu's 完成 does; a new message brings it back
+    done_marks = True
 
     def __init__(self, native_path: Any, data_dir: str, ack_text: str = ""):
         """native_path: the program's path, or a callable that returns it (waiting for a download) or raises.
@@ -436,6 +451,8 @@ class WeChatBackend(Backend):
                     on_link("up" if ev.get("up") else "down", "" if ev.get("up") else "连接断开，正在重连")
                     if ev.get("up"):
                         self._refresh_groups(full=self._groups_stale())
+                elif kind == "read":  # read on the phone or another device: handled up to then
+                    self._on_read(str(ev.get("chat") or ""), int(ev.get("at") or 0))
                 elif kind == "contacts":  # a contact change: a group made, joined or renamed among them
                     self._refresh_groups(full=True)
                 elif kind == "auth_lost":
@@ -612,6 +629,35 @@ class WeChatBackend(Backend):
                 out[uid] = k
         return out
 
+    def _on_read(self, chat: str, at: int) -> None:
+        if not chat or at <= 0:
+            return
+        key = "read:" + chat
+        try:
+            before = int(self.store.get(key) or 0)
+        except ValueError:
+            before = 0
+        if at <= before:
+            return
+        self.store.put(key, str(at))
+        if self.on_chats_done is not None:
+            try:
+                self.on_chats_done({chat: float(at)})  # a hint: the core asks chat_done_states
+            except Exception:
+                log.exception("the core did not take a WeChat read")
+
+    def chat_done_states(self, chat_ids: List[str]) -> Dict[str, Optional[float]]:
+        """A chat counts as done when it was read on the phone after the last message from someone else."""
+        out: Dict[str, Optional[float]] = {}
+        for cid in chat_ids:
+            try:
+                read = int(self.store.get("read:" + cid) or 0)
+            except ValueError:
+                read = 0
+            last = self.store.last_incoming(cid)
+            out[cid] = float(read) if read and last and read >= last else None
+        return out
+
     def group_candidates(self, limit: int) -> List[Chat]:
         """Every group known here: the contacts' groups and every group with a message, from the local cache."""
         out = []
@@ -657,8 +703,8 @@ class WeChatBackend(Backend):
                     new = self.store.add_groups(ids)
                     if r.get("complete"):
                         self.store.put("groups_at", str(time.time()))
-                    log.info("WeChat groups: %d in the contacts (%s), %d new here", len(ids),
-                             "all" if r.get("complete") else "not all yet", new)
+                    log.info("WeChat groups: %d in the contacts of %s (%s), %d new here", len(ids),
+                             r.get("contacts", "?"), "all" if r.get("complete") else "not all yet", new)
                 pending = self.store.unnamed_groups(time.time() - NAME_TTL, 400)
                 for i in range(0, len(pending), 2):  # two per request, as WeChat takes them
                     if self._closed or self.me != me:

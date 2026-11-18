@@ -131,6 +131,31 @@ fn app_message(content: &str) -> (&'static str, String, String, String, String) 
     }
 }
 
+/// A read the account made on another device (the phone): WeChat syncs it as the account's own type-51 control
+/// `<msg><op id="1|2|5"><username>chat</username>…</op></msg>` (1 read up to a message, 2 opened, 5 left the chat; the
+/// shapes agent-wechat's daemon reads). The chat and when; None for anything else.
+pub fn read_control(raw: &Raw, own: &str) -> Option<(String, u32)> {
+    if raw.message_type != 51 || !raw.outgoing || own.is_empty() || raw.from != own || raw.created_at == 0 {
+        return None;
+    }
+    let body = raw.content.trim();
+    if body.len() > 64 * 1024 {
+        return None;
+    }
+    let doc = roxmltree::Document::parse(body).ok()?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "msg" {
+        return None;
+    }
+    let op = root.children().find(|n| n.is_element() && n.tag_name().name() == "op")?;
+    if !matches!(op.attribute("id"), Some("1") | Some("2") | Some("5")) {
+        return None;
+    }
+    let chat = xml_text(op, &["username"])?;
+    let ok = !chat.is_empty() && chat.len() <= 512 && chat != own && chat != "fmessage" && !chat.chars().any(|c| c.is_control() || c.is_whitespace());
+    ok.then_some((chat, raw.created_at))
+}
+
 /// The message event for OpenMate, and what a quote of it needs (text messages only).
 pub fn normalize(raw: &Raw, own: &str, origin: &str) -> (Value, Option<Quotable>) {
     let group = is_group(raw.chat);
@@ -330,6 +355,17 @@ mod tests {
         let (e, _) = normalize(&raw("wxid_bob", "wxid_bob", false, 3, "<msg/>", None), "wxid_me", "live");
         assert_eq!(e["type"], "IMAGE");
         assert_eq!(e["text"], "[图片]");
+    }
+
+    #[test]
+    fn a_read_on_the_phone() {
+        let xml = "<msg><op id='2'><username>1@chatroom</username><name>lastMessage</name><arg>x</arg></op></msg>";
+        let r = Raw { chat: "1@chatroom", from: "wxid_me", outgoing: true, server_id: "9", message_type: 51, content: xml, created_at: 1_700_000_100, msgsource: None };
+        assert_eq!(read_control(&r, "wxid_me"), Some(("1@chatroom".to_string(), 1_700_000_100)));
+        let other = Raw { from: "wxid_bob", outgoing: false, ..r };
+        assert_eq!(read_control(&other, "wxid_me"), None);
+        let op9 = Raw { content: "<msg><op id='9'><username>x</username></op></msg>", ..r };
+        assert_eq!(read_control(&op9, "wxid_me"), None);
     }
 
     #[test]
