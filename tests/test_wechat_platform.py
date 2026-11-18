@@ -266,6 +266,34 @@ class RoundNineTest(unittest.TestCase):
         wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "stopped", what="stopped")
 
 
+class AlignedWithFeishuTest(unittest.TestCase):
+    def archived(self, h):
+        chats, cursor = set(), ""
+        for _ in range(20):
+            res = h.c("archive.changes", cursor=cursor, limit=100)
+            chats |= {b["chat"]["id"] for b in res["batches"]}
+            cursor = res["next"]
+            if not res["more"]:
+                return chats
+        self.fail("archive.changes never ended")
+
+    def test_direct_chats_are_archived_groups_only_when_turned_on(self):
+        h = wechat(self)
+        got = self.archived(h)
+        self.assertIn("chat_example_dm_a", got)
+        self.assertNotIn(TEAM, got, "groups stay out by default")
+        h2 = wechat(self, archive_groups=True)
+        self.assertIn(TEAM, self.archived(h2))
+
+    def test_sends_and_the_inbox_are_there(self):
+        h = wechat(self)
+        names = [t["name"] for t in h.c("actions.list")["tools"]]
+        self.assertIn(CID + "_send", names)
+        things = h.c("inbox.collect", since="", limit=50)["things"]
+        self.assertEqual({t["kind"] for t in things} >= {"dm", "mention"}, True)
+        self.assertTrue(all("微信" in t["context"] for t in things), "worded for WeChat")
+
+
 class GroupCandidatesTest(unittest.TestCase):
     def test_every_listed_group_can_be_switched_on(self):
         from openmate_core.backend import Chat

@@ -996,6 +996,8 @@ class ConnectorApp:
         batches: Dict[str, List[dict]] = {}
         scanned = after
         more = len(rows) == ARCHIVE_ROWS_MOST
+        keep = getattr(self.platform, "archive_chat", None)
+        kept: Dict[str, bool] = {}
         for r in rows:
             if r["chat_id"] not in batches and len(batches) >= most_chats:
                 more = True
@@ -1003,6 +1005,16 @@ class ConnectorApp:
             scanned = r["seq"]
             if views.is_system(r) or not views.has_content(r):
                 continue
+            if keep is not None:  # the platform's rule (WeChat: no groups unless turned on, no official accounts)
+                cid = r["chat_id"]
+                if cid not in kept:
+                    try:
+                        kept[cid] = bool(keep(cid, self.store.get_chat(cid), self.config or {}))
+                    except Exception:
+                        log.exception("the archive rule failed: the chat is left out")
+                        kept[cid] = False
+                if not kept[cid]:
+                    continue
             batches.setdefault(r["chat_id"], []).append(r)
         me = self.me_name()
         out = []

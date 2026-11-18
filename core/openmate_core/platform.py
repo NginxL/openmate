@@ -47,6 +47,9 @@ class Platform:
     #: how the AI-mark check reads a message (None: as it is). WeChat drops the "@name " a reply starts with, so a
     #: mark on the first line after it is seen, the built-in marks and the configured header alike
     mark_view: Optional[Callable[[str], str]] = None
+    #: whether a chat's messages go to the knowledge base: (chat id, its stored row or None, the settings) → bool;
+    #: None: every chat (Feishu). WeChat keeps groups out unless the user turns them on, and official accounts out
+    archive_chat: Optional[Callable[[str, Optional[dict], Dict], bool]] = None
 
 
 @dataclass

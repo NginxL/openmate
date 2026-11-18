@@ -55,6 +55,18 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
     return WeChatBackend(inst.path, data_dir, ack_text=str(config.get("agent_ack_reaction") or ""))
 
 
+def archive_chat(chat_id: str, chat, config: Dict) -> bool:
+    """What goes to the knowledge base: direct chats and the user's own notes (文件传输助手); groups only with the setting
+    群聊进知识库 (the others in them did not agree to be recorded); never official accounts or WeChat's own."""
+    from .backend import is_group, kind_of
+
+    if is_group(chat_id) or (chat or {}).get("kind") == "group":
+        return bool(config.get("archive_groups"))
+    if chat_id == "filehelper":
+        return True
+    return kind_of(chat_id) == "user"
+
+
 def platform(manifest_path: str = "") -> Platform:
     return Platform(
         extension_id=EXTENSION_ID,
@@ -71,9 +83,8 @@ def platform(manifest_path: str = "") -> Platform:
         chats_card=CHATS_CARD,
         can_edit=False,
         mark_view=mark_view,
-        # phase one is /agent and 自动代答 only: no generic sends, inbox, conversation pages or archive
-        methods_off=("actions.list", "actions.describe", "actions.do", "inbox.collect", "inbox.reply",
-                     "thread.page", "thread.media", "archive.changes", "archive.media"),
+        archive_chat=archive_chat,
+        handle_kind="",  # no sender handles in archive batches (WeChat ids are not a kind the knowledge base knows)
     )
 
 

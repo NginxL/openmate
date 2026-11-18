@@ -3,31 +3,79 @@
   "id": "openmate-wechat",
   "name": "微信（OpenMate）",
   "version": "0.1.7",
-  "description": "在微信里用 /agent 让 Agent 以你的身份处理和回复，并在你勾选的群里有人 @ 你时自动代答。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
+  "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
   "icon": "assets/icon.png",
-  "tags": ["微信", "WeChat", "聊天", "Agent", "OpenMate"],
-  "engines": {"persona": ">=202611110000", "extension_protocol": 1},
-  "runtime": {"command": "bin/openmate-wechat"},
-  "activation_events": ["on_startup"],
+  "tags": [
+    "微信",
+    "WeChat",
+    "聊天",
+    "Agent",
+    "OpenMate"
+  ],
+  "engines": {
+    "persona": ">=202611110000",
+    "extension_protocol": 1
+  },
+  "runtime": {
+    "command": "bin/openmate-wechat"
+  },
+  "activation_events": [
+    "on_startup"
+  ],
   "contributes": {
     "connectors": [
       {
         "id": "matewechat",
         "name": "微信（OpenMate）",
-        "capabilities": ["status", "tools", "events", "login"],
-        "agent_tools": ["matewechat_status", "matewechat_chats", "matewechat_messages", "matewechat_search", "matewechat_agent_reply"],
-        "confirm_always": ["matewechat_*"],
+        "capabilities": [
+          "status",
+          "tools",
+          "actions",
+          "events",
+          "inbox",
+          "archive",
+          "login",
+          "threads"
+        ],
+        "agent_tools": [
+          "matewechat_status",
+          "matewechat_chats",
+          "matewechat_messages",
+          "matewechat_search",
+          "matewechat_agent_reply"
+        ],
+        "confirm_always": [
+          "matewechat_*"
+        ],
         "sends_as_user": true,
-        "poll_seconds": 60
+        "poll_seconds": 60,
+        "kinds": [
+          "dm",
+          "mention",
+          "group"
+        ],
+        "kind_descriptions": {
+          "dm": "类型：微信私聊里别人发给我、我还没回的消息。微信没有已读回执，“没回”只表示我最后没发过消息。熟人的问题、约定、请求才需要我；服务通知、推销、验证码算噪音。",
+          "mention": "类型：微信群里有人真正 @我（不是手打名字）、我还没回的消息。只 @所有人 的多是通知。",
+          "group": "类型：微信群里的新消息，没有 @我：多数知悉即可；红包、接龙、拼单、广告是噪音。"
+        }
       }
     ],
     "assistant": [
-      {"id": "matewechat", "instructions": "assistant/instructions.md"}
+      {
+        "id": "matewechat",
+        "instructions": "assistant/instructions.md"
+      }
     ],
     "ui": [
-      {"id": "wechat-chats", "title": "微信", "placement": "nav_page", "icon": "list"}
+      {
+        "id": "wechat-chats",
+        "title": "微信",
+        "placement": "nav_page",
+        "icon": "list"
+      }
     ]
   },
   "configuration": {
@@ -71,7 +119,16 @@
         "type": "string",
         "title": "AI 标记位置",
         "description": "AI 标记行放在回复末尾还是第一行。",
-        "oneOf": [{"const": "end", "title": "末尾"}, {"const": "top", "title": "第一行"}],
+        "oneOf": [
+          {
+            "const": "end",
+            "title": "末尾"
+          },
+          {
+            "const": "top",
+            "title": "第一行"
+          }
+        ],
         "default": "end"
       },
       "agent_ack_reaction": {
@@ -123,6 +180,26 @@
         "description": "自动代答回复带的 AI 标记行，{model} 和 {effort} 换成回答它的模型和思考强度；位置同“AI 标记位置”。留空表示不加。",
         "default": "> 🤖 AI 代答 · {model} · {effort}",
         "maxLength": 200
+      },
+      "triage_rules": {
+        "type": "string",
+        "title": "收件箱分拣规则",
+        "description": "用你自己的话写微信消息该怎么分拣（哪些要你处理、哪些看看就行、哪些是噪音）。留空就用 Persona 的全局规则。没有 @你 的群消息总是按噪音处理。",
+        "maxLength": 4000
+      },
+      "needs_hours": {
+        "type": "integer",
+        "title": "“需要我”只看多久内的",
+        "description": "微信私聊和群里 @我 的消息，超过这么多小时就不再算“需要我”（仍在“微信”页里）。",
+        "default": 24,
+        "minimum": 1,
+        "maximum": 168
+      },
+      "archive_groups": {
+        "type": "boolean",
+        "title": "群聊进知识库",
+        "description": "私聊和文件传输助手会进知识库；群聊默认不进（群里其他人没同意被记录）。公众号和服务号从不进。",
+        "default": false
       },
       "native_path": {
         "type": "string",
