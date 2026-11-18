@@ -242,7 +242,8 @@ class Backend(abc.ABC):
     def listen(self, on_message: OnMessage, on_link: OnLink, stop: threading.Event) -> None:
         """Run one live connection: call on_link("up", "") once it is really up (connected and receiving, not merely
         dialling), on_message for every new message (the account's own included), and return when the connection
-        ends or stop is set. Raise CredentialsExpired when the service says the sign-in is gone, BackendError("…",
+        ends or stop is set. on_message raises when the core could not take the message (it is not stored): do not
+        count it delivered (no ack that loses it, no cursor past it); deliver it again, or let a history read bring it. Raise CredentialsExpired when the service says the sign-in is gone, BackendError("…",
         "proxy") when the proxy cannot work, BackendError("…", "unreachable") for a connection that failed."""
 
     # reads

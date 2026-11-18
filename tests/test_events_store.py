@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sqlite3
 import stat
 import tempfile
 import time
@@ -12,6 +13,26 @@ from harness import Harness, fast, wait_until
 from openmate_core.backend import Message
 from openmate_core.events import Changed
 from openmate_core.store import Store
+
+
+class CommitFailureTest(unittest.TestCase):
+    def test_a_failed_commit_leaves_no_transaction_behind(self):
+        d = tempfile.mkdtemp(prefix="openmate-tx-")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "t.db")
+        st = Store(path)
+        self.addCleanup(st.close)
+        st._db.execute("PRAGMA busy_timeout=50")
+        other = sqlite3.connect(path, isolation_level=None)
+        other.execute("BEGIN")
+        other.execute("SELECT * FROM meta").fetchall()  # a reader's lock: the writer's COMMIT is refused (busy)
+        with self.assertRaises(sqlite3.OperationalError):
+            st.meta_set("k", "v")
+        self.assertFalse(st._db.in_transaction, "rolled back: not left open")
+        other.execute("COMMIT")
+        other.close()
+        st.meta_set("k", "v2")  # the next write works
+        self.assertEqual(st.meta_get("k"), "v2")
 
 
 class ChangedTest(unittest.TestCase):

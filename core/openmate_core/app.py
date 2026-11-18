@@ -690,6 +690,7 @@ class ConnectorApp:
         except Exception:
             if not self.closing.is_set():
                 log.exception("a live message could not be stored")
+            raise  # not taken: the backend must not count it delivered (it is delivered again, or read as history)
 
     def _request_catch_up(self, gen: int) -> None:
         """Read history after a link up; one asked for while one runs is run after it (a second outage's messages)."""
