@@ -26,6 +26,7 @@ class People:
         self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="openmate-people", daemon=True).start())
         self._mu = threading.Lock()
         self._want: Set[str] = set()
+        self._asking: Set[str] = set()  # asked now (between leaving _want and being stored)
         self._next: Dict[str, float] = {}  # not asked about again before then
         self._running = False
 
@@ -72,7 +73,7 @@ class People:
             return
         now = self.clock()
         with self._mu:
-            self._want |= {i for i in ids if now >= self._next.get(i, now)}
+            self._want |= {i for i in ids if now >= self._next.get(i, now) and i not in self._asking}
             if not self._want or self._running:
                 return
             self._running = True
@@ -88,6 +89,7 @@ class People:
                     self._running = False  # the ones left are asked about with the next draw
                     break
                 self._want.difference_update(batch)
+                self._asking.update(batch)  # on their way: a draw meanwhile does not ask them again
             wait = RETRY
             try:
                 kinds = app.backend.people_kinds(batch) or {}
@@ -100,6 +102,7 @@ class People:
                 told = True
             now = self.clock()
             with self._mu:
+                self._asking.difference_update(batch)  # stored (or put off) before they leave the set
                 for i in batch:
                     if i not in kinds:
                         self._next[i] = now + wait
