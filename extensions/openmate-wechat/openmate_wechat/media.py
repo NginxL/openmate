@@ -216,6 +216,7 @@ class Fetcher:
         self._finished = threading.Condition(threading.Lock())
         self._epoch = 0  # an account's fetches: another account signed in drops them (reset)
         self._room_at = 0.0
+        self._clean_mu = threading.Lock()  # one clean-up at a time (by age, by room): measured and done together
         os.makedirs(root, exist_ok=True)
         try:
             os.chmod(root, 0o700)
@@ -586,8 +587,9 @@ class Fetcher:
         for p in dict.fromkeys(x for x in doomed if isinstance(x, str)):
             if p.startswith(self.root + os.sep) and os.path.isfile(p):
                 try:
-                    freed += os.path.getsize(p)
+                    size = os.path.getsize(p)
                     os.remove(p)
+                    freed += size  # only what really went
                 except OSError:
                     pass
         if os.path.isdir(folder):
@@ -609,7 +611,8 @@ class Fetcher:
     def prune(self, now: Optional[float] = None) -> List[str]:
         """Remove local copies older than MEDIA_KEEP_DAYS; the ids whose text changes."""
         cutoff = (now or time.time()) - MEDIA_KEEP_DAYS * 86400
-        return self._drop(self._db("SELECT id, files FROM media WHERE state='done' AND at < ?", (cutoff,), True))
+        with self._clean_mu:
+            return self._drop(self._db("SELECT id, files FROM media WHERE state='done' AND at < ?", (cutoff,), True))
 
     def total(self) -> int:
         n = 0
@@ -627,22 +630,24 @@ class Fetcher:
         if time.time() - self._room_at < ROOM_EVERY:
             return []
         self._room_at = time.time()
-        over = self.total() - most
-        if over <= 0:
-            return []
         gone: List[str] = []
-        for mid, _ in self._db("SELECT id, files FROM media WHERE state='done' ORDER BY at", (), True):
+        with self._clean_mu:  # the clean-up by age cannot run in between: what is measured is what is removed from
+            over = self.total() - most
             if over <= 0:
-                break
-            with self._cv:  # never one being fetched or waiting to be: its new copies are not old ones
-                if mid in self._busy or any(q[0] == mid for q in self._queue):
-                    continue
-                st = self.state(mid)  # read again: what the row says now
-                if not st or st["state"] != "done":
-                    continue
-                over -= self._remove(mid, st["files"])
-                self._set(mid, "gone", {}, "")
-            gone.append(mid)
+                return []
+            rows = self._db("SELECT id, at FROM media WHERE state='done' ORDER BY at", (), True)
+            for mid, at in rows:
+                if over <= 0:
+                    break
+                with self._cv:  # never one being fetched or waiting to be: its new copies are not old ones
+                    if mid in self._busy or any(q[0] == mid for q in self._queue):
+                        continue
+                    st = self.state(mid)  # read again: what the row says now, and the same copy as listed
+                    if not st or st["state"] != "done" or st["at"] != at:
+                        continue
+                    over -= self._remove(mid, st["files"])
+                    self._set(mid, "gone", {}, "")
+                gone.append(mid)
         if gone:
             log.info("WeChat media: %d old local copies removed to stay under %d MB", len(gone), most >> 20)
         return gone

@@ -1015,10 +1015,12 @@ fn op_media(app: &App, p: &Value) -> Result<Value> {
             // no overall timeout: a slow transfer of a big file may take minutes (the backend waits that long), a
             // dead connection ends with the CDN client's own per-request timeout; either way the slot is held until
             // the transfer really ends, and a small file waits for a slot instead of failing
-            let got = app.rt.block_on(tokio::task::spawn_blocking(move || {
+            // submitted through the runtime itself (this request thread is not inside it)
+            let task = app.rt.spawn_blocking(move || {
                 let _slot = media_slot();
                 cdn.download(&d)
-            }));
+            });
+            let got = app.rt.block_on(task);
             match got {
                 Ok(r) => r,
                 Err(_) => Err(anyhow!("download stopped")),
