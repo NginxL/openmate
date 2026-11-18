@@ -351,6 +351,18 @@ class AlignedWithFeishuTest(unittest.TestCase):
         self.addCleanup(wb.PERSONS.discard, "chat_example_dm_a")
         self.assertIn("chat_example_dm_a", self.archived_from(h, res["next"]), "never skipped for its age unasked")
 
+    def test_an_undecided_chat_that_could_not_be_asked_waits_for_a_sign_in(self):
+        from openmate_core import app as core_app
+
+        h = wechat(self)
+        hours, core_app.ARCHIVE_UNDECIDED_HOURS = core_app.ARCHIVE_UNDECIDED_HOURS, 0
+        self.addCleanup(setattr, core_app, "ARCHIVE_UNDECIDED_HOURS", hours)
+        h.app._ask_kind = lambda cid: False  # signed out between two reads: nothing asked
+        res = h.c("archive.changes", cursor="", limit=100)
+        self.assertFalse(res["more"], "no point reading on before a sign-in")
+        again = h.c("archive.changes", cursor=res["next"], limit=100)
+        self.assertEqual(again["next"], res["next"], "never skipped for its age while it could not be asked")
+
     def archived_from(self, h, cursor):
         chats = set()
         for _ in range(20):

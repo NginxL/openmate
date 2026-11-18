@@ -414,15 +414,18 @@ class ConnectorApp:
 
     # ------------------------------------------------------------------ the service's done mark (Feishu's 完成)
 
-    def _ask_kind(self, chat_id: str) -> None:
-        """Ask the backend now what the account of a direct chat is (WeChat looks it up), for the archive rule."""
+    def _ask_kind(self, chat_id: str) -> bool:
+        """Ask the backend now what the account of a direct chat is (WeChat looks it up), for the archive rule.
+        Whether it was asked (False: signed out, or the request failed)."""
         if self.backend is None or self.store is None or not self.signed_in:
-            return
+            return False
         chat = self.store.get_chat(chat_id) or {}
         try:
             self.backend.people_kinds([chat.get("peer_id") or chat_id])
+            return True
         except Exception as e:
             log.info("an account could not be looked up for the archive (%s)", e.__class__.__name__)
+            return False
 
     def _chat_gone(self, chat_id: str) -> None:
         """The account left or deleted a chat in the service: out of the lists until a newer message."""
@@ -1124,7 +1127,8 @@ class ConnectorApp:
         more = len(rows) == ARCHIVE_ROWS_MOST
         keep = getattr(self.platform, "archive_chat", None)
         kept: Dict[str, Optional[bool]] = {}
-        asked: set = set()
+        tried: set = set()  # undecided chats this read tried to ask about (ARCHIVE_ASK_MOST)
+        asked: set = set()  # of those, the ones the service was really asked about
 
         def rule(cid: str) -> Optional[bool]:
             if cid not in kept:
@@ -1134,9 +1138,10 @@ class ConnectorApp:
                 except Exception:
                     log.exception("the archive rule failed: the chat is left out")
                     kept[cid] = False
-            if kept[cid] is None and cid not in asked and len(asked) < ARCHIVE_ASK_MOST:
-                asked.add(cid)  # undecided: ask the service about the account now, then the rule again
-                self._ask_kind(cid)
+            if kept[cid] is None and cid not in tried and len(tried) < ARCHIVE_ASK_MOST:
+                tried.add(cid)  # undecided: ask the service about the account now, then the rule again
+                if self._ask_kind(cid):
+                    asked.add(cid)
                 del kept[cid]
                 return rule(cid)
             return kept[cid]
@@ -1149,8 +1154,11 @@ class ConnectorApp:
                 # the platform's rule (WeChat: no groups unless turned on, no official accounts)
                 decided = rule(r["chat_id"])
                 if decided is None:
-                    if r["chat_id"] not in asked:
+                    if r["chat_id"] not in tried:
                         more = True  # not asked about in this read (its asks are used up): the next read does
+                        break
+                    if r["chat_id"] not in asked:
+                        more = False  # could not be asked (signed out): read again once signed in
                         break
                     if time.time() - float(r.get("received") or r.get("at") or 0) < ARCHIVE_UNDECIDED_HOURS * 3600:
                         more = False  # the cursor stops before it: a later read goes on from this message
