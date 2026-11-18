@@ -586,6 +586,40 @@ class ReadTest(Base):
         texts = [m.text for m in self.b.history("600", None, 10)]
         self.assertEqual(texts, ["示例文章标题 " + url, url, "推荐看看 " + url, "只有纯文本 " + url])
 
+    def test_a_link_read_by_its_own_fields(self):
+        def pb(*fields):
+            out = b""
+            for n, text in fields:
+                raw = text.encode("utf-8")
+                out += bytes([(n << 3) | 2, len(raw)]) + raw
+            return out
+
+        url, pc = "https://example.com/r", "https://example.com/pc"
+        cases = [
+            (pb((1, url), (3, "README")), "README " + url),  # words that look like a word still count
+            (pb((2, "https://shown.example.com"), (8, pc)), "https://shown.example.com " + pc),  # pcHref, not the words
+            (pb((1, url)), url),
+        ]
+        for i, (prop, want) in enumerate(cases):
+            data = {"richText": {"elementIds": ["a"], "elements": {"dictionary": {"a": {"tag": 6, "property": prop}}}}}
+            S.history["62%d" % i] = {1: frame_msg("63%d" % i, "62%d" % i, 1, data)}
+            S.chats["62%d" % i] = {"id": "62%d" % i, "type": 2, "name": "示例群", "lastMessagePosition": 1}
+            self.assertEqual([m.text for m in self.b.history("62%d" % i, None, 5)], [want])
+
+    def test_order_children_and_a_bare_at(self):
+        data = {"richText": {"elementIds": ["p"], "elements": {"dictionary": {
+            "p": {"tag": 3, "property": "".encode("utf-8"), "childIds": ["t2", "t1"]},
+            "t1": {"tag": 1, "property": "二".encode("utf-8")},
+            "t2": {"tag": 1, "property": "一".encode("utf-8")}}}}}
+        numeric = {"richText": {"elements": {"dictionary": {
+            "10": {"tag": 1, "property": "后".encode("utf-8")}, "2": {"tag": 1, "property": "先".encode("utf-8")}}}}}
+        bare_at = {"richText": {"elementIds": ["a"], "elements": {"dictionary": {
+            "a": {"tag": 5, "property": json.dumps({"userId": "7001"}).encode("utf-8")}}}}}
+        S.history["640"] = {1: frame_msg("641", "640", 1, data), 2: frame_msg("642", "640", 2, numeric),
+                            3: frame_msg("643", "640", 3, bare_at)}
+        S.chats["640"] = {"id": "640", "type": 2, "name": "示例群", "lastMessagePosition": 3}
+        self.assertEqual([m.text for m in self.b.history("640", None, 5)], ["一二", "先后", "[@]"])
+
     def test_a_text_read_as_nothing_is_noted(self):
         empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}
         S.history["610"] = {1: frame_msg("611", "610", 1, empty)}

@@ -852,25 +852,34 @@ class ConnectorApp:
                                 return
                             self.ingest(got, live=False)
                 empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
-                if empty and not first:
-                    # messages stored with no text: read again where they are, a page ending right after the newest
-                    # of them, back to the oldest (bounded)
+                again = False
+                if empty:
+                    # messages stored with no text (an older reading, also from a first sync cut short): read again
+                    # where they are, from right after the newest back to the oldest (bounded); a chat that cannot be
+                    # read is passed over, and the whole re-read is tried again next time only for a network failure
                     gaps = self.store.empty_positions(empty, time.time() - t.rerender_window, t.rerender_chats)
                     for chat_id, (lo, hi, _) in gaps.items():
                         before = hi + 1
-                        for _ in range(EMPTY_PAGES):
-                            if gen != self._gen or self.link != "up":
-                                return
-                            got = self.backend.history(chat_id, before, t.rerender_messages)
-                            if gen != self._gen:
-                                return
-                            self.ingest(got, live=False)
-                            if len(got) < t.rerender_messages:
-                                break
-                            before = min(m.position for m in got)
-                            if before <= lo:
-                                break
-                self.store.meta_set("render_version", version)
+                        try:
+                            for _ in range(EMPTY_PAGES):
+                                if gen != self._gen or self.link != "up":
+                                    return
+                                got = self.backend.history(chat_id, before, t.rerender_messages)
+                                if gen != self._gen:
+                                    return
+                                self.ingest(got, live=False)
+                                if not got:
+                                    break
+                                before = min(m.position for m in got)
+                                if before <= lo:
+                                    break
+                        except CredentialsExpired:
+                            raise
+                        except BackendError as e:
+                            log.info("re-reading messages stored empty: a chat could not be read (%s)", e.kind)
+                            again = again or e.kind in ("unreachable", "unknown", "proxy")
+                if not again:
+                    self.store.meta_set("render_version", version)
             self.last_sync = time.time()
             self.mark_changed("inbox", "chats")
             self._ask_done()

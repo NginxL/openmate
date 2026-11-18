@@ -273,6 +273,20 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(store.message("chat_example_chatter", old.id)["text"], "示例文章 https://example.com/a")
         self.assertEqual(store.meta_get("render_version"), "9")
 
+    def test_a_text_that_comes_back_reaches_the_archive_again(self):
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        store = h.app.store
+        blank = h.world.make("chat_example_team", "user_example_a", "", ago=600)
+        store.add_messages([blank], True)
+        cursor = max(r["seq"] for r in store.archive_rows(0, 100000))  # the archive read past it, with no text
+        blank.text = "示例文章 https://example.com/a"
+        store.add_messages([blank], True)
+        again = [r for r in store.archive_rows(cursor, 100) if r["id"] == blank.id]
+        self.assertEqual([r["text"] for r in again], ["示例文章 https://example.com/a"], "handed over again, with its text")
+        self.assertEqual(len([r for r in store.archive_rows(0, 100000) if r["id"] == blank.id]), 1, "still one row")
+
     def test_a_link_up_during_a_catch_up_gets_its_own(self):
         h = Harness(self)
         h.sign_in()

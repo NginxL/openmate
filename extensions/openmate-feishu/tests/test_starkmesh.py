@@ -342,6 +342,31 @@ class OddGatewayTest(unittest.TestCase):
         self.assertEqual(len(snap.usage), 250)
 
 
+class UsageBatchFailsTest(unittest.TestCase):
+    def test_a_failed_usage_batch_keeps_the_rest(self):
+        many = [dict(ACCOUNTS[0], id=900 + i, name="claude-z%03d" % i) for i in range(250)]
+
+        def opener(req, timeout=None):
+            u = req.full_url
+            if "/admin/accounts/usage" in u:
+                ids = json.loads(req.data.decode())["account_ids"]
+                if len(ids) < 200:
+                    raise urllib.error.HTTPError(u, 503, "busy", {}, None)
+                data = {"usage": {str(i): {"five_hour": win(0, 600)} for i in ids}, "errors": {}}
+            elif "/admin/accounts" in u:
+                q = dict(x.split("=") for x in u.split("?", 1)[1].split("&"))
+                p, size = int(q["page"]), int(q["page_size"])
+                data = {"items": many[(p - 1) * size: p * size], "total": len(many)}
+            else:
+                data = STATS
+            return io.BytesIO(json.dumps({"code": 0, "data": data}).encode())
+
+        page, _ = make(gateway=opener)
+        snap = page.mesh.read()
+        self.assertEqual((len(snap.accounts), len(snap.usage), snap.usage_missed), (250, 200, 50))
+        self.assertTrue(snap.stats, "the stats are still read")
+
+
 class RedirectTest(unittest.TestCase):
     """The key goes to the address the user wrote only: a redirect elsewhere is not followed (an HTTP error)."""
 

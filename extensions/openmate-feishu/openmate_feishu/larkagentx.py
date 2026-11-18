@@ -1358,7 +1358,10 @@ class LarkXBackend(Backend):
     def _rich_text(self, data: dict) -> str:
         rich = data.get("richText") or {}
         text = rich_text(rich, self.lx.P)
-        return text or str(rich.get("innerText") or "").strip() or str(data.get("text") or "")
+        if text:
+            return text
+        inner = str(rich.get("innerText") or "")
+        return inner if inner.strip() else str(data.get("text") or "")
 
     def _read_text(self, mt: int, name: str, data: Optional[dict], summary: str) -> str:
         text = self._text(mt, name, data, summary)
@@ -2154,12 +2157,17 @@ def _varint(b: bytes, i: int) -> Tuple[int, int]:
 
 def wire_strings(b: bytes) -> List[str]:
     """The UTF-8 strings among a protobuf message's top-level fields, in order ([] when it does not read)."""
-    out: List[str] = []
+    return [s for _, s in wire_fields(b)]
+
+
+def wire_fields(b: bytes) -> List[Tuple[int, str]]:
+    """(field number, UTF-8 string) of a protobuf message's top-level length-delimited fields, in order."""
+    out: List[Tuple[int, str]] = []
     i, n = 0, len(b or b"")
     try:
         while i < n:
             key, i = _varint(b, i)
-            wt = key & 7
+            wt, field = key & 7, key >> 3
             if wt == 0:
                 _, i = _varint(b, i)
             elif wt == 2:
@@ -2169,7 +2177,7 @@ def wire_strings(b: bytes) -> List[str]:
                 raw = b[i:i + size]
                 i += size
                 try:
-                    out.append(raw.decode("utf-8"))
+                    out.append((field, raw.decode("utf-8")))
                 except UnicodeDecodeError:
                     pass
             elif wt == 1:
@@ -2183,12 +2191,18 @@ def wire_strings(b: bytes) -> List[str]:
     return out
 
 
+ANCHOR_HREF, ANCHOR_CONTENT, ANCHOR_TEXT, ANCHOR_PC_HREF = 1, 2, 3, 8  # RichTextElement.AnchorProperty
+
+
 def link_text(prop: bytes) -> str:
-    """An A element's words and address ("words address", or the address alone when the words are it)."""
-    strings = [s.strip() for s in wire_strings(prop) if s and s.strip()]
-    href = next((s for s in strings if URL_RE.match(s)), "")
-    words = next((s for s in strings if s != href and not s.startswith(("{", "[")) and not URL_RE.match(s)
-                  and len(s) <= 500 and s.isprintable() and not WORDLESS_RE.match(s)), "")
+    """An A element (AnchorProperty: href 1, content 2, textContent 3, pcHref 8): "words address", or the address
+    alone when the words are it or there are none."""
+    f: Dict[int, str] = {}
+    for n, s in wire_fields(prop):
+        if s.strip() and n not in f:
+            f[n] = s.strip()
+    href = next((f[n] for n in (ANCHOR_HREF, ANCHOR_PC_HREF) if URL_RE.match(f.get(n, ""))), "")
+    words = f.get(ANCHOR_TEXT) or f.get(ANCHOR_CONTENT) or ""
     if href and words and words != href:
         return "%s %s" % (words, href)
     return href or words
@@ -2201,7 +2215,27 @@ def rich_text(rich: dict, P) -> str:
     except AttributeError:
         return ""
     ids = [str(k) for k in rich.get("elementIds") or []]
-    order = [k for k in ids if k in dictionary] + [k for k in dictionary if k not in set(ids)]
+    if not ids:
+        try:
+            ids = sorted(dictionary, key=lambda k: int(k))
+        except (TypeError, ValueError):
+            ids = list(dictionary)
+    order: List[str] = []
+    seen: Set[str] = set()
+
+    def visit(k: str, depth: int = 0) -> None:
+        if k in seen or k not in dictionary or depth > 20:
+            return
+        seen.add(k)
+        order.append(k)
+        el = dictionary.get(k)
+        for c in (el.get("childIds") or []) if isinstance(el, dict) else []:
+            visit(str(c), depth + 1)
+
+    for k in ids:
+        visit(k)
+    for k in dictionary:
+        visit(k)
     out: List[str] = []
     for k in order:
         el = dictionary.get(k)
@@ -2221,15 +2255,14 @@ def rich_text(rich: dict, P) -> str:
                 continue
             except Exception:
                 pass
-        if tag == AT_TAG_RICH and prop:
+        if tag == AT_TAG_RICH:
             try:
                 ap = P.AtProperty()
                 ap.ParseFromString(prop)
-                if ap.content:
-                    out.append(ap.content)
-                    continue
+                out.append(ap.content or "[@]")
             except Exception:
-                pass
+                out.append("[@]")
+            continue
         if tag == ANCHOR_TAG and prop:
             words = link_text(prop)
             if words:
@@ -2238,11 +2271,8 @@ def rich_text(rich: dict, P) -> str:
         if tag in PLACEHOLDERS:
             out.append(PLACEHOLDERS[tag])
             continue
-        if prop and tag not in TEXT_TAGS:  # another element that holds an address: the address at least
-            href = next((s.strip() for s in wire_strings(prop) if URL_RE.match(s.strip())), "")
-            if href:
-                out.append(href)
-    return "".join(out).strip()
+    text = "".join(out)
+    return text if text.strip() else ""
 
 
 def rich_shape(rich: dict) -> str:

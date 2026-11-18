@@ -239,17 +239,27 @@ class StarkMesh:
         for page in range(1, ACCOUNT_PAGES + 1):  # every page, each account once (a gateway may ignore page)
             data = self.api.call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": 200}) or {}
             items = [a for a in (data.get("items") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
-            new = [a for a in items if str(a.get("id")) not in seen]
-            seen.update(str(a.get("id")) for a in new)
+            new = []
+            for a in items:  # each id once, within a page too
+                if str(a.get("id")) not in seen:
+                    seen.add(str(a.get("id")))
+                    new.append(a)
             accounts += new
             total = int(data.get("total") or 0) if isinstance(data, dict) else 0
             if not new or (total and len(accounts) >= total) or (not total and len(items) < 200):
                 break
         ids = [int(a["id"]) for a in accounts if str(a.get("platform") or "") == "anthropic" and a.get("id") is not None]
         usage: Dict[str, dict] = {}
-        for i in range(0, len(ids), 200):  # the usage of every account, 200 at a time
-            got = self.api.call("POST", "/api/v1/admin/accounts/usage/batch",
-                                body={"account_ids": ids[i:i + 200], "force": False, "refresh_claude": False}) or {}
+        missed = 0
+        for i in range(0, len(ids), 200):  # the usage of every account, 200 at a time; a batch that fails is passed
+            try:
+                got = self.api.call("POST", "/api/v1/admin/accounts/usage/batch",
+                                    body={"account_ids": ids[i:i + 200], "force": False, "refresh_claude": False}) or {}
+            except StarkMeshError as e:
+                if e.kind == "auth" or i == 0 and len(ids) <= 200:
+                    raise
+                missed += len(ids[i:i + 200])
+                continue
             usage.update({str(k): v for k, v in (got.get("usage") or {}).items() if isinstance(v, dict)})
         try:
             stats = self.api.call("GET", "/api/v1/admin/dashboard/stats") or {}
@@ -259,6 +269,7 @@ class StarkMesh:
             stats = {}
         snap = Snapshot(accounts, usage, stats if isinstance(stats, dict) else {}, self.clock())
         snap.total = max(total, len(accounts))  # the gateway's count, when it said one beyond what was read
+        snap.usage_missed = missed  # accounts whose usage a failed batch left out
         return snap
 
 

@@ -183,11 +183,12 @@ class Fresh:
 
     def __init__(self, read: Callable[[], Any], ahead: float, stale: float, clock: Callable[[], float] = time.time,
                  key: Optional[Callable[[], Any]] = None, spawn: Optional[Callable[[Callable[[], None]], None]] = None,
-                 name: str = ""):
+                 name: str = "", remember_failures: bool = True):
         self.read, self.ahead, self.stale, self.clock = read, ahead, stale, clock
         self.key = key or (lambda: None)
         self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="openmate-fresh", daemon=True).start())
         self.name = name
+        self.remember_failures = remember_failures  # off: a read that fails with what it could read is tried each draw
         self._mu = threading.Lock()  # the kept value
         self._reading = threading.Lock()  # one read at a time
         self._kept: Optional[Tuple[float, Any, Any]] = None  # (read at, key, value)
@@ -233,7 +234,7 @@ class Fresh:
         with self._mu:
             failed = self._failed
             if failed is not None and failed[0] == k and self.clock() - failed[1] < FAILED_KEEP:
-                raise failed[2]  # failed a moment ago: said, not tried again at once
+                raise failed[2].with_traceback(None)  # failed a moment ago: said, not tried again at once
             cold = self._cold
             start = cold is None or cold[0] != k  # a read for another key (yesterday's) is not this one
             if start:
@@ -253,8 +254,9 @@ class Fresh:
                         self._failed = None
             except BaseException as e:
                 box["error"] = e
-                with self._mu:
-                    self._failed = (k, self.clock(), e)
+                if self.remember_failures:
+                    with self._mu:
+                        self._failed = (k, self.clock(), e)
             finally:
                 with self._mu:
                     if self._cold is not None and self._cold[1] is ev:
@@ -276,7 +278,7 @@ class Fresh:
             if self._usable(k, self.stale):
                 return self._kept[2]
         if done and box.get("error") is not None:
-            raise box["error"]
+            raise box["error"].with_traceback(None)
         raise NotYet(self.name)
 
     def _again(self) -> None:
@@ -430,11 +432,13 @@ class ChatsToday:
         """Mark a chat's need 处理完 (until a newer message, or a newer @me in a group). With version, only the need
         the page showed: "newer" when a newer message came since (it stays), "none" when it needs nothing now, "ok"."""
         app = self.app
+        key = "chat:" + chat_id
+        before = app.store.dismissed([key]).get(key)  # read before the need: a mark written since fails the write
         for t in self.needs(only={chat_id}) + self.done:
             if t["_chat"]["id"] == chat_id:
                 if version is not None and version != t["_version"]:
                     return "newer"
-                if t.get("_mark") != t["_version"] and not app.store.dismiss_if(t["_done_key"], t["_version"], t.get("_mark")):
+                if before != t["_version"] and not app.store.dismiss_if(t["_done_key"], t["_version"], before):
                     return "none"  # marked meanwhile (another page, the service's 完成): as it is now
                 if hasattr(app, "mark_changed"):
                     app.mark_changed("inbox")  # the badge counts again

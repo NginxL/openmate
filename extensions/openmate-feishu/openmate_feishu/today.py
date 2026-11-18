@@ -73,7 +73,8 @@ class PersonaToday:
     def __init__(self, app, clock: Callable[[], float] = time.time, spawn: Optional[Callable] = None):
         self.app = app
         self.clock = clock
-        self._fresh = Fresh(self._read, AHEAD, STALE, clock=clock, spawn=spawn, name="Persona")
+        # a read with a part missing (Partial) carries the rest: tried again at the next draw, never kept as a failure
+        self._fresh = Fresh(self._read, AHEAD, STALE, clock=clock, spawn=spawn, name="Persona", remember_failures=False)
 
     def _get(self, path: str, query: Optional[dict] = None) -> Any:
         return self.app.hub.request("GET", path, query=query, timeout=WAIT)
@@ -360,6 +361,8 @@ class TodayPage(Page):
             wx_thread.start()
         # every slow read starts now, side by side (each answers at once from what it keeps, or reads behind)
         kicks = [lambda: self.agenda.events(0.0)]
+        if self.mesh is not None and not self.card and self.mesh.mesh.configured:
+            kicks.append(lambda: self.mesh.mesh.read(0.0))
         if self.agents is not None and not self.card:
             kicks.append(lambda: self.agents.read(0.0))
         for kick in kicks:
@@ -478,13 +481,13 @@ class TodayPage(Page):
         if kind not in DONE_KINDS or store is None:
             return "none"
         part, id_field, fields = DONE_KINDS[kind]
+        key = "%s:%s" % (kind, ident)
+        prev = store.dismissed([key]).get(key)  # read before the item: a mark written since fails the write
         for d in self.persona.read()[part]:
             if str(d.get(id_field)) == ident:
                 now = version_of(d, *fields)
                 if seen is not None and seen != now:
                     return "newer"  # it changed since the page was drawn: not hidden by that 处理完
-                key = "%s:%s" % (kind, ident)
-                prev = store.dismissed([key]).get(key)
                 if prev != now and not store.dismiss_if(key, now, prev):
                     return "none"  # marked meanwhile: as it is now
                 return "ok"
@@ -625,7 +628,9 @@ class Day:
                 _, id_field, fields = DONE_KINDS[kind]
                 keyed = [("%s:%s" % (kind, d.get(id_field)), version_of(d, *fields), d) for d in items]
                 marked = store.dismissed(k for k, _, _ in keyed) if keyed else {}
-                kept = [d for k, v, d in keyed if marked.get(k) != v]
+                # a mark from before the host's version was read (its updated_at) still holds for the same item
+                old = [f for f in fields if f != "version"]
+                kept = [d for k, v, d in keyed if marked.get(k) not in (v, version_of(d, *old) if d.get("version") else v)]
                 self.done += len(items) - len(kept)
                 return kept
             p = dict(p, waiting=keep("wait", p["waiting"]))

@@ -99,6 +99,10 @@ _MESSAGE_COLUMNS = (
 )
 
 
+_INSERT_COLUMNS = ("chat_id, id, position, sender_id, sender_name, mine, type, text, at, root_id, thread_id, parent_id, "
+                   "at_me, at_all, media, from_history, received")
+
+
 def _message_row(r: sqlite3.Row) -> dict:
     d = dict(r)
     for k in ("mine", "at_me", "at_all", "from_history"):
@@ -310,7 +314,8 @@ class Store:
             return {}
         rows = self._all(
             "SELECT chat_id, MIN(position) AS lo, MAX(position) AS hi, COUNT(*) AS n, MAX(at) AS last FROM messages "
-            "WHERE type IN (%s) AND text = '' AND at >= ? GROUP BY chat_id ORDER BY last DESC LIMIT ?"
+            "WHERE type IN (%s) AND text = '' AND at >= ? AND chat_id NOT IN (SELECT chat_id FROM gone) "
+            "GROUP BY chat_id ORDER BY last DESC LIMIT ?"
             % ",".join("?" * len(types)), types + [since, limit])
         return {r["chat_id"]: (int(r["lo"]), int(r["hi"]), int(r["n"])) for r in rows}
 
@@ -388,6 +393,14 @@ class Store:
                     ),
                 )
                 if cur.rowcount != 1:
+                    blank = db.execute("SELECT " + _INSERT_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ? "
+                                       "AND text = ''", (m.chat_id, m.id)).fetchone() if m.text else None
+                    if blank is not None:
+                        # stored with no text by an older reading: moved to the end (a new seq), so the archive's
+                        # cursor, already past it, hands it over with its text now
+                        db.execute("DELETE FROM messages WHERE chat_id = ? AND id = ?", (m.chat_id, m.id))
+                        db.execute("INSERT INTO messages (" + _INSERT_COLUMNS + ") VALUES (%s)"
+                                   % ",".join("?" * len(tuple(blank))), tuple(blank))
                     if m.text:
                         db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ?",
                                    (m.text, (m.type or "TEXT").upper(), m.chat_id, m.id, m.text))
@@ -452,16 +465,22 @@ class Store:
         rows = self.messages_before(chat_id, None, limit)
         if not rows or len(rows) < limit or any(r.get("mine") and r.get("type") != "SYSTEM" for r in rows):
             return rows  # the whole chat, or the account spoke in it: the window says it all
-        first = rows[0]
-        mine = self._one("SELECT position, seq FROM messages WHERE chat_id = ? AND mine = 1 AND type != 'SYSTEM' "
-                         "ORDER BY position DESC, seq DESC LIMIT 1", (chat_id,))
-        lo = (int(mine["position"]), int(mine["seq"])) if mine is not None else (-1, -1)
-        r = self._one(
-            "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND at_me = 1 AND mine = 0 "
-            "AND (position < ? OR (position = ? AND seq < ?)) AND (position > ? OR (position = ? AND seq > ?)) "
-            "ORDER BY position DESC, seq DESC LIMIT 1",
-            (chat_id, int(first["position"]), int(first["position"]), int(first["seq"]), lo[0], lo[0], lo[1]))
-        return ([_message_row(r)] + rows) if r is not None else rows
+
+        def order(r) -> tuple:  # a place in the chat: its position, then when (a thread reply shares a position)
+            return (int(r["position"]), float(r["at"] or 0), int(r["seq"]))
+
+        first = min(rows, key=order)
+        mine = self._one("SELECT position, at, seq FROM messages INDEXED BY messages_chat_mine WHERE chat_id = ? "
+                         "AND mine = 1 AND type != 'SYSTEM' ORDER BY position DESC, seq DESC LIMIT 1", (chat_id,))
+        lo = order(mine) if mine is not None else (-1, -1.0, -1)
+        found = self._all(
+            "SELECT " + _MESSAGE_COLUMNS + " FROM messages INDEXED BY messages_chat_at_me WHERE chat_id = ? "
+            "AND at_me = 1 AND mine = 0 AND position <= ? AND position >= ? ORDER BY position DESC, seq DESC LIMIT 20",
+            (chat_id, int(first["position"]), max(lo[0], 0)))
+        cands = [r for r in found if lo < order(r) < order(first)]
+        if not cands:
+            return rows
+        return [_message_row(max(cands, key=order))] + rows
 
     def messages_after(self, chat_id: str, position: int, limit: int) -> List[dict]:
         rows = self._all(
