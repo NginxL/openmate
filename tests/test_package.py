@@ -52,13 +52,14 @@ class PackageTest(unittest.TestCase):
         self.assertIn("飞书", entry["tags"])
         self.assertEqual(entry["icon"], "assets/icon.png")
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            listed = [m.name for m in tar.getmembers()]
+            self.assertEqual(len(listed), len(set(listed)), "every name once")  # read before a dict folds them
             members = {m.name: m for m in tar.getmembers()}
             for m in members.values():
                 self.assertTrue(m.isreg(), m.name)
                 self.assertEqual((m.uid, m.gid, m.mtime), (0, 0, package.MTIME))
                 self.assertEqual(m.mode, 0o755 if m.name == "bin/openmate-feishu" else 0o644, m.name)
             names = sorted(members)
-            self.assertEqual(names, sorted(set(names)))
             for want in ("persona-extension.json", "persona-plugin.json", "LICENSE", "bin/openmate-feishu",
                          "openmate_core/app.py", "openmate_core/agent.py", "openmate_feishu/__init__.py",
                          "assistant/instructions.md", "assets/icon.png"):
@@ -100,10 +101,18 @@ class PackageTest(unittest.TestCase):
 
     def test_the_package_runs_as_installed(self):
         out, index = build(self)
-        v = index["extensions"][0]["manifest"]["version"]
+        for entry in index["extensions"]:  # each extension's own package, not only the first
+            with self.subTest(entry["manifest"]["id"]):
+                self.runs_as_installed(out, entry)
+
+    def runs_as_installed(self, out, entry):
+        ext = entry["manifest"]["id"]
+        v = entry["manifest"]["version"]
+        cid = entry["manifest"]["contributes"]["connectors"][0]["id"]
+        rel = entry["packages"][0]["url"]
         inst = tempfile.mkdtemp(prefix="openmate-inst-")
         self.addCleanup(shutil.rmtree, inst, True)
-        with tarfile.open(os.path.join(out, REL % (v, v)), "r:gz") as tar:
+        with tarfile.open(os.path.join(out, rel), "r:gz") as tar:
             for m in tar.getmembers():
                 target = os.path.join(inst, m.name)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -113,16 +122,16 @@ class PackageTest(unittest.TestCase):
         data = os.path.join(inst, "data")
         env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENMATE_", "PERSONA_"))}
         env.update(OPENMATE_BACKEND="fixture", PERSONA_EXTENSION_DATA=data)
-        p = subprocess.Popen([sys.executable, os.path.join(inst, "bin", "openmate-feishu")], stdin=subprocess.PIPE,
+        p = subprocess.Popen([sys.executable, os.path.join(inst, "bin", ext)], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=inst)
         hub = StdioHub(p.stdout, p.stdin)
         try:
             m = hub.request("manifest", {})
-            self.assertEqual(m, index["extensions"][0]["manifest"])
+            self.assertEqual(m, entry["manifest"])
             hub.request("initialize", {"protocol": 1, "hub": {"build": 1, "extension_points": {}},
-                                       "extension": {"id": EXT, "version": v}, "granted": {}})
+                                       "extension": {"id": ext, "version": v}, "granted": {}})
             st = wait_until(lambda: (lambda s: s if s["state"] != "error" else None)(
-                hub.request("connector.status", {"contribution": CID})), what="startup")
+                hub.request("connector.status", {"contribution": cid})), what="startup")
             self.assertEqual(st["state"], "not_signed_in")
             p.stdin.close()
             self.assertEqual(p.wait(10), 0)

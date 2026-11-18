@@ -222,6 +222,21 @@ class ServiceDoneTest(unittest.TestCase):
         h.world.done_hook = None
         self.assertIn("示例同事甲", self.needs(self.page(h)), "恢复 pressed meanwhile is kept")
 
+    def test_a_restore_stays_when_the_reactions_could_not_be_read(self):
+        h = self.ready()
+        h.world.mark_done("chat_example_dm_a")
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="完成: 处理完")
+        n = h.app.done_rounds
+        self.act(h, "undone:chat:chat_example_dm_a")
+        self.rounds_after(h, n, "恢复 asks about the chat")
+        key = "chat:chat_example_dm_a"
+        h.world.reactions_unasked = True  # the reactions' batches fail from now on
+        h.world.mark_inbox("chat_example_dm_a")
+        n = h.app.done_rounds
+        h.world.drop()
+        self.rounds_after(h, n, "a round that saw it not done, its reactions unknown")
+        self.assertIn(key, h.app.store.dismissed([key]), "not known not to be answered: the 恢复 mark stays")
+
     def test_brought_back_stays_back_while_feishu_still_says_done(self):
         h = self.ready()
         h.world.mark_done("chat_example_dm_a")

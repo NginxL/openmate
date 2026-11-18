@@ -55,7 +55,10 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
-RENDER_VERSION = "7"  # 7: a text whose content is empty takes the links of its preview hang points
+RENDER_VERSION = "8"  # 7: a text whose content is empty takes the links of its preview hang points; 8: DLP marks
+DLP_IN_PROGRESS, DLP_BLOCK = (1, "IN_PROGRESS"), (3, "BLOCK")  # Message.ContentState.dlpReviewState
+DLP_BLOCKED_TEXT = "[飞书的安全策略拦下了这条消息，内容看不到]"
+REFILL_AFTER = (600.0, 3600.0, 6 * 3600.0)  # a text held for review is read again after these
 RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
@@ -86,9 +89,9 @@ PUSH_REACTIONS_CMD = 27  # reactions.PushReactions: a message's reactions change
 REACTIONS_ASK_MOST = 50  # messages asked about in one reactions.PullReactionsRequest
 GROUPS_JOINED = 2  # chats.PullGroupChatsRequest.Type JOIN: the groups the account is in
 GROUPS_PAGE = 100  # group ids per PullGroupChatsRequest…
-GROUPS_PAGES = 50  # …at most this many pages (5000 groups)
+GROUPS_PAGES = 200  # …at most this many pages (20000 groups)
 GROUPS_INFO_MOST = 50  # groups per PullChatsByIdsRequest
-GROUPS_EVERY = 600.0  # every group is read again this often while the link is up
+GROUPS_EVERY = 3600.0  # every group is read again this often while the link is up (pushes say the changes between)
 GROUPS_SPACING = 60.0  # and never more often than this
 CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
 CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
@@ -691,6 +694,7 @@ class LarkXBackend(Backend):
             self._close_client(old)
 
     def close(self) -> None:
+        self._closed_event().set()  # the later re-reads of texts held for review stop
         self.logout()
 
     # ------------------------------------------------------------ the live link
@@ -1101,7 +1105,7 @@ class LarkXBackend(Backend):
     def my_reactions(self, message_ids: List[str], ignore: Tuple[str, ...] = ()) -> Dict[str, float]:
         client, me = self._signed_in()
         ids = list(dict.fromkeys(_id(m) for m in message_ids if _id(m)))
-        out: Dict[str, float] = {}
+        out = Reacted()
         failed: Optional[BackendError] = None
         answered = False
         for i in range(0, len(ids), REACTIONS_ASK_MOST):
@@ -1111,9 +1115,11 @@ class LarkXBackend(Backend):
                                     "读取表情回应")
             except BackendError as e:
                 failed = failed or e
+                out.unasked.update(part)  # not known: the core leaves their marks as they are
                 continue
             except Exception as e:
                 failed = failed or self._net(e, "读取表情回应")
+                out.unasked.update(part)
                 continue
             answered = True
             out.update(reacted_by(resp, me.id, set(part), ignore))
@@ -1511,25 +1517,44 @@ class LarkXBackend(Backend):
             links = hang_links(ent)
             if links:
                 m.text = " ".join(links)
-            else:
-                note_flags(m.type, entity_flags(ent))
+                continue
+            dlp = dlp_state(ent)
+            if dlp in DLP_BLOCK:
+                m.text = DLP_BLOCKED_TEXT  # Feishu's data-loss policy keeps it from this client: said, never worked around
+            elif dlp in DLP_IN_PROGRESS:
+                m.review = True  # held for review: left empty, read again later
+            note_flags(m.type, entity_flags(ent))
 
     def _refill_later(self, msg: Message) -> None:
         """A pushed text read as nothing: its entity read again in the background, handed to the core as history (the
-        stored row then takes the text)."""
+        stored row then takes the text); one Feishu holds for review is read again later (REFILL_AFTER)."""
         cb = self.on_history
         if cb is None:
             return
 
         def run():
-            try:
-                got = [m for m in self.history(msg.chat_id, msg.position + 1, 1) if m.id == msg.id and (m.text or "").strip()]
-                if got:
-                    cb(got)
-            except Exception as e:
-                log.info("a pushed message read as nothing was not read again (%s)", type(e).__name__)
+            for delay in (0.0,) + REFILL_AFTER:
+                if delay and self._closed_event().wait(delay):
+                    return
+                try:
+                    got = [m for m in self.history(msg.chat_id, msg.position + 1, 1) if m.id == msg.id]
+                except Exception as e:
+                    log.info("a pushed message read as nothing was not read again (%s)", type(e).__name__)
+                    return
+                filled = [m for m in got if (m.text or "").strip()]
+                if filled:
+                    cb(filled)
+                    return
+                if not any(getattr(m, "review", False) for m in got):
+                    return  # nothing more to wait for
 
         threading.Thread(target=run, name="openmate-larkx-refill", daemon=True).start()
+
+    def _closed_event(self) -> threading.Event:
+        ev = getattr(self, "_closing_ev", None)
+        if ev is None:
+            ev = self._closing_ev = threading.Event()
+        return ev
 
     def _chat_raw(self, client, chat_id: str) -> dict:
         try:
@@ -2335,6 +2360,21 @@ def hang_links(entity: dict) -> List[str]:
     return out
 
 
+class Reacted(dict):
+    """{message id: when} of the account's reactions, and unasked: the ids a batch that failed left unknown."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.unasked: Set[str] = set()
+
+
+def dlp_state(entity: dict):
+    """The entity's contentState.dlpReviewState (a number or a name), None when it has none."""
+    state = entity.get("contentState") if isinstance(entity.get("contentState"), dict) else {}
+    v = state.get("dlpReviewState")
+    return v if v not in (None, 0, "UNKNOWN_STATE") else None
+
+
 def entity_flags(entity: dict) -> dict:
     """What says why a message entity's content reads as nothing: flags and sizes only, never content."""
     state = entity.get("contentState") if isinstance(entity.get("contentState"), dict) else {}
@@ -2344,7 +2384,8 @@ def entity_flags(entity: dict) -> dict:
         "cryptoType": crypto.get("cryptoType"), "isTruncated": bool(entity.get("isTruncated")),
         "content": len(entity.get("content") or b""), "characterLength": entity.get("characterLength"),
         "hangPoints": len(entity.get("urlPreviewHangPointMap") or {}), "isIncludeDocUrl": bool(entity.get("isIncludeDocUrl")),
-        "state": sorted(k for k, v in state.items() if v), "displayMode": entity.get("displayMode"),
+        "state": {k: v for k, v in sorted(state.items()) if v not in (None, False, 0, "")},
+        "displayMode": entity.get("displayMode"),
         "references": len(entity.get("references") or []),
     }
 

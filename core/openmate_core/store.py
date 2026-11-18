@@ -56,6 +56,9 @@ _SCHEMA = [
     # the account's own lines and the @me it got, per chat: 需要我 finds the last of each without a scan
     "CREATE INDEX IF NOT EXISTS messages_chat_mine ON messages (chat_id, position, seq) WHERE mine = 1",
     "CREATE INDEX IF NOT EXISTS messages_chat_at_me ON messages (chat_id, position, seq) WHERE at_me = 1 AND mine = 0",
+    # the groups the account wrote in (自动代答's list), and how many messages came today (the 今天 counts)
+    "CREATE INDEX IF NOT EXISTS messages_spoke ON messages (chat_id, at) WHERE mine = 1 AND type != 'SYSTEM'",
+    "CREATE INDEX IF NOT EXISTS messages_others_at ON messages (at, chat_id) WHERE mine = 0 AND type != 'SYSTEM'",
     # history pages (history_rows) walk a chat by when its lines were said, a missing time as when one came in
     "CREATE INDEX IF NOT EXISTS messages_chat_when ON messages (chat_id, (CASE WHEN at > 0 THEN at ELSE received END), seq)",
     """CREATE TABLE IF NOT EXISTS names (
@@ -481,9 +484,11 @@ class Store:
     def thread_messages(self, chat_id: str, root_id: str, limit: int) -> List[dict]:
         """The thread rooted at root_id (its root first), the newest limit messages, oldest first."""
         rows = self._all(
-            "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND (root_id = ? OR id = ?) "
+            "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE seq IN ("
+            "SELECT seq FROM messages WHERE chat_id = ? AND root_id = ? "
+            "UNION SELECT seq FROM messages WHERE chat_id = ? AND id = ?) "
             "ORDER BY position DESC, seq DESC LIMIT ?",
-            (chat_id, root_id, root_id, limit),
+            (chat_id, root_id, chat_id, root_id, limit),
         )
         return [_message_row(r) for r in reversed(rows)]
 

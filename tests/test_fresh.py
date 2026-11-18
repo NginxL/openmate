@@ -90,8 +90,31 @@ class FreshTest(unittest.TestCase):
         f.warm()
         self.assertEqual(self.src.n, 1)
         self.assertEqual((f.get(), self.src.n), ("v1", 1))
-        self.src.fail = True
-        self.make().warm()  # a failed first read is not raised from the background
+        g = self.make()
+        self.src.fail = True  # this new value's own source fails
+        g.warm()  # a failed first read is not raised from the background
+        self.assertEqual(self.src.n, 1, "it did read, and failed quietly")
+
+    def test_one_warm_loop_per_value_and_it_rests_while_nobody_looks(self):
+        from openmate_core import ui as ui_mod
+
+        f = self.make(spawn=None)
+        f.ahead = 0
+        loops = []
+        f.spawn = lambda fn: (loops.append(fn), threading.Thread(target=fn, daemon=True).start())
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        f.warm(every=0.02, stop=stop)
+        f.warm(every=0.02, stop=stop)  # another page asks too
+        self.assertEqual(len([x for x in loops if x.__name__ == "run"]), 1, "one loop")
+        wait_until(lambda: self.src.n >= 2, what="reads while looked at")
+        self.now[0] += ui_mod.WARM_IDLE + 1  # nobody looked for a long while
+        time.sleep(0.1)
+        n = self.src.n
+        time.sleep(0.15)
+        self.assertLessEqual(self.src.n, n + 1, "rests")
+        f.get()  # someone looks
+        wait_until(lambda: self.src.n >= n + 3, what="reads again")
 
     def test_kept_warm_until_stopped(self):
         f = self.make(spawn=None)

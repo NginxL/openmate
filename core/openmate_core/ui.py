@@ -102,6 +102,7 @@ def parse_done(aid: str) -> Optional[Tuple[str, Optional[str]]]:
 
 
 FAILED_KEEP = 60.0  # a failed first read is said for this long before a draw tries again
+WARM_IDLE = 1800.0  # a warm loop reads only while a draw (or a tool) asked within this long
 
 
 class NotYet(Exception):
@@ -195,6 +196,8 @@ class Fresh:
         self._busy = False
         self._cold: Optional[Tuple[Any, threading.Event, dict]] = None  # (key, done, its result) of a bounded read
         self._failed: Optional[Tuple[Any, float, BaseException]] = None  # (key, when, error) of the last failed one
+        self._warming = False  # one warm loop per value, however many pages share it
+        self._looked = 0.0  # when a draw (or a tool) last asked: the warm loop rests while nobody does
         self.on_ready: Optional[Callable[[], None]] = None  # told when a read a page did not wait for is in
 
     def _usable(self, k, within: float) -> bool:
@@ -206,6 +209,7 @@ class Fresh:
         seconds in all): NotYet when it is still on its way (it goes on in the background), its error when it failed."""
         k = self.key()
         again = False
+        self._looked = self.clock()
         with self._mu:
             if self._usable(k, self.ahead):
                 return self._kept[2]
@@ -302,14 +306,28 @@ class Fresh:
 
     def warm(self, every: float = 0.0, stop: Optional[threading.Event] = None) -> None:
         """Read now in the background, so that the first draw does not wait; with every, keep reading that often (a
-        page opened after a long while then shows a read at most that old, and does not wait either)."""
+        page opened after a long while then shows a read at most that old, and does not wait either). One loop per
+        value however many pages ask; while nobody has looked for WARM_IDLE it rests (a draw then reads, bounded)."""
+        with self._mu:
+            if every and self._warming:
+                return
+            if every:
+                self._warming = True
+
         def run():
+            first = True
             while True:
-                try:
-                    self.get()
-                except Exception as e:
-                    log.debug("%s: a read failed (%s)", self.name, e.__class__.__name__)
+                if first or self.clock() - self._looked < WARM_IDLE:
+                    looked = self._looked
+                    try:
+                        self.get()
+                    except Exception as e:
+                        log.debug("%s: a read failed (%s)", self.name, e.__class__.__name__)
+                    self._looked = looked  # its own read is not someone looking
+                first = False
                 if not every or (stop.wait(every) if stop is not None else time.sleep(every)):
+                    with self._mu:
+                        self._warming = False
                     return
 
         self.spawn(run)

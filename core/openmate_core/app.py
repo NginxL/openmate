@@ -628,9 +628,12 @@ class ConnectorApp:
             states = {c: w for c, w in states.items() if w is not None}  # not known not to be answered: 恢复 marks stay
         if failed is not None and not states and not reacted:
             raise failed
+        unasked = set(getattr(reacted, "unasked", ()) or ())
         for t in needs:
             if t["_version"] in reacted:  # that very message: its version (no time to weigh), whatever 完成 said
                 states[t["_chat"]["id"]] = 0.0
+            elif t["_version"] in unasked and states.get(t["_chat"]["id"]) is None:
+                states.pop(t["_chat"]["id"], None)  # its reactions are not known: a 恢复 mark stays
         with self._done_mu:
             with self.lock:
                 same = gen == self._gen and epoch == self._account_epoch

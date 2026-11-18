@@ -120,5 +120,25 @@ class StoreTest(unittest.TestCase):
         self.assertFalse(self.store.seen_add("x"))
 
 
+
+class PlanTest(unittest.TestCase):
+    def test_the_hot_reads_use_their_indexes(self):
+        import tempfile, os
+        from openmate_core.store import Store
+
+        d = tempfile.mkdtemp(prefix="openmate-plan-")
+        st = Store(os.path.join(d, "t.db"))
+        self.addCleanup(st.close)
+
+        def plan(sql, args):
+            return " ".join(str(r[-1]) for r in st._all("EXPLAIN QUERY PLAN " + sql, args))
+
+        spoke = plan("SELECT chat_id, MAX(at) FROM messages WHERE mine = 1 AND type != 'SYSTEM' GROUP BY chat_id", ())
+        self.assertIn("messages_spoke", spoke)
+        today = plan("SELECT COUNT(*) AS n, COUNT(DISTINCT chat_id) AS c FROM messages "
+                     "WHERE at >= ? AND mine = 0 AND type != 'SYSTEM'", (0,))
+        self.assertIn("messages_others_at", today)
+
+
 if __name__ == "__main__":
     unittest.main()

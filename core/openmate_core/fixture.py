@@ -30,6 +30,10 @@ def tiny_png(color: Tuple[int, int, int] = (40, 120, 200), size: int = 2) -> byt
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
+class _Reacted(dict):
+    unasked: set = set()
+
+
 class FixtureWorld:
     """The service's state. Tests reach into it: push() a message, drop() the link, set the knobs."""
 
@@ -59,6 +63,7 @@ class FixtureWorld:
         self.done_hook: Optional[Callable[[], None]] = None  # run by chat_done_states after it read its answer
         self.my_reacted: Dict[str, Tuple[float, str]] = {}  # message id → (when, type) of the account's reaction on it
         self.reactions_fail = False  # my_reactions raises
+        self.reactions_unasked = False  # my_reactions answers, its batches all failed (every id unknown)
         self.reacted_listener: Optional[Callable] = None
         self.reactions_asks: List[List[str]] = []
         self.react_fail = False
@@ -337,6 +342,10 @@ class FixtureBackend(Backend):
             w.reactions_asks.append(list(message_ids))
             if w.reactions_fail:
                 raise BackendError("连不上（读取表情回应时）", "unreachable")
+            if w.reactions_unasked:
+                out = _Reacted()
+                out.unasked = set(message_ids)
+                return out
             return {m: w.my_reacted[m][0] for m in message_ids if m in w.my_reacted and w.my_reacted[m][1] not in ignore}
 
     def doc_text(self, doc_url: str, most: int) -> str:

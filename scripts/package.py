@@ -190,14 +190,42 @@ def run(out_root, check=False, allow_replace=False, log=print):
     return problems
 
 
+def published_changed(ref: str, out: str) -> list:
+    """The packages git ref has that differ here or are gone (a published version never changes)."""
+    import subprocess
+
+    try:
+        listed = subprocess.run(["git", "-C", ROOT, "ls-tree", "-r", "--name-only", ref, "--", "packages"],
+                                capture_output=True, text=True, check=True).stdout.split()
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise PackageError("git could not list the packages of %s (%s)" % (ref, e))
+    problems = []
+    for rel in listed:
+        if not rel.endswith(".tar.gz"):
+            continue
+        before = subprocess.run(["git", "-C", ROOT, "show", "%s:%s" % (ref, rel)], capture_output=True).stdout
+        path = os.path.join(out, rel)
+        if not os.path.exists(path):
+            problems.append("%s was published (%s) and is gone: published packages stay" % (rel, ref))
+            continue
+        with open(path, "rb") as f:
+            if hashlib.sha256(f.read()).digest() != hashlib.sha256(before).digest():
+                problems.append("%s was published (%s) and changed: bump the version instead" % (rel, ref))
+    return problems
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--check", action="store_true", help="only check that packages and the index are up to date")
     ap.add_argument("--allow-replace", action="store_true", help="rewrite a package of an unpublished version")
     ap.add_argument("--out", default=ROOT, help="where packages/ and the index go (default: the repository)")
+    ap.add_argument("--published", metavar="REF", default="",
+                    help="with --check: also fail when a package that git REF has (published) was changed or removed")
     args = ap.parse_args(argv)
     try:
         problems = run(os.path.abspath(args.out), check=args.check, allow_replace=args.allow_replace)
+        if args.published:
+            problems += published_changed(args.published, os.path.abspath(args.out))
     except PackageError as e:
         sys.stderr.write("package: %s\n" % e)
         return 1

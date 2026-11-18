@@ -634,6 +634,20 @@ class ReadTest(Base):
         self.assertTrue(any('"isEncrypted": true' in line for line in logs.output), logs.output)
         self.assertFalse(any(url in line for line in logs.output), "no content in the log")
 
+    def test_a_text_held_by_feishus_data_loss_policy(self):
+        S.history["660"] = {1: frame_msg("661", "660", 1, {}), 2: frame_msg("662", "660", 2, {})}
+        S.chats["660"] = {"id": "660", "type": 2, "name": "示例群", "lastMessagePosition": 2}
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {
+            "1": {"id": "661", "type": 4, "contentState": {"dlpReviewState": 3}, "characterLength": 40},
+            "2": {"id": "662", "type": 4, "contentState": {"dlpReviewState": "IN_PROGRESS"}, "characterLength": 12}}}
+        larkagentx._SHAPES_SEEN.clear()
+        with self.assertLogs("openmate.larkx", level="INFO") as logs:
+            msgs = self.b.history("660", None, 10)
+        self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT, "blocked: said so, never worked around")
+        self.assertEqual(msgs[1].text, "", "under review: left empty, read again later")
+        self.assertTrue(getattr(msgs[1], "review", False))
+        self.assertTrue(any('"dlpReviewState": 3' in line for line in logs.output), logs.output)
+
     def test_a_text_read_as_nothing_is_noted(self):
         empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}
         S.history["610"] = {1: frame_msg("611", "610", 1, empty)}

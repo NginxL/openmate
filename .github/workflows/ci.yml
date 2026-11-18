@@ -26,10 +26,35 @@ jobs:
             python: "3.13"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the published packages are checked against the target branch
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - name: Tests (standard library only, python -I)
         run: PYTHON=python scripts/test.sh
-      - name: Packages and persona-extensions.json are up to date
-        run: python -I -B scripts/package.py --check
+      - name: Packages and persona-extensions.json are up to date, published packages unchanged
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -n "$base" ] && git cat-file -e "$base" 2>/dev/null; then
+            python -I -B scripts/package.py --check --published "$base"
+          else
+            python -I -B scripts/package.py --check
+          fi
+
+  native:
+    name: matewechat-native (Rust tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/matewechat-native/target
+          key: native-${{ hashFiles('native/matewechat-native/Cargo.lock', 'native/matewechat-native/rust-toolchain.toml') }}
+      - name: cargo test
+        working-directory: native/matewechat-native
+        run: cargo test --locked
