@@ -137,6 +137,8 @@ class ConnectorApp:
             self._methods.pop(m, None)
         self.ui: Optional[UI] = None
         self.today_api = None  # todayapi.TodayAPI, for a platform with today_api_callers and a socket from the host
+        self.connector_on = True  # initialize's active.connectors names this connector (off: no link, no /agent)
+        self.hub_role = "center"  # "member": another hub is primary, the chat-driven work (/agent, 代答) is its own
 
     # ------------------------------------------------------------------ the protocol
 
@@ -199,6 +201,10 @@ class ConnectorApp:
                 self.hub = HubAPI(hub.get("url") or self.env.get("PERSONA_HUB_URL", ""),
                                   hub.get("token") or self.env.get("PERSONA_HUB_TOKEN", ""))
                 self.tz = zone(hub.get("timezone") or "")
+                active = params.get("active")
+                if isinstance(active, dict) and "connectors" in active:  # an older hub says nothing: on
+                    self.connector_on = self.cid in [str(c) for c in active.get("connectors") or []]
+                self.hub_role = str(hub.get("role") or "center")
                 self.initialized = True
                 self._start_today_api()  # /health answers from now on: the host checks it as soon as this returns
         out = {"protocol": PROTOCOL, "id": self.manifest["id"], "version": self.manifest["version"]}
@@ -232,6 +238,11 @@ class ConnectorApp:
                 self.setup_kind = e.kind
                 log.warning("backend not available: %s", e.kind)
             self.agent = AgentRunner(self)
+            if not self.connector_on or self.hub_role == "member":
+                # the user turned the connector off, or another hub does the chat-driven work: nothing answers or
+                # reacts as the user from here (the pages still show what is stored)
+                self.agent.enabled = False
+                log.info("/agent and 代答 are off here (%s)", "the connector is off" if not self.connector_on else "a member hub")
             self.people = People(self)
             creds = self._load_credentials()
             if creds is not None:
@@ -240,8 +251,8 @@ class ConnectorApp:
                 name = self.store.meta_get("account_name")
                 if name:
                     self.account = Account(self.store.meta_get("account_id"), name)
-                if self.backend is not None:
-                    self._start_link(restore=True)
+                if self.backend is not None and self.connector_on:
+                    self._start_link(restore=True)  # off: no link, nothing received or sent in the user's name
             self.agent.start()
             if self.backend is not None and getattr(self.backend, "done_marks", False):
                 threading.Thread(target=self._done_loop, name="openmate-done", daemon=True).start()
