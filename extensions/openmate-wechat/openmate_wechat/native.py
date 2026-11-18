@@ -193,8 +193,7 @@ class Native:
                     q = self._subs.get(msg.get("gen")) if isinstance(msg.get("gen"), int) else None
                 if q is not None:
                     q.put(msg)  # only the listen it belongs to sees it
-                else:
-                    self.events.put(msg)
+                # an event of a listen nobody hears any more (it ended, or never started here) is dropped
         except (OSError, ValueError):
             pass
         finally:

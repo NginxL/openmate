@@ -16,6 +16,7 @@ out_mu = threading.Lock()
 acks = {}
 ack_cv = threading.Condition()
 polls = [0]
+started = [False]
 
 
 def out(v):
@@ -54,8 +55,11 @@ def answer(req):
     ok = lambda **kw: out(dict(kw, id=rid, ok=True))  # noqa: E731
     fail = lambda kind, msg: out({"id": rid, "ok": False, "error": {"kind": kind, "message": msg}})  # noqa: E731
     if op == "login_start":
+        started[0] = True
         return ok(qr="https://login.weixin.qq.com/l/fake", expires_at=0, device={"device": 1})
     if op == "login_poll":
+        if not started[0]:
+            return fail("input", "没有进行中的扫码登录")
         polls[0] += 1
         return ok(status=["pending", "scanned", "confirmed"][min(polls[0] - 1, 2)])
     if op == "login_finish":

@@ -59,19 +59,10 @@ PROGRESS_MARK = "⏳ 进行中（这条会原地更新）"
 MARK_POSITIONS = ("end", "top")  # where the AI mark line goes: after the answer (so a folded thread shows the answer) or on top
 
 
-_WECHAT_MENTIONS = re.compile("^(?:\\s*@[^\u2005\\n]{1,64}\u2005)+")
-
-
 def mark_lines(text: str) -> tuple:
     """The first and the last non-empty line of a message, without a leading quote mark: where an AI mark sits."""
     lines = [l.lstrip("> ").strip() for l in (text or "").split("\n") if l.strip()]
-    if not lines:
-        return ("", "")
-    # a reply that @s its asker starts with the @ (WeChat puts "@name\u2005" before the text, and a name may hold
-    # spaces): the mark comes right after it
-    head = _WECHAT_MENTIONS.sub("", lines[0], count=1)
-    first = strip_leading_mentions(head).lstrip("> ").strip() or lines[0]
-    return (first, lines[-1])
+    return (lines[0], lines[-1]) if lines else ("", "")
 
 
 def ai_marked(text: str, marks) -> bool:
@@ -1161,7 +1152,7 @@ class AgentRunner:
             if cur["state"] in ("stopped", "failed"):
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
-                or cur.get("fallback") in ("claimed", "sent") or cur["state"] == "timeout"
+                or cur.get("fallback") in ("claimed", "sent", "failed") or cur["state"] == "timeout"  # any attempt
             if not self._can_edit() and answered:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got

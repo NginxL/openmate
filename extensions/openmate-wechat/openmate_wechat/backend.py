@@ -53,6 +53,7 @@ SERVICE_IDS = {"filehelper", "weixin", "weibo", "fmessage", "floatbottle", "medi
                "notification_messages", "wa_app_kefu_message", "wxzhifu", "voip", "voipapp"}  # agent-wechat's list
 SERVICE_SUFFIXES = ("@im.bot", "@stranger", "@kefu.openim", "@opencustomerservicemsg", "@placeholder_foldgroup",
                     "@weclaw", "@im.chatroom")
+AT_PREFIX = re.compile("^(?:\\s*@[^\u2005\\n]{1,1024}\u2005)+")  # WeChat's real @s: "@name" and U+2005
 PERSON_ID = re.compile(r"^(wxid_[A-Za-z0-9_-]{4,64}|[A-Za-z][A-Za-z0-9_-]{5,31})$")
 
 SCHEMA = (
@@ -215,7 +216,6 @@ class WeChatBackend(Backend):
         self.me = ""
         self.me_name = ""
         self._gen = 0
-        self._member_count = 0
 
     # ---------------------------------------------------------------- the program
 
@@ -293,7 +293,7 @@ class WeChatBackend(Backend):
         except NativeGone as e:
             raise BackendError(e.message, "unreachable")
         except NativeError as e:
-            if e.kind == "login":  # this QR attempt ended (refused, failed): a new one
+            if e.kind in ("login", "input"):  # this QR attempt ended, or the program lost it (restarted): a new one
                 log.warning("WeChat sign-in attempt ended: %s", e.message)
                 return "expired"
             raise BackendError(e.message, "unknown")
@@ -404,6 +404,15 @@ class WeChatBackend(Backend):
         self.store.mark_delivered(mid)
         return True
 
+    @staticmethod
+    def _visible_text(text: str) -> str:
+        """A reply that @s its asker starts "@name\u2005" (a name may hold spaces): with an AI mark right after, the
+        mentions go, so the core sees the mark on the first line (another OpenMate's 自动代答 is never answered)."""
+        rest = AT_PREFIX.sub("", text, count=1)
+        if rest != text and rest.lstrip("> ").startswith("🤖"):
+            return rest
+        return text
+
     def _message(self, ev: dict, pos: int) -> Message:
         chat = str(ev.get("chat") or "")
         sender = str(ev.get("sender") or "")
@@ -414,7 +423,8 @@ class WeChatBackend(Backend):
             name = cached[0] if cached else ""
         return Message(
             id=str(ev.get("id")), chat_id=chat, position=pos, sender_id=sender, sender_name=name, mine=mine,
-            type=str(ev.get("type") or "TEXT"), text=str(ev.get("text") or ""), at=float(ev.get("at") or 0),
+            type=str(ev.get("type") or "TEXT"), text=self._visible_text(str(ev.get("text") or "")),
+            at=float(ev.get("at") or 0),
             parent_id=str(ev.get("parent") or ""), at_all=bool(ev.get("at_all")),
             at_me=bool(ev.get("at_me")) and not bool(ev.get("at_all")),  # @me among @everyone is a notice
         )
@@ -454,9 +464,7 @@ class WeChatBackend(Backend):
         name = names.get(chat_id, ("", ""))[0]
         members = 0
         if is_group(chat_id):
-            self._member_count = 0
-            self._roster(chat_id)
-            members = self._member_count
+            members = self._roster(chat_id)[1]  # the full count, or 0 (unknown) when WeChat gave none
         if name or members:
             self.store.name_chat(chat_id, name, members)
 
@@ -475,13 +483,12 @@ class WeChatBackend(Backend):
                 self.store.set_name(self._name_key(cid, ""), out[cid][0], nick)
         return out
 
-    def _roster(self, chat_id: str) -> List[dict]:
+    def _roster(self, chat_id: str) -> Tuple[List[dict], int]:
         try:
             r = self._call(self._link(), "room", 20, room_id=chat_id)
         except BackendError:
-            return []
+            return [], 0
         members = r.get("members") or []
-        self._member_count = int(r.get("member_count") or 0) or len(members)
         for m in members:
             uid = str(m.get("id") or "")
             if not uid:
@@ -489,7 +496,7 @@ class WeChatBackend(Backend):
             shown = str(m.get("display") or "") or str(m.get("nickname") or "")
             if shown:
                 self.store.set_name(self._name_key(uid, chat_id), shown, shown)
-        return members
+        return members, int(r.get("member_count") or 0)
 
     @staticmethod
     def _name_key(user_id: str, chat_id: Optional[str]) -> str:

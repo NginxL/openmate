@@ -110,12 +110,11 @@ class FeishuUnchangedTest(unittest.TestCase):
         auto = running(h, at)
         self.assertIn("进度", h.tool("agent_reply", request=auto["id"], text="在查", progress=True))
 
-    def test_an_ai_mark_after_a_leading_mention_is_seen(self):
+    def test_ai_marks_read_as_before(self):
         from openmate_core.agent import AI_MARKS, ai_marked
 
-        self.assertTrue(ai_marked("@鲍勃\u2005> 🤖 AI 代答 · 模型 · high\n周五上线", AI_MARKS))
-        self.assertTrue(ai_marked("@Bob @Ann > 🤖 AI 回复 · x\nok", AI_MARKS))
-        self.assertFalse(ai_marked("@Bob 你好\n周五上线", AI_MARKS))
+        self.assertTrue(ai_marked("> 🤖 AI 代答 · 模型 · high\n周五上线", AI_MARKS))
+        self.assertFalse(ai_marked("@张三 请解释\u2005🤖 AI 代答 是什么意思？", AI_MARKS), "Feishu text as in 0.11.0")
 
 
 class CoreFixesTest(unittest.TestCase):

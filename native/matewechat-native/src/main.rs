@@ -131,10 +131,10 @@ impl App {
             q.push_back((now, chat.to_owned(), text.to_owned()));
         }
     }
-    /// A send that surely did not go out leaves no echo to wait for (its latest intent in the chat).
-    fn forget_intent(&self, chat: &str) {
+    /// A send that surely did not go out leaves no echo to wait for: its own intent (this chat, this text) goes.
+    fn forget_intent(&self, chat: &str, text: &str) {
         if let Ok(mut q) = self.intents.lock() {
-            if let Some(i) = q.iter().rposition(|(_, c, _)| c == chat) {
+            if let Some(i) = q.iter().rposition(|(_, c, t)| c == chat && t == text) {
                 q.remove(i);
             }
         }
@@ -474,7 +474,7 @@ fn drain(
     for _ in 0..8 {
         let had_cursor = !cursor.is_empty();
         let batch = conn.sync(cursor, scene)?;
-        if had_cursor && batch.cursor.is_empty() {
+        if batch.code == -2006 || (had_cursor && batch.cursor.is_empty()) {
             origin = "catchup"; // the server reset the cursor: what it sends again is history, never a request
         }
         if stop.load(Ordering::SeqCst) {
@@ -586,6 +586,7 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
     }
     let client = app.client()?;
     let own = app.own();
+    let intended: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None); // the text this send registered
     let attempt = (|| -> Result<(String, Option<String>)> {
         if text.trim().is_empty() || text.len() > 16 * 1024 || text.contains('\0') {
             return Err(err("input", "消息内容是空的或太长"));
@@ -604,6 +605,7 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
             let xml = wechat_protocol::quote_send::quote_xml(&own, &rendered, &reference)
                 .map_err(|e| err("input", &format!("引用消息组不出来：{e}")))?;
             app.intend(&chat, &rendered);
+            *intended.borrow_mut() = Some(rendered.clone());
             let r = app.rt.block_on(client.send_quote(&chat, &client_id.to_string(), created_at, &xml, source.as_deref()))?;
             return match r.status {
                 wechat_protocol::media_send::SendStatus::ServerAccepted if r.client_id_matches == Some(true) => {
@@ -616,6 +618,7 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
             };
         }
         app.intend(&chat, &rendered);
+        *intended.borrow_mut() = Some(rendered.clone());
         let r = app.rt.block_on(client.send_text(
             &chat,
             &rendered,
@@ -640,7 +643,9 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
         Err(e) => {
             let (status, why) = send_outcome(&e);
             if status != "uncertain" {
-                app.forget_intent(&chat); // nothing will echo
+                if let Some(text) = intended.borrow().as_deref() {
+                    app.forget_intent(&chat, text); // nothing will echo
+                }
             }
             log(&format!("send {status}: {why}"));
             Ok(json!({"status": status, "message": why}))

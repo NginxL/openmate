@@ -213,6 +213,15 @@ class ListenTest(Base):
         self.assertGreaterEqual(len(self.requests("restore")), 2)
 
 
+class LoginLostTest(Base):
+    def test_a_program_that_lost_the_attempt_gets_a_new_qr(self):
+        b = self.backend()
+        b.login_start()
+        b._native.close()  # the program restarts: it knows no QR attempt
+        time.sleep(0.3)
+        self.assertEqual(b.login_poll("qr"), "expired")
+
+
 class ProtocolTest(Base):
     def test_a_program_of_another_protocol_is_not_used(self):
         os.environ["FAKE_PROTOCOL"] = "1"
@@ -294,6 +303,13 @@ class NamesTest(Base):
                                          "masssendapp", "y@kefu.openim"]),
                          {"wxid_bob": "user", "gh_abc": "bot", "abc@im.bot": "bot", "filehelper": "bot",
                           "x@openim": "user", "masssendapp": "bot", "y@kefu.openim": "bot"})
+
+    def test_a_mention_before_an_ai_mark_is_dropped_for_the_core(self):
+        v = wb.WeChatBackend._visible_text
+        self.assertEqual(v("@Bob Smith\u2005> 🤖 AI 代答 · m · h\n周五"), "> 🤖 AI 代答 · m · h\n周五")
+        self.assertEqual(v("@鲍勃\u2005@Ann\u2005🤖 AI 回复\nok"), "🤖 AI 回复\nok")
+        self.assertEqual(v("@鲍勃\u2005你好"), "@鲍勃\u2005你好", "a person's message keeps its @")
+        self.assertEqual(v("@" + "长" * 300 + "\u2005> 🤖 AI 代答"), "> 🤖 AI 代答")
 
     def test_proxy_variables_never_reach_the_program(self):
         env = clean_env({"PATH": "/bin", "https_proxy": "http://127.0.0.1:7897", "ALL_PROXY": "socks5://x"})
