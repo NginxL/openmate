@@ -37,7 +37,17 @@ def setup_logging(name: str) -> int:
     logging.basicConfig(level=max(level, logging.INFO), stream=sys.stderr, format="%(name)s %(levelname)s %(message)s")
     logging.getLogger().setLevel(max(level, logging.INFO))
     logging.getLogger("openmate").setLevel(level)
+    for h in logging.getLogger().handlers:  # also when a library set its own logger to DEBUG
+        if not any(isinstance(f, _OthersAtInfo) for f in h.filters):
+            h.addFilter(_OthersAtInfo())
     return level
+
+
+class _OthersAtInfo(logging.Filter):
+    """Below INFO only OpenMate's own records are written."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.INFO or record.name == "openmate" or record.name.startswith("openmate.")
 
 
 def run(platform: Platform, timing: Timing = None, first: bytes = b"") -> int:

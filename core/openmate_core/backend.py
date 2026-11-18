@@ -292,9 +292,9 @@ class Backend(abc.ABC):
         conversation answering its comment, which can't read anything itself."""
         return ""
 
-    def doc_writer_name(self) -> str:
+    def doc_writer_name(self, fresh: bool = False) -> str:
         """The display name of the account doc_text / reply_doc_comment act as ("" when unknown): a 文档代答 goes out
-        only when it is the signed-in account's own."""
+        only when it is the signed-in account's own. fresh: asked now, not from a cache (right before a write)."""
         return ""
 
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:

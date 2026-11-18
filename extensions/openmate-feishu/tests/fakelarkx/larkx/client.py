@@ -69,6 +69,9 @@ class LarkClient:
 
     def pull_history(self, chat_id, positions, save_storage=None):
         STATE.history_calls.append((chat_id, list(positions)))
+        answer = STATE.api_answers.get("messages.PullMessagesByPositionsRequest")
+        if isinstance(answer, dict) and "messages" not in answer:
+            return []  # the real one reads a status-only answer as no messages
         msgs = STATE.history.get(str(chat_id), {})
         return [dict(msgs[p]) for p in sorted(positions) if p in msgs]
 
@@ -77,6 +80,9 @@ class LarkClient:
         answer = STATE.api_answers.get(type_or_cmd)
         if isinstance(answer, BaseException):
             raise answer
+        if answer is None and type_or_cmd == "messages.PullMessagesByPositionsRequest":
+            msgs = STATE.history.get(str((data or {}).get("chatId")), {})
+            return {"messages": {str(p): msgs[p] for p in (data or {}).get("positions") or [] if p in msgs}}
         if answer is None:
             raise ValueError("no such request in the fake")
         return answer

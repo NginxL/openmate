@@ -368,6 +368,10 @@ class Store:
                     if m.text:
                         db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ?",
                                    (m.text, (m.type or "TEXT").upper(), m.chat_id, m.id, m.text))
+                    if m.at_me or m.at_all:  # a history read may not know whom a message mentions (Feishu)
+                        db.execute("UPDATE messages SET at_me = MAX(at_me, ?), at_all = MAX(at_all, ?) "
+                                   "WHERE chat_id = ? AND id = ?",
+                                   (int(bool(m.at_me)), int(bool(m.at_all)), m.chat_id, m.id))
                     if not from_history and db.execute(
                             "UPDATE messages SET from_history = 0 WHERE chat_id = ? AND id = ? AND from_history = 1",
                             (m.chat_id, m.id)).rowcount == 1:

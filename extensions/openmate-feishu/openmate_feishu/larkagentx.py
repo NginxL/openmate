@@ -458,6 +458,7 @@ class LarkXBackend(Backend):
         self._groups_join: Dict[str, int] = {}
         self._groups_owner = ""
         self._groups_at = 0.0  # time.monotonic() of the last whole read (0: none yet)
+        self._groups_whole_ids: Set[str] = set()  # every id the last whole read listed (details or not): the baseline
         self._groups_tried = 0.0
         self._groups_mu = threading.Lock()
         self._groups_busy = False
@@ -670,6 +671,7 @@ class LarkXBackend(Backend):
             self._names.clear()
         with self._groups_mu:
             self._groups, self._groups_join, self._groups_owner, self._groups_at = [], {}, "", 0.0
+            self._groups_whole_ids = set()
             self._groups_tried, self._groups_soon, self._groups_delta = 0.0, False, []
         if old is not None:
             self._close_client(old)
@@ -870,22 +872,28 @@ class LarkXBackend(Backend):
 
     def _groups_work(self, client, me: Account) -> None:
         try:
-            groups, joined, whole = self._read_groups(client)
+            groups, joined, whole, listed = self._read_groups(client)
             _, now_me = self._session()
             if now_me is None or now_me.id != me.id:
                 return  # another account signed in meanwhile: these are not its groups
             left: Set[str] = set()
             with self._groups_mu:  # published, then what was heard while it was out (newer), in order, at once
-                if whole and self._groups_owner == me.id and self._groups_at:
-                    # a whole read after a whole read: a group no longer listed was left (or dissolved meanwhile)
-                    left = {g.id for g in self._groups} - {g.id for g in groups}
-                self._groups, self._groups_join, self._groups_owner = groups, joined, me.id
+                if self._groups_owner != me.id:
+                    self._groups_whole_ids = set()
                 if whole:
+                    if self._groups_owner == me.id and self._groups_at:
+                        # a whole read after the last whole one: an id listed then, or by a part read since, and no
+                        # longer listed at all was left or dissolved; one listed without details is kept as it was
+                        left = self._groups_whole_ids - listed
+                    self._groups_whole_ids = set(listed)
                     self._groups_at = time.monotonic()
                 else:
+                    self._groups_whole_ids |= listed  # a part read adds what it saw, and drops nothing
                     self._groups_soon = True
+                self._groups, self._groups_join, self._groups_owner = groups, joined, me.id
                 for infos, gone in self._groups_delta:
-                    left |= self._apply_chats_locked(infos, gone, me)
+                    # only onto this read's list: the core heard of these when they were pushed
+                    self._apply_chats_locked(infos, gone, me)
                 self._groups_delta = []
                 self._groups_busy = False
             self._report_gone(left)
@@ -912,10 +920,11 @@ class LarkXBackend(Backend):
             raise BackendError("飞书暂时没有回答（%s时）" % what, "unreachable")
         return resp
 
-    def _read_groups(self, client) -> Tuple[List[Chat], Dict[str, int], bool]:
+    def _read_groups(self, client) -> Tuple[List[Chat], Dict[str, int], bool, Set[str]]:
         """Every group the account is in: their ids page by page (chats.PullGroupChatsRequest), then their names in
         batches (chats.PullChatsByIdsRequest); dissolved, frozen, deleted ones and ones it only looks in left out.
-        Newest joined first. Whether it read them all (else a part, read again soon). BackendError: nothing kept."""
+        Newest joined first. Whether it read them all (else a part, read again soon), and every id listed (with
+        details or not). BackendError: nothing kept."""
         ids: List[str] = []
         joined: Dict[str, int] = {}
         cursor, whole = 0, False
@@ -962,7 +971,7 @@ class LarkXBackend(Backend):
             joined[cid] = _int(info.get("joinTimeMs")) // 1000 or joined.get(cid) or _int(info.get("createTime"))
             out.append(self._chat_of(cid, info))
         out.sort(key=lambda c: -joined.get(c.id, 0))
-        return out, {c.id: joined.get(c.id, 0) for c in out}, whole
+        return out, {c.id: joined.get(c.id, 0) for c in out}, whole, set(ids)
 
     def _pushed_chats(self, payload: bytes, me: Account) -> None:
         """Chats that changed (chats.PushChatsRequest): a listed group renamed gets its new name, one left, deleted
@@ -1182,13 +1191,13 @@ class LarkXBackend(Backend):
     def doc_text(self, doc_url: str, most: int) -> str:
         return self.cli.fetch_doc(doc_url, most) if self.cli is not None else ""
 
-    def doc_writer_name(self) -> str:
+    def doc_writer_name(self, fresh: bool = False) -> str:
         if self.cli is None:
             return ""
         now = time.monotonic()
         with self._lock:
             hit = getattr(self, "_doc_writer", None)
-        if hit is not None and hit[0] > now:
+        if hit is not None and hit[0] > now and not fresh:
             return hit[1]
         name = self.cli.user_name()
         with self._lock:
@@ -1413,6 +1422,14 @@ class LarkXBackend(Backend):
             lo = max(FIRST_POSITION, hi - missing)
             try:
                 got = client.pull_history(chat_id, list(range(lo, hi)))
+                if not got:
+                    # LarkAgentX reads an answer that is only a status as no messages: ask once more and look at the
+                    # answer itself (an empty page is rare: every message there recalled)
+                    self._answer(client.api("messages.PullMessagesByPositionsRequest",
+                                            {"chatId": str(chat_id), "positions": list(range(lo, hi))}),
+                                 "读取历史消息")
+            except BackendError:
+                raise
             except Exception as e:
                 raise self._net(e, "读取历史消息")
             for d in got or []:
@@ -1492,15 +1509,19 @@ class LarkXBackend(Backend):
             return []
         chats: List[Chat] = []
         failed: Optional[Exception] = None
+        answered = False
         for how in (self._recent_from_chats, self._recent_from_feed):
             try:
                 chats = how(client, limit)
             except Exception as e:
                 failed = failed or e
                 continue
+            answered = True
             if chats:
                 break
-        if not chats and failed is not None:
+        if not answered and failed is not None:  # none could say: an error, not "no chats"
+            if isinstance(failed, BackendError):
+                raise failed
             raise self._net(failed, "读取最近的会话")
         now = time.monotonic()
         with self._lock:
@@ -1510,6 +1531,8 @@ class LarkXBackend(Backend):
 
     def _recent_from_chats(self, client, limit: int) -> List[Chat]:
         resp = self._answer(client.api("chats.PullRecentChatsRequest", {"count": int(limit)}) or {}, "读取最近的会话")
+        if "chats" not in resp and "orderedChatIds" not in resp:
+            raise BackendError("飞书没有给出最近的会话", "unreachable")  # a status alone, even 200
         raw = resp.get("chats") or {}
         order = [str(x) for x in resp.get("orderedChatIds") or [] if str(x) in raw]
         if not order:
@@ -1520,6 +1543,8 @@ class LarkXBackend(Backend):
         resp = self._answer(client.api("feed.PullFeedCardsRequest",
                                        {"type": 1, "pullType": 1, "count": int(limit), "pullFeedType": 1}) or {},
                             "读取最近的会话")
+        if "chats" not in resp and "cards" not in resp:
+            raise BackendError("飞书没有给出最近的会话", "unreachable")
         raw = resp.get("chats") or {}
         out, seen = [], set()
         for card in resp.get("cards") or []:

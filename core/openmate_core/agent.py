@@ -247,12 +247,21 @@ class AgentRunner:
             log.exception("the guest quota ledger could not be filled from the kept runs")
         self._prune(force=True)
         for run in self.store.runs_in_state(["starting"]):
+            if run.get("start_op") and self.enabled and self.hub.available:
+                # a new conversation under an operation id: the same request again gets the hub's first answer
+                # (the conversation it started, if it did), never a second start
+                log.info("an /agent start cut off by a restart is asked again under its operation id")
+                threading.Thread(target=self._resume_start, args=(run,), name="openmate-agent-start",
+                                 daemon=True).start()
+                continue
             # Cut off by a restart before the conversation was surely started: starting it again could start two.
             with self._lock(run["id"]):
                 run["state"] = "failed"
                 run["error"] = "restart"
                 self.store.run_put(run)
             self._post_once(run, "agent-restart:" + run["id"],
+                            "扩展重启了，没法确认这个 /agent 请求有没有开始处理。请先在 Persona 里看看有没有新开的会话；"
+                            "没有的话再重新发送。" if run.get("start_op") else
                             "扩展重启了，这个 /agent 请求没能开始处理，请重新发送。", reply_to=run["request_id"])
         resumed = len(self.store.runs_in_state(["running"]))
         if resumed:
@@ -362,11 +371,11 @@ class AgentRunner:
         view = getattr(self.app.platform, "mark_view", None)
         # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after any leading @s
         body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
+        if not self.enabled:
+            return
         if body.lower() in STOP_WORDS:
             if self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"])):
                 threading.Thread(target=self._on_stop, args=(row,), name="openmate-agent-stop", daemon=True).start()
-            return
-        if not self.enabled:
             return
         req = match_prefix(body, self.prefix)
         if req is None:
@@ -615,6 +624,15 @@ class AgentRunner:
             except Exception as e:
                 log.info("the /agent request's end reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
 
+    def _resume_start(self, run: dict) -> None:
+        row = self.store.message(run["chat_id"], run["request_id"]) or {"chat_id": run["chat_id"],
+                                                                         "id": run["request_id"]}
+        try:
+            self._start(run, row)
+        except Exception:
+            log.exception("/agent start failed")
+            self._fail(run["id"], "没能启动 Agent：扩展内部错误")
+
     def _start_run(self, run: dict, row: dict) -> None:
         if run.get("kind") not in GUEST_KINDS or self._guest_supported():  # never "处理中" for what cannot start
             self._ack_request(run)
@@ -633,12 +651,15 @@ class AgentRunner:
         if not self.hub.available:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
-        prev = self._previous(run)
-        try:
-            prompt = self._doc_prompt(run) if run.get("kind") == "doc" else self.build_prompt(run, row, prev)
-        except Exception:
-            log.exception("/agent context could not be gathered")
-            prompt = self._instructions(run) + "\n" + (run["request_text"] or self.prefix)
+        prev = None if run.get("start_op") else self._previous(run)  # one with an operation: a new conversation
+        if run.get("start_prompt"):
+            prompt = run["start_prompt"]  # the very request sent before
+        else:
+            try:
+                prompt = self._doc_prompt(run) if run.get("kind") == "doc" else self.build_prompt(run, row, prev)
+            except Exception:
+                log.exception("/agent context could not be gathered")
+                prompt = self._instructions(run) + "\n" + (run["request_text"] or self.prefix)
         t = self.app.timing
         deadline = time.time() + t.agent_hub_wait
         cmid = "openmate-" + run["id"]
@@ -685,7 +706,7 @@ class AgentRunner:
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if op and e.code == "unknown":
+                if op and e.code in ("unknown", "assistant_in_doubt"):
                     self._fail(run["id"], "Persona 不确定这个 /agent 有没有开始处理（网络中途断了）。请先在 Persona 里看看有没有"
                                           "新开的会话；没有的话再重新发送。")
                     return
@@ -953,6 +974,8 @@ class AgentRunner:
             self._wake.clear()
             if self._stop.is_set():
                 return
+            if not self.enabled:
+                continue  # off here (the connector, or a member hub): runs left running are not answered from here
             for run in self.store.runs_in_state(["running"]):
                 if self._stop.is_set():
                     return
@@ -1228,10 +1251,19 @@ class AgentRunner:
 
         def go() -> dict:
             backend = self.app.backend
-            if backend is None:
+            if backend is None or not self.app.signed_in:
                 raise RPCError("飞书还没登录，回复不了这条评论")
+            if not self.auto_docs or not self.enabled:
+                raise RPCError("文档代答已经关了，这条评论不再回复")
             if not run.get("comment_id"):
                 raise RPCError("不知道这条评论的 id，回复不了：请到文档里看一下")
+            try:  # asked again right before the write: lark-cli may have signed in as someone else meanwhile
+                writer = (backend.doc_writer_name(fresh=True) or "").strip()
+            except Exception:
+                writer = ""
+            me = (self.app.me_name() or "").strip()
+            if not writer or writer != me:
+                raise RPCError("lark-cli 现在登录的不是这个飞书账号，这条评论不回复")
             try:
                 rid = backend.reply_doc_comment(run["doc_url"], run["comment_id"], body)
             except BackendError as e:
@@ -1283,7 +1315,10 @@ class AgentRunner:
             if not self._can_edit():  # every update would be one more message in the chat, as the user
                 return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
             return self._progress(run, text)
-        key = "agent:%s:%s" % (run["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
+        if run.get("kind") == "doc":
+            key = "agent:%s:doc" % run["id"]  # one comment per task, whatever its words (a retry may reword it)
+        else:
+            key = "agent:%s:%s" % (run["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur["state"] in ("stopped", "failed"):
@@ -1295,7 +1330,7 @@ class AgentRunner:
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
                 or (not quiet and (cur.get("fallback") == "claimed" or cur.get("timeout_notice") == "claimed")) \
                 or posted("fallback") or posted("timeout")
-            if not self._can_edit() and answered:
+            if (not self._can_edit() or cur.get("kind") == "doc") and answered:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got
                     ref = (done.get("result") or {}).get("message_ref") or "未知"

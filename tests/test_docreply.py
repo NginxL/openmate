@@ -57,9 +57,10 @@ class DocSafetyTest(unittest.TestCase):
         with self.assertRaises(HubSideError):
             h.tool("agent_reply", request=run["id"], text="第一次")
         h.world.doc_reply_uncertain = False
-        with self.assertRaises(HubSideError) as e:
-            h.tool("agent_reply", request=run["id"], text="第一次")
-        self.assertIn("结果不确定", e.exception.message)
+        for again in ("第一次", "第一次。", "换个说法再回一次"):  # reworded too: one comment per task
+            with self.assertRaises(HubSideError) as e:
+                h.tool("agent_reply", request=run["id"], text=again)
+            self.assertIn("不确定", e.exception.message)
         self.assertEqual(len(h.world.doc_replies), 1, "sent once, never again")
         mention(h, "dn3", comment="c3")
         run3 = doc_run(h, "dn3")
@@ -68,6 +69,22 @@ class DocSafetyTest(unittest.TestCase):
                    what="the reply in the hub's ledger")
         rec = [r for r in h.hub.sent_records if r.get("target") == {"doc": URL, "comment": "c3"}][0]
         self.assertEqual(rec.get("setting"), "auto_reply_docs")
+
+
+    def test_checked_again_right_before_the_write(self):
+        h = make(self)
+        mention(h)
+        run = doc_run(h)
+        h.world.doc_writer = "另一个账号"  # lark-cli signed in as someone else meanwhile
+        with self.assertRaises(HubSideError) as e:
+            h.tool("agent_reply", request=run["id"], text="好的")
+        self.assertIn("不是这个飞书账号", e.exception.message)
+        h.world.doc_writer = None
+        h.app.agent.auto_docs = False  # turned off meanwhile
+        with self.assertRaises(HubSideError) as e:
+            h.tool("agent_reply", request=run["id"], text="好的")
+        self.assertIn("关了", e.exception.message)
+        self.assertEqual(h.world.doc_replies, [])
 
 
 class DocReplyTest(unittest.TestCase):

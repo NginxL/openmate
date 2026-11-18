@@ -220,6 +220,21 @@ class AgendaTest(unittest.TestCase):
                 cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
             self.assertEqual(e.exception.kind, "uncertain", "the reply may be in the document")
 
+    def test_a_refusal_on_stderr_is_surely_not_sent(self):
+        # lark-cli writes a failure's JSON to stderr and exits non-zero
+        class Refusing(Runner):
+            def __call__(self, args, **kw):
+                self.calls.append((args, kw))
+                err = json.dumps({"ok": False, "error": {"type": "authorization", "subtype": "missing_scope"}})
+                return subprocess.CompletedProcess(args, 1, "", err)
+
+        runner = Refusing()
+        _, _, _, fake = pages(runner=runner)
+        cli = agenda.LarkCLI({"lark_cli": fake}, run=runner)
+        with self.assertRaises(agenda.CalendarError) as e:
+            cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
+        self.assertEqual(e.exception.kind, "auth", "a clear refusal: may be tried again once granted")
+
     def test_who_lark_cli_writes_as(self):
         runner = Runner({"identity": "user", "identities": {"user": {"available": True, "userName": "示例用户"},
                                                             "bot": {"available": True}}})

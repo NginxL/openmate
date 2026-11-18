@@ -318,5 +318,49 @@ class RedirectTest(unittest.TestCase):
         self.assertEqual(seen, [("/old", "sk-test-only"), ("/new", "sk-test-only")])
 
 
+class RedirectPostTest(unittest.TestCase):
+    def test_a_303_after_a_post_carries_the_key_and_no_body(self):
+        import http.server
+        import threading
+
+        seen = []
+        ok = json.dumps({"code": 0, "data": {"x": 2}}).encode()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                seen.append(("POST", self.path, self.headers.get("x-api-key"), self.headers.get("Content-Length")))
+                self.send_response(303)
+                self.send_header("Location", "/done")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self):
+                seen.append(("GET", self.path, self.headers.get("x-api-key"), self.headers.get("Content-Length")))
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(ok)))
+                self.end_headers()
+                self.wfile.write(ok)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = "http://127.0.0.1:%d" % srv.server_address[1]
+        app = types.SimpleNamespace(config={"starkmesh_url": url}, secrets={"starkmesh_key": "sk-test-only"})
+        self.assertEqual(starkmesh.StarkMeshAPI(app).call("POST", "/batch", body={"ids": [1]}), {"x": 2})
+        self.assertEqual(seen[1], ("GET", "/done", "sk-test-only", None), "no body, so no Content-Length")
+
+    def test_default_ports_are_the_same_place(self):
+        o = starkmesh._origin
+        self.assertEqual(o("https://gw.example.com/a"), o("https://gw.example.com:443/b"))
+        self.assertEqual(o("http://GW.example.com/a"), o("http://gw.example.com:80/b"))
+        self.assertNotEqual(o("http://gw.example.com/a"), o("https://gw.example.com/a"))
+        self.assertNotEqual(o("http://gw.example.com/a"), o("http://gw.example.com:8080/a"))
+
+
 if __name__ == "__main__":
     unittest.main()

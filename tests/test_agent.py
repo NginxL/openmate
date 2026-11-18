@@ -743,18 +743,51 @@ class NetworkTest(unittest.TestCase):
         self.assertNotIn("ref", run)
         self.assertEqual(len(h.http.sessions), 1)
 
-    def test_a_restart_while_it_waits_asks_to_send_it_again(self):
+    def test_a_restart_while_it_waits_asks_the_hub_again_under_its_operation(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
         h.http.offline = 10 ** 6
         m = ask(h, "/agent 等着等着重启了")
-        run_of(h, m)
+        op = wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
         time.sleep(0.2)
         h.http.offline = 0
         h2 = h.restart()
         h2.wait_ok()
-        wait_until(lambda: replies(h2), what="the notice")
-        self.assertIn("重新发送", replies(h2)[0]["text"])
-        time.sleep(0.3)
+        run = running(h2, m)
+        self.assertEqual(run["start_op"], op)
+        self.assertEqual(len(h2.http.sessions), 1)
+        self.assertEqual({r.get("op") for r in h2.http.starts()}, {op}, "only ever this operation")
+        self.assertEqual([x for x in h2.sent() if "重新发送" in x["text"]], [])
+
+    def test_a_restart_after_the_hub_started_it_gets_that_conversation(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0, agent_start_tries=10 ** 6))
+        h.http.lost_starts = 10 ** 6  # it starts at the hub, every answer is lost on the way back
+        m = ask(h, "/agent 回执丢了又重启")
+        wait_until(lambda: len(h.http.starts()) >= 2, what="asked again")
+        self.assertEqual(run_of(h, m)["state"], "starting")
+        h.http.lost_starts = 0
+        h2 = h.restart()
+        h2.wait_ok()
+        run = running(h2, m)
+        self.assertEqual(len(h2.http.sessions), 1, "the conversation the hub started, not a second")
+        self.assertIn(run["session_id"], h2.http.sessions)
+
+    def test_a_restart_with_no_operation_still_asks_to_send_it_again(self):
+        # a run an older version left starting (no operation id): never started blindly, the user is told
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 旧版本留下的")
+        wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
+        h.app.agent._stop.set()  # the start gives up; then it looks as an older version left it
+        time.sleep(0.2)
+        run = run_of(h, m)
+        run.pop("start_op", None)
+        run.pop("start_prompt", None)
+        run["state"] = "starting"
+        h.app.store.run_put(run)
+        h.http.offline = 0
+        h2 = h.restart()
+        h2.wait_ok()
+        wait_until(lambda: [x for x in h2.sent() if "重新发送" in x["text"]], what="the notice")
         self.assertEqual(h2.http.starts(), [])
         self.assertEqual(run_of(h2, m)["state"], "failed")
 
@@ -885,8 +918,38 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual((offline.unsent, offline.unreachable, offline.transient), (True, False, True))
         broke = HubError(502, "断了", "node_unreachable")
         self.assertEqual((broke.unsent, broke.transient), (False, True))
+        away = HubError(503, "电脑的 manager 没连上", "assistant_offline")  # the docs: no receipt, try the same again
+        self.assertEqual((away.unsent, away.transient), (True, True))
         missing = HubError(409, "没装 Claude Code", "claude_missing", retryable=False, delivered="none")
         self.assertEqual((missing.unsent, missing.transient), (False, False))
+
+
+class CutOffAnswerTest(unittest.TestCase):
+    def test_an_answer_cut_off_midway_is_a_network_failure(self):
+        import http.server
+        import threading
+
+        from openmate_core.hub import HubAPI, HubError
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(200)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.write(b'{"session":')  # and the connection ends
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        with self.assertRaises(HubError) as e:
+            HubAPI("http://127.0.0.1:%d" % srv.server_address[1], "t").request("POST", "/x", {"a": 1})
+        self.assertTrue(e.exception.transient)
+        self.assertFalse(e.exception.unsent, "it may have run")
 
 
 class SettingsAndFailuresTest(unittest.TestCase):

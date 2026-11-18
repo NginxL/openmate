@@ -31,5 +31,34 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(main.setup_logging("chatty"), logging.INFO, "an unknown level is INFO, not a crash")
 
 
+class HandlerFilterTest(unittest.TestCase):
+    def test_a_library_set_to_debug_is_still_not_written(self):
+        import io
+
+        root = logging.getLogger()
+        buf = io.StringIO()
+        h = logging.StreamHandler(buf)
+        root.addHandler(h)
+        lib = logging.getLogger("websockets.client")
+        saved = (root.level, lib.level, logging.getLogger("openmate").level)
+
+        def back():
+            root.removeHandler(h)
+            root.setLevel(saved[0])
+            lib.setLevel(saved[1])
+            logging.getLogger("openmate").setLevel(saved[2])
+
+        self.addCleanup(back)
+        main.setup_logging("DEBUG")
+        lib.setLevel(logging.DEBUG)  # a library (or its user) asked for its own DEBUG
+        lib.debug("> GET /ws?ticket=SECRET")
+        lib.info("connected")
+        logging.getLogger("openmate.larkx").debug("ours")
+        out = buf.getvalue()
+        self.assertNotIn("SECRET", out)
+        self.assertIn("connected", out)
+        self.assertIn("ours", out)
+
+
 if __name__ == "__main__":
     unittest.main()

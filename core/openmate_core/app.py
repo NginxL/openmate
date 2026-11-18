@@ -97,6 +97,7 @@ class ConnectorApp:
         self._creds_mu = threading.Lock()
         self._creds_gen = 0
         self._creds_out = False
+        self._login_gen = 0  # the credentials generation the QR sign-in under way started in
         self._creds_seq = 0
         self._creds_sealed_seq = 0
         self._creds_cv = threading.Condition()
@@ -213,7 +214,9 @@ class ConnectorApp:
                                   hub.get("token") or self.env.get("PERSONA_HUB_TOKEN", ""))
                 self.tz = zone(hub.get("timezone") or "")
                 active = params.get("active")
-                if isinstance(active, dict) and "connectors" in active:  # an older hub says nothing: on
+                if isinstance(active, dict):
+                    # Persona lists the contributions that are on, and leaves an extension point out when none of
+                    # its own is: no "connectors" key is this connector off. Only an older hub sends no active (on).
                     self.connector_on = self.cid in [str(c) for c in active.get("connectors") or []]
                 self.hub_role = str(hub.get("role") or "center")
                 self.initialized = True
@@ -341,26 +344,35 @@ class ConnectorApp:
 
     def _credentials_rotated(self, creds: dict) -> None:
         """The adapter's session was refreshed: seal the new credentials in the background. One writer takes the
-        newest handed over (older ones it has not started are skipped), so the hub never ends on stale ones."""
-        rot = self._rotation(creds)
-        with self._creds_cv:
-            self._creds_next = rot
+        newest handed over (older ones it has not started are skipped), so the hub never ends on stale ones; a write
+        that failed is tried again (a few times) unless newer ones came meanwhile."""
+        with self._creds_cv:  # numbered and queued at once: an older one can never take the place of a newer
+            self._creds_seq += 1
+            self._creds_next = (self._creds_gen, self._creds_seq, dict(creds))
             if self._creds_writer is None:
                 self._creds_writer = threading.Thread(target=self._creds_write_loop, name="openmate-creds",
                                                       daemon=True)
                 self._creds_writer.start()
 
     def _creds_write_loop(self) -> None:
+        tries = 0
         while True:
             with self._creds_cv:
                 rot, self._creds_next = self._creds_next, None
                 if rot is None:
                     self._creds_writer = None
                     return
+            ok = False
             try:
-                self._seal_rotation(*rot)
+                ok = self._seal_rotation(*rot)
             except Exception:
                 log.exception("saving refreshed credentials failed")
+            tries = 0 if ok else tries + 1
+            if not ok and tries < 4 and not self.closing.is_set():
+                with self._creds_cv:
+                    if self._creds_next is None and rot[0] == self._creds_gen and not self._creds_out:
+                        self._creds_next = rot  # nothing newer: the same again, a little later
+                self.closing.wait(self.timing.secrets_retry * tries)
 
     def _seal_rotation(self, gen: int, seq: int, creds: dict) -> bool:
         """Write rotated credentials unless a sign-in or logout came after they were handed over, or newer ones are
@@ -778,7 +790,10 @@ class ConnectorApp:
             plan: List[str] = []
             if n > 0:
                 try:
-                    for c in self.backend.recent_chats(n)[:n]:
+                    listed = self.backend.recent_chats(n)[:n]
+                    if gen != self._gen:
+                        return
+                    for c in listed:
                         self.store.upsert_chat(c)
                         plan.append(c.id)
                 except CredentialsExpired:
@@ -790,7 +805,8 @@ class ConnectorApp:
                 if c["id"] not in plan:
                     plan.append(c["id"])
             since = None if first else self._caught_up_since()
-            budget = [t.catchup_budget]
+            # the first time: enough for every chat's initial history besides the known ones
+            budget = [t.catchup_budget + (len(plan) * t.initial_messages if first else 0)]
             failed = 0
             for chat_id in plan:
                 if gen != self._gen or self.link != "up":
@@ -800,7 +816,7 @@ class ConnectorApp:
                     log.info("catch-up: the message budget is spent, %d chat(s) left", len(plan) - len(done_now))
                     break
                 try:
-                    self._catch_up_chat(chat_id, first, since, budget)
+                    self._catch_up_chat(chat_id, first, since, budget, gen)
                     failed = 0
                 except CredentialsExpired:
                     raise
@@ -812,6 +828,8 @@ class ConnectorApp:
                         break
                     continue
                 done_now.add(chat_id)
+            if gen != self._gen:
+                return  # signed out or another account meanwhile: nothing marked for the store it found
             if whole:
                 if first:
                     self.store.meta_set("initial_history_done", "1")
@@ -845,19 +863,23 @@ class ConnectorApp:
         except ValueError:
             return time.time() - t.inbox_window
 
-    def _catch_up_chat(self, chat_id: str, first: bool, since: Optional[float], budget: List[int]) -> None:
+    def _catch_up_chat(self, chat_id: str, first: bool, since: Optional[float], budget: List[int],
+                       gen: int = 0) -> None:
         """Read chat back to its newest stored message (catchup_messages at a time, catchup_pages times at most). One
-        with nothing stored: the first time one page of initial history; later, what came since the last catch-up."""
+        with nothing stored: the first time one page of initial history; later one page, what came since the last
+        catch-up. Nothing read is stored once the account changed (gen)."""
         t = self.timing
         known = self.store.newest_position(chat_id)
         initial = known is None and (first or since is None)
         before: Optional[int] = None
-        for _ in range(1 if initial else max(1, t.catchup_pages)):
+        for _ in range(max(1, t.catchup_pages) if known is not None else 1):
             limit = min(t.initial_messages if initial else t.catchup_messages, budget[0])
             if limit <= 0:
                 return
             got = self.backend.history(chat_id, before, limit)
             budget[0] -= len(got)
+            if gen and gen != self._gen:
+                return  # read for an account signed out meanwhile: not into the store
             if known is None and not initial:
                 self.ingest([m for m in got if m.at >= since], live=False)
             else:
@@ -980,9 +1002,11 @@ class ConnectorApp:
 
     def _login_start(self):
         """A new QR sign-in: from here the adapter's rotations are written again (WeChat seals the accepted sign-in
-        before login_finish answers)."""
+        before login_finish answers). The flow keeps the credentials generation it started in: a logout meanwhile
+        ends it."""
         with self._creds_mu:
             self._creds_out = False
+            self._login_gen = self._creds_gen
         return self.backend.login_start()
 
     def m_login_step(self, params: dict) -> dict:
@@ -1032,6 +1056,14 @@ class ConnectorApp:
                 self._login = None
                 raise RPCError("登录没有完成：%s" % e.message)
             with self._creds_mu:
+                if self._creds_out or self._login_gen != self._creds_gen:
+                    # a logout came while this QR was scanned: it stays signed out
+                    self._login = None
+                    try:
+                        self.backend.logout()
+                    except Exception:
+                        log.exception("backend logout failed")
+                    raise RPCError("登录过程中退出了登录，这次扫码作废，请重新扫码")
                 # a rotation handed over before this sign-in is never written after it
                 with self._creds_cv:
                     self._creds_gen += 1
@@ -1048,6 +1080,10 @@ class ConnectorApp:
             self.creds = "present"
             self._remember_account(acct)
             self._catchup_done.clear()
+            if not self.connector_on:
+                # signed in, but the user turned the connector off in Persona: nothing is received or sent
+                self.mark_changed("inbox", "chats")
+                return {"done": True, "account": acct.name or acct.id}
             self._start_link(restore=False)
             # Report done once the link is really up and the first history is in (bounded); polls meanwhile wait.
             deadline = time.monotonic() + self.timing.login_wait

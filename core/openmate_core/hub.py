@@ -17,6 +17,7 @@ when the request to the hub breaks it answers 502 hub_unreachable, and the hub m
 
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import urllib.error
@@ -32,7 +33,7 @@ _LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 NOT_CONNECTED = "not_connected"
 NETWORK = "network"
 
-UNSENT = ("manager_offline", NOT_CONNECTED)
+UNSENT = ("manager_offline", "assistant_offline", NOT_CONNECTED)  # assistant_offline: nothing reached it
 UNREACHABLE = UNSENT + ("hub_unreachable", NETWORK)  # the hub itself was not reached
 # The hub's answers for a call to a machine that broke or timed out on the way (apierr.Call): it may have run.
 MACHINE_UNSURE = ("node_unreachable", "timeout")
@@ -117,9 +118,13 @@ class HubAPI:
                     if isinstance(doc.get("retryable"), bool):
                         retryable = doc["retryable"]
                     delivered = str(doc.get("delivered") or "")
+                    if not code and str(doc.get("state") or "") in ("pending", "unknown"):
+                        code = str(doc["state"])  # a receipt the hub could not settle (503 state unknown)
             except ValueError:
                 pass
             raise HubError(e.code, message or ("hub 回答 HTTP %d" % e.code), code, retryable, delivered)
+        except http.client.HTTPException as e:  # cut off mid-answer (IncompleteRead, a bad status line): it may have run
+            raise HubError(0, "和 Persona hub 的连接中途断了（%s）" % type(e).__name__, NETWORK)
         except (urllib.error.URLError, OSError) as e:
             cause = getattr(e, "reason", e) if isinstance(e, urllib.error.URLError) else e
             refused = isinstance(cause, (ConnectionRefusedError, socket.gaierror))  # not connected: nothing was sent

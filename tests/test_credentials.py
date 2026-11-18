@@ -87,5 +87,54 @@ class CredentialsTest(unittest.TestCase):
         self.assertEqual(token(h), "accepted")
 
 
+    def test_a_logout_while_the_sign_in_finishes_voids_it(self):
+        from harness import HubSideError
+
+        h = Harness(self)
+        b = h.app.backend
+        real = b.login_finish
+        finishing = threading.Event()
+
+        def slow_finish(state):
+            finishing.set()
+            time.sleep(0.4)
+            return real(state)
+
+        b.login_finish = slow_finish
+        p = h.c("login.step", step="", values={})
+        out = {}
+
+        def poll():
+            q = p
+            try:
+                for _ in range(5):
+                    q = h.c("login.step", step=q["step"])
+                    if q.get("done"):
+                        break
+                out["p"] = q
+            except HubSideError as e:
+                out["error"] = e.message
+
+        t = threading.Thread(target=poll)
+        t.start()
+        self.assertTrue(finishing.wait(3))
+        h.c("logout")  # while login_finish runs
+        t.join(5)
+        self.assertIn("作废", out.get("error", ""), out)
+        self.assertNotIn(h.cid, h.hub.secrets)
+        self.assertFalse(h.app._credentials_rotated_now(creds("late")), "still closed")
+        self.assertNotIn(h.cid, h.hub.secrets)
+
+    def test_a_failed_write_is_tried_again(self):
+        h = Harness(self)
+        h.sign_in()
+        h.hub.secrets_fail = True
+        h.app._credentials_rotated(creds("r-retry"))
+        time.sleep(0.08)
+        h.hub.secrets_fail = False
+        quiet(h)
+        self.assertEqual(token(h), "r-retry")
+
+
 if __name__ == "__main__":
     unittest.main()

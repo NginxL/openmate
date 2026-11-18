@@ -343,7 +343,7 @@ class FixtureBackend(Backend):
         with self.world.lock:
             return self.world.doc_texts.get(doc_url, "")[:most]
 
-    def doc_writer_name(self) -> str:
+    def doc_writer_name(self, fresh: bool = False) -> str:
         w = self.world
         return w.me.name if w.doc_writer is None else w.doc_writer
 

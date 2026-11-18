@@ -24,6 +24,17 @@ class LateLiveTest(unittest.TestCase):
         self.assertEqual(row["from_history"], False, "its first live delivery taken")
 
 
+    def test_the_live_copy_brings_its_mention(self):
+        h = agent(self)
+        m = h.world.make("chat_example_team", "user_example_b", "@示例用户 看一下", at=time.time())
+        m.at_me = False
+        h.app.ingest([m], live=False)  # Feishu's history does not say whom a message mentions
+        self.assertFalse(h.app.store.message("chat_example_team", m.id)["at_me"])
+        m.at_me = True
+        h.world.listener(m)
+        self.assertTrue(h.app.store.message("chat_example_team", m.id)["at_me"])
+
+
 class NotTakenTest(unittest.TestCase):
     def test_a_message_the_core_could_not_store_raises_to_the_backend(self):
         h = agent(self)

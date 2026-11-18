@@ -120,8 +120,11 @@ class LarkCLI:
             raise CalendarError("lark-cli 回复评论超时了；回复可能已经发出，请到文档里看一下", "uncertain")
         except OSError:
             raise CalendarError("lark-cli 启动不了", "missing")
+        out = p.stdout or ""
+        if getattr(p, "returncode", 0) and not out.strip():
+            out = p.stderr or ""  # a failure's JSON comes on stderr
         try:
-            d = json.loads(p.stdout or "")
+            d = json.loads(out)
         except ValueError:  # it ran and said nothing readable: the reply may be in the document
             raise CalendarError("lark-cli 回复评论后的回答看不懂；回复可能已经发出，请到文档里看一下", "uncertain")
         if not isinstance(d, dict) or not d.get("ok"):

@@ -53,17 +53,22 @@ class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is None:
             return None
-        a, b = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(new.full_url)
-        try:
-            same = (a.scheme, a.hostname, a.port) == (b.scheme, b.hostname, b.port)
-        except ValueError:
-            same = False
-        if not same:
+        if _origin(req.full_url) is None or _origin(req.full_url) != _origin(new.full_url):
             log.warning("StarkMesh redirected elsewhere: not followed, the key stays here")
             return None
-        for k, v in req.unredirected_hdrs.items():
-            new.add_unredirected_header(k, v)
+        key = req.get_header("X-api-key")  # only the key: the library makes the rest (a 303 has no body)
+        if key:
+            new.add_unredirected_header("X-api-key", key)
         return new
+
+
+def _origin(url: str):
+    """(scheme, host, port) with the default port filled in; None for one that cannot be read."""
+    try:
+        u = urllib.parse.urlsplit(url)
+        return u.scheme, (u.hostname or "").lower(), u.port or {"http": 80, "https": 443}.get(u.scheme)
+    except ValueError:
+        return None
 
 
 _OPENER = urllib.request.build_opener(SameOriginRedirects)

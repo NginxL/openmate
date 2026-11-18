@@ -612,6 +612,23 @@ class ReadTest(Base):
             self.b.history("503", None, 5)
         self.assertEqual(e.exception.kind, "unreachable")
 
+    def test_history_answered_with_only_a_status_is_a_failure(self):
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"status": 503}
+        with self.assertRaises(BackendError) as e:
+            self.b.history("500", None, 5)
+        self.assertEqual(e.exception.kind, "unreachable", "not an empty chat: the catch-up keeps its place")
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {}}
+        S.history["500"] = {}
+        self.assertEqual(self.b.history("500", None, 5), [], "an answer with no messages: every one recalled")
+
+    def test_recent_chats_without_their_payload_are_a_failure(self):
+        S.api_answers["chats.PullRecentChatsRequest"] = {"status": 200}
+        S.api_answers["feed.PullFeedCardsRequest"] = {"status": 200}
+        with self.assertRaises(BackendError):
+            self.b.recent_chats(5)
+        S.api_answers["feed.PullFeedCardsRequest"] = {"cards": [], "chats": {}}
+        self.assertEqual(self.b.recent_chats(5), [], "an answer that says none: none")
+
     def test_done_cards_both_forms(self):
         f = larkagentx.done_cards
         # read back (protobuf_to_dict): numbers, each card's own feedType
@@ -747,8 +764,9 @@ class ReadTest(Base):
         self.assertEqual(sorted(gone), ["g1", "g9"], "dissolved, and one the push says is no longer valid")
         self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g2", "g3"])
 
-        def read_whole(ids, whole=True):
-            return lambda c: ([larkagentx.Chat(id=i, kind="group", name=i) for i in ids], {i: 1 for i in ids}, whole)
+        def read_whole(ids, whole=True, listed=None):
+            return lambda c: ([larkagentx.Chat(id=i, kind="group", name=i) for i in ids], {i: 1 for i in ids}, whole,
+                              set(ids) | set(listed or ()))
 
         real = self.b._read_groups
         self.addCleanup(setattr, self.b, "_read_groups", real)
@@ -763,6 +781,19 @@ class ReadTest(Base):
         self.b._read_groups = read_whole(["g2"])
         self.b._groups_work(client, me)
         self.assertEqual(gone, ["g4"], "a whole read after a whole read: the one no longer listed was left")
+        # listed without its details: kept, not left
+        del gone[:]
+        self.b._read_groups = read_whole(["g2", "g5"])
+        self.b._groups_work(client, me)
+        self.b._read_groups = read_whole(["g2"], listed=["g5"])
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [], "g5 is still listed, only its details did not come")
+        # a part read between two whole reads does not hide a group left
+        self.b._read_groups = read_whole(["g2"], whole=False)
+        self.b._groups_work(client, me)
+        self.b._read_groups = read_whole(["g2"])
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, ["g5"], "listed by the last whole read, gone from this one")
 
     def test_what_is_heard_during_a_read_is_put_on_its_result(self):
         client, me = self.b._signed_in()
@@ -773,13 +804,16 @@ class ReadTest(Base):
             self.b._apply_chats({}, ["g1"], me)  # left while the read was out
             self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二新名"}}, [], me)
             return [larkagentx.Chat(id="g1", kind="group", name="要退的群"), larkagentx.Chat(id="g2", kind="group", name="群二")], \
-                {"g1": 5, "g2": 4}, True
+                {"g1": 5, "g2": 4}, True, {"g1", "g2"}
 
         self.b._read_groups = read
         self.addCleanup(setattr, self.b, "_read_groups", real)
+        gone = []
+        self.b.on_chat_gone = gone.append
         with self.b._groups_mu:
             self.b._groups_busy = True
         self.b._groups_work(client, me)
+        self.assertEqual(gone, ["g1"], "told once, when it was pushed, not again when the read's result came")
         self.assertEqual([(g.id, g.name) for g in self.b.group_candidates(10)], [("g2", "群二新名")],
                          "the read's older list does not bring it back, nor the old name")
         self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二又改名"}}, [], me)
