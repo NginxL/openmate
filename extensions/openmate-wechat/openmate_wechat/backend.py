@@ -514,6 +514,7 @@ class WeChatBackend(Backend):
     def _adopt(self, account: dict) -> Account:
         me = str(account.get("id") or "")
         if me and self.store.get("account") not in ("", me):
+            self.fetcher.reset()  # its fetches queued or running keep nothing
             self.store.wipe()  # another account: none of the previous one's messages or names
             shutil.rmtree(self.fetcher.root, ignore_errors=True)  # nor its pictures and files
             os.makedirs(self.fetcher.root, mode=0o700, exist_ok=True)
@@ -558,6 +559,7 @@ class WeChatBackend(Backend):
                     self._groups_check_at = time.time() + GROUPS_CHECK_EVERY
                     if self.me and self._groups_stale():
                         self._refresh_groups(full=True)
+                    self._media_prune_due()  # local copies past their days go while online too (once a day)
                 try:
                     ev = events.get(timeout=1.0)
                 except Exception:
@@ -1012,8 +1014,14 @@ class WeChatBackend(Backend):
             return []
         mid = str(ev.get("id") or "")
         name = str(m.get("name") or "") if kind == "file" else ""
-        return [Media(kind=kind, ref="wx:" + mid, name=name, size=int(m.get("size") or 0) if kind == "file" else 0,
-                      width=int(m.get("width") or 0), height=int(m.get("height") or 0))]
+        out = [Media(kind=kind, ref="wx:" + mid, name=name, size=int(m.get("size") or 0) if kind == "file" else 0,
+                     width=int(m.get("width") or 0), height=int(m.get("height") or 0))]
+        if kind == "video" and m.get("thumb"):
+            # the cover has a ref of its own: the hub keeps what a ref gave the first time, so a video's ref only
+            # ever gives the video
+            out.append(Media(kind="image", ref="wx:%s:cover" % mid, width=int(m.get("width") or 0),
+                             height=int(m.get("height") or 0)))
+        return out
 
     def _media_call(self, op: str, timeout: float, **params: Any) -> dict:
         return self._call(self._link(wait=5.0), op, timeout, **params)
@@ -1037,6 +1045,9 @@ class WeChatBackend(Backend):
             got = self.store.message(mid)
             if got is not None and isinstance(got[0].get("media"), dict):
                 self.fetcher.want(mid, got[0]["media"], force=True)
+        self._media_prune_due()
+
+    def _media_prune_due(self) -> None:
         if time.time() - self._pruned_at > 86400:
             self._pruned_at = time.time()
             for mid in self.fetcher.prune():
@@ -1062,9 +1073,14 @@ class WeChatBackend(Backend):
         as WAV, the file."""
         if not ref.startswith("wx:"):
             raise BackendError("没有这个附件", "not_found")
-        ev, st, _ = self.fetch_media(ref[3:], wait=120.0)
+        mid, _, part = ref[3:].partition(":")
+        ev, st, _ = self.fetch_media(mid, wait=120.0)
         files = (st or {}).get("files") or {}
-        path = next((files[k] for k in ("image", "cover", "audio", "file", "video") if isinstance(files.get(k), str)), "")
+        kind = str(((ev or {}).get("media") or {}).get("kind") or "")
+        # each ref always gives the same thing: a video's the video, its cover ref the cover
+        keys = ("cover",) if part == "cover" else {"video": ("video",), "voice": ("audio",), "file": ("file",),
+                                                   "image": ("image",)}.get(kind, ("image", "audio", "file"))
+        path = next((files[k] for k in keys if isinstance(files.get(k), str)), "")
         if not path or not os.path.isfile(path):
             raise BackendError((st or {}).get("note") or "这条消息的附件没有下载到", "not_found")
         size = os.path.getsize(path)

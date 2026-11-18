@@ -271,6 +271,10 @@ pub fn media_info(message_type: i32, body: &str) -> Option<Value> {
                     put(&mut o, "size", number(xml_text(app, &["appattach", "totallen"]).as_deref()));
                     put(&mut o, "url", file_id(xml_text(app, &["appattach", "cdnattachurl"]).as_deref()));
                     put(&mut o, "aes_key", aes_key(xml_text(app, &["appattach", "aeskey"]).as_deref()));
+                    // the file's own MD5 (of the plain bytes): the download is checked against it
+                    put(&mut o, "md5", xml_text(app, &["md5"])
+                        .filter(|m| m.len() == 32 && m.bytes().all(|b| b.is_ascii_hexdigit()))
+                        .map(|m| m.to_ascii_lowercase()));
                 }
                 Some("19") => {
                     o.insert("kind".into(), "record".into());
@@ -347,7 +351,7 @@ pub fn normalize(raw: &Raw, own: &str, origin: &str) -> (Value, Option<Quotable>
         3 => ("IMAGE", "[图片]".into(), String::new(), String::new(), String::new()),
         34 => ("AUDIO", "[语音]".into(), String::new(), String::new(), String::new()),
         42 => ("CARD", "[名片]".into(), String::new(), String::new(), String::new()),
-        43 => ("VIDEO", "[视频]".into(), String::new(), String::new(), String::new()),
+        43 | 62 => ("VIDEO", "[视频]".into(), String::new(), String::new(), String::new()), // 62: a short video
         47 => ("STICKER", "[表情]".into(), String::new(), String::new(), String::new()),
         48 => ("CARD", "[位置]".into(), String::new(), String::new(), String::new()),
         49 => app_message(&body),
@@ -473,6 +477,8 @@ mod tests {
 
     #[test]
     fn typed_name_is_not_a_mention() {
+        let (v, _) = normalize(&raw("wxid_bob", "wxid_bob", false, 62, "<msg><videomsg cdnvideourl=\"v\"/></msg>", None), "wxid_me", "live");
+        assert_eq!(v["type"], "VIDEO", "a short video (62) is a video, not a system line");
         let (e, _) = normalize(&raw("1@chatroom", "1@chatroom", false, 1, "wxid_bob:\n@法正 你好", None), "wxid_me", "live");
         assert_eq!(e["at_me"], false);
     }

@@ -119,7 +119,7 @@ class MediaTest(Base):
         os.environ["MATEWECHAT_FAKE_NO_MEDIA"] = "1"
         _, _, kept = self.run_events([media_msg("p5", "IMAGE", image())],
                                      lambda g, k: any("没能下载" in t for t in self.texts(k, "p5")))
-        self.assertIn("0.1.8", self.texts(kept, "p5")[-1])
+        self.assertIn("0.1.10", self.texts(kept, "p5")[-1])
 
     def test_a_voice_note_becomes_a_wav_and_its_words(self):
         script = os.path.join(self.dir, "stt.py")
@@ -210,6 +210,61 @@ class MediaTest(Base):
         self.assertEqual(b.fetcher.prune(now=time.time() + (wm.MEDIA_KEEP_DAYS + 1) * 86400), ["p8"])
         self.assertFalse(os.path.exists(path))
         self.assertIn("本地副本已按 30 天清理", b.history("1@chatroom")[0].text)
+
+
+    def test_a_video_ref_gives_the_video_and_its_cover_has_its_own(self):
+        small = {"kind": "video", "aes_key": KEY, "url": "VID", "thumb": "TH", "size": 2048, "seconds": 9}
+        b, got, _ = self.run_events([media_msg("v1", "VIDEO", small)],
+                                    lambda g, k: any("视频：" in t for t in self.texts(k, "v1")))
+        self.assertEqual([x.ref for x in got[0].media], ["wx:v1", "wx:v1:cover"])
+        self.assertEqual(b.media("wx:v1", 1 << 20)[0], "video/mp4", "the video's ref: the video, always")
+        self.assertEqual(b.media("wx:v1:cover", 1 << 20)[0], "image/jpeg")
+
+    def test_a_file_is_checked_against_the_size_and_md5_it_came_with(self):
+        f = {"kind": "file", "name": "a.pdf", "ext": "pdf", "size": 13, "url": "F", "aes_key": KEY,
+             "md5": "0123456789abcdef0123456789abcdef"}
+        self.run_events([media_msg("f9", "FILE", f)], lambda g, k: self.texts(k, "f9"))
+        asked = [r for r in self.requests("media") if r.get("quality") == "file"][0]
+        self.assertEqual((asked["size"], asked["md5"]), (13, "0123456789abcdef0123456789abcdef"))
+
+    def test_another_account_keeps_nothing_of_a_fetch_running_then(self):
+        b, _, kept = self.run_events([media_msg("p5", "IMAGE", image())],
+                                     lambda g, k: any("本地文件" in t for t in self.texts(k, "p5")))
+        f = b.fetcher
+        real = f.fetch
+
+        def slow(mid, media):
+            out = real(mid, media)
+            f.reset()  # another account signs in while this one runs
+            return out
+
+        f.fetch = slow
+        f.want("p6", image(), force=True)
+        f.wait("p6", 5)
+        time.sleep(0.2)
+        self.assertNotEqual((f.state("p6") or {}).get("state"), "done", "no state written for the old account")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "data", "media", "p6.jpg")), "no file kept")
+
+    def test_a_fetch_again_that_fails_keeps_the_copy_from_before(self):
+        b, _, kept = self.run_events([media_msg("p7", "IMAGE", image())],
+                                     lambda g, k: any("本地文件" in t for t in self.texts(k, "p7")))
+        f = b.fetcher
+        before = f.state("p7")["files"]
+        f.fetch = lambda mid, media: ({}, "没能下载：网络")
+        f.want("p7", image(), force=True)
+        f.wait("p7", 5)
+        st = f.state("p7")
+        self.assertEqual((st["state"], st["files"]), ("done", before))
+
+    def test_beyond_the_total_the_oldest_copies_go(self):
+        b, _, kept = self.run_events([media_msg("q1", "IMAGE", image()), media_msg("q2", "IMAGE", image())],
+                                     lambda g, k: all(any("本地文件" in t for t in self.texts(k, m)) for m in ("q1", "q2")))
+        f = b.fetcher
+        f._room_at = 0.0
+        size = os.path.getsize(os.path.join(self.dir, "data", "media", "q1.jpg"))
+        gone = f.make_room(most=size + 1)  # room for one: the older one goes
+        self.assertEqual(len(gone), 1)
+        self.assertEqual(f.state(gone[0])["state"], "gone")
 
 
 class RecordTextTest(unittest.TestCase):

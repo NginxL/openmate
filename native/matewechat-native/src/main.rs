@@ -878,6 +878,28 @@ fn op_groups(app: &App) -> Result<Value> {
 
 const CDN_KEEP: Duration = Duration::from_secs(3600);
 const MEDIA_MOST: u64 = wechat_protocol::media::MAX_CDN_TRANSFER_BYTES as u64; // 25 MB: one ordinary CDN transfer
+const MEDIA_SLOTS: u32 = 2; // CDN transfers at once (the backend runs two fetchers)
+
+/// A transfer slot, given back when dropped (when the transfer has really ended).
+struct MediaSlot;
+static MEDIA_IN_USE: (Mutex<u32>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+fn media_slot() -> MediaSlot {
+    let (mu, cv) = &MEDIA_IN_USE;
+    let mut n = mu.lock().unwrap_or_else(|e| e.into_inner());
+    while *n >= MEDIA_SLOTS {
+        n = cv.wait(n).unwrap_or_else(|e| e.into_inner());
+    }
+    *n += 1;
+    MediaSlot
+}
+impl Drop for MediaSlot {
+    fn drop(&mut self) {
+        let (mu, cv) = &MEDIA_IN_USE;
+        let mut n = mu.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        cv.notify_one();
+    }
+}
 
 /// The CDN route (asked of WeChat once an hour, or again after a failed download).
 fn cdn_config(app: &App, client: &NativeClient, fresh: bool) -> Result<wechat_protocol::media::CdnConfig> {
@@ -969,14 +991,17 @@ fn op_media(app: &App, p: &Value) -> Result<Value> {
         return Err(err("too_large", "文件太大"));
     }
     let path = target_path(p)?;
+    let is_file = matches!(quality, MediaQuality::File);
+    let md5 = p.get("md5").and_then(Value::as_str).filter(|m| m.len() == 32 && m.bytes().all(|b| b.is_ascii_hexdigit()));
     let descriptor = MediaDescriptor {
         file_id,
         aes_key,
         quality,
         // a picture's advertised length is the original's, not the size asked for: not compared
         expected_bytes: if matches!(quality, MediaQuality::Video | MediaQuality::File) { size } else { None },
-        expected_md5: None,
-        strict_size: false,
+        // a file is the sender's own bytes: its length and MD5 must be what the message says (never a broken copy)
+        expected_md5: if is_file { md5.map(str::to_ascii_lowercase) } else { None },
+        strict_size: is_file && size.is_some(),
         expires_at: None,
     };
     let mut last = None;
@@ -985,10 +1010,15 @@ fn op_media(app: &App, p: &Value) -> Result<Value> {
         let attempt = (|| -> Result<wechat_protocol::media::DownloadedMedia> {
             let cdn = CdnClient::new(cdn_config(app, &client, fresh)?, Duration::from_secs(60))?;
             let d = descriptor.clone();
+            // a slot is held by the download itself until it really ends (a timed-out one goes on underneath):
+            // never more than MEDIA_SLOTS transfers at once
             let got = app.rt.block_on(async {
                 tokio::time::timeout(
                     Duration::from_secs(110),
-                    tokio::task::spawn_blocking(move || cdn.download(&d)),
+                    tokio::task::spawn_blocking(move || {
+                        let _slot = media_slot();
+                        cdn.download(&d)
+                    }),
                 )
                 .await
             });
