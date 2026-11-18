@@ -272,14 +272,15 @@ class Fetcher:
         """Fetch this message's media (again when force), in the background."""
         if not mid or not isinstance(media, dict) or media.get("kind") not in KINDS:
             return
-        st = self.state(mid)
-        if st is not None and not force and st["state"] in ("done", "failed", "gone"):
-            return
-        if st is None or force:
-            self._set(mid, "pending", (st or {}).get("files") or {}, "")
+        # read, mark pending and queue in one go: a clean-up in between cannot turn a queued request into "gone"
         with self._cv:
             if self._closed or mid in self._busy or any(q[0] == mid for q in self._queue):
                 return
+            st = self.state(mid)
+            if st is not None and not force and st["state"] in ("done", "failed", "gone"):
+                return
+            if st is None or force:
+                self._set(mid, "pending", (st or {}).get("files") or {}, "")
             self._queue.append((mid, media))
             self._cv.notify()
             if self._workers < WORKERS:
