@@ -237,6 +237,16 @@ class Store:
     def undismiss(self, key: str) -> None:
         self._tx(lambda db: db.execute("DELETE FROM dismissed WHERE key = ?", (key,)))
 
+    def chats_of_messages(self, message_ids: Iterable[str]) -> List[str]:
+        """The chats these stored messages are in."""
+        ids = sorted({str(i) for i in message_ids if i})
+        out: set = set()
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            rows = self._all("SELECT DISTINCT chat_id FROM messages WHERE id IN (%s)" % ",".join("?" * len(part)), part)
+            out.update(r["chat_id"] for r in rows)
+        return sorted(out)
+
     def dismiss_if(self, key: str, version: str, expected: Optional[str], now: Optional[float] = None) -> bool:
         """dismiss, only while the key's mark is still expected (None: no mark): a background writer read it before a
         slow step, and the user may have changed it meanwhile. Whether it wrote."""
@@ -249,6 +259,7 @@ class Store:
                 return
             db.execute("INSERT INTO dismissed (key, version, at) VALUES (?, ?, ?) "
                        "ON CONFLICT(key) DO UPDATE SET version = excluded.version, at = excluded.at", (key, version, now))
+            db.execute("DELETE FROM dismissed WHERE at < ?", (now - 30 * 86400,))  # as dismiss: a month at most
             out[0] = True
 
         self._tx(run)

@@ -79,6 +79,40 @@ c = resp.cards["900"]; c.id = "900"; c.type = 1; c.feedType = 2; c.updateTime = 
 c = resp.cards["902"]; c.id = "902"; c.type = 1; c.feedType = 1
 d = gateway.response_to_dict(resp_cls, resp.SerializeToString())
 out["answer"] = larkagentx.done_cards(list(d["cards"].values()), None, {"900", "902"})
+from openmate_core.backend import Account
+me = Account("7001", "我")
+b._groups_owner = "7001"
+b._groups = [larkagentx.Chat(id="910", kind="group", name="旧名", members=3)]; b._groups_join = {"910": 1}
+pc = LA.chats.PushChatsRequest()
+c = pc.chats["910"]; c.id = "910"; c.type = 2; c.name = "改过的名字"
+c = pc.chats["914"]; c.id = "914"; c.type = 2; c.name = "新建的群"
+c = pc.chats["911"]; c.id = "911"; c.type = 1; c.name = "某人"
+pc.inValidChatIds.append("912")
+b._pushed_chats(pc.SerializeToString(), me)
+out["pushed_groups"] = [[g.id, g.name, g.kind, g.members] for g in b._groups] + [b._groups_soon]
+cmd, req_cls, resp_cls = gateway.resolve_cmd("chats.PullGroupChatsRequest")
+req = gateway.request_from_dict(req_cls, {"type": larkagentx.GROUPS_JOINED, "count": larkagentx.GROUPS_PAGE, "updateTime": 0})
+resp = resp_cls(); resp.chatIds.extend(["910", "913"]); resp.hasMore = True; resp.nextUpdateTime = 77; resp.chatJoinTimes["910"] = 5
+d = gateway.response_to_dict(resp_cls, resp.SerializeToString())
+out["groups_page"] = [cmd, req.type, req.count, d["chatIds"], d["hasMore"], d["nextUpdateTime"], d["chatJoinTimes"]]
+cmd, req_cls, resp_cls = gateway.resolve_cmd("chats.PullChatsByIdsRequest")
+req = gateway.request_from_dict(req_cls, {"chatIds": ["910"]})
+resp = resp_cls(); g = resp.chats["910"]; g.id = "910"; g.type = 2; g.name = "新建的群"; g.joinTimeMs = 5000; g.isDissolved = False
+d = gateway.response_to_dict(resp_cls, resp.SerializeToString())
+out["group_info"] = [cmd, list(req.chatIds), larkagentx.group_alive(d["chats"]["910"]), d["chats"]["910"]["joinTimeMs"]]
+heard = []
+b.on_reacted = heard.append
+pr = LA.reactions.PushReactions()
+mr = pr.messageReactions.add(); mr.messageId = "71"
+r = mr.reactions.add(); r.type = "DONE"; r.userIds.append("7001"); r.count = 1
+mr = pr.messageReactions.add(); mr.messageId = "72"
+r = mr.reactions.add(); r.type = "OK"; r.userIds.append("7002")
+b._pushed_reactions(pr.SerializeToString(), me)
+cmd, req_cls, resp_cls = gateway.resolve_cmd("reactions.PullReactionsRequest")
+req = gateway.request_from_dict(req_cls, {"messageIds": ["71", "73"]})
+resp = resp_cls(); st = resp.selfReactionStatus.add(); st.userId = "7001"; st.messageId = "73"; st.reactionType = "DONE"
+st.nanoUpdateTime = 1763000000000000000
+out["reactions"] = [heard, cmd, list(req.messageIds), larkagentx.reacted_by(gateway.response_to_dict(resp_cls, resp.SerializeToString()), "7001")]
 files = [f for _, _, fs in os.walk(data) for f in fs]
 out["files"] = files
 from loguru import logger
@@ -107,6 +141,12 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertTrue(out["push_cmd"])
         self.assertEqual(out["ask"], [1009, [["900", 1]]])
         self.assertEqual(out["answer"], {"900": 1763000003.0})
+        self.assertEqual(out["pushed_groups"], [["910", "改过的名字", "group", 3], True],
+                         "a real push: renamed (members kept), a new group read again soon")
+        self.assertEqual(out["groups_page"], [82, 2, 100, ["910", "913"], True, 77, {"910": 5}])
+        self.assertEqual(out["group_info"], [64, ["910"], True, 5000])
+        self.assertEqual(out["reactions"], [[["71"]], 24, ["71", "73"], {"73": 1763000000.0}],
+                         "a real push names the message with the account's reaction; a real answer's own status")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

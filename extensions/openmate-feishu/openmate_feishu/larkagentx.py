@@ -76,9 +76,21 @@ PUSH_CMD = 6
 PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
 PUSH_FEED_CARDS_CMD = 1002  # feed.PushFeedCardsRequest: feed cards changed, among them chats moved to 完成 (done)
 FEED_DONE = (2, "DONE")  # entities.FeedType of a card in 完成, as a number (protobuf_to_dict) or a name (MessageToDict)
+FEED_INBOX = (1, "INBOX")  # …and of one in the message list
 FEED_CHAT = (1, "CHAT")  # entities.FeedCard.Type of a chat's card
 FEED_GONE = (2, 3, "PENDING_DELETE", "DELETED")  # entities.FeedCard.Status of a card on its way out
 DONE_ASK_MOST = 50  # chats asked about in one feed.PullFeedCardsByIdsRequest
+PUSH_CHATS_CMD = 18  # chats.PushChatsRequest: chats changed (a group made, joined, renamed, left, dissolved)
+PUSH_REACTIONS_CMD = 27  # reactions.PushReactions: a message's reactions changed
+REACTIONS_ASK_MOST = 50  # messages asked about in one reactions.PullReactionsRequest
+GROUPS_JOINED = 2  # chats.PullGroupChatsRequest.Type JOIN: the groups the account is in
+GROUPS_PAGE = 100  # group ids per PullGroupChatsRequest…
+GROUPS_PAGES = 50  # …at most this many pages (5000 groups)
+GROUPS_INFO_MOST = 50  # groups per PullChatsByIdsRequest
+GROUPS_EVERY = 600.0  # every group is read again this often while the link is up
+GROUPS_SPACING = 60.0  # and never more often than this
+CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
+CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
 
 FIRST_POSITION = 1  # LarkAgentX reads history from position 1 up
@@ -212,6 +224,45 @@ def _int(v, default: int = 0) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def group_alive(info: dict) -> bool:
+    """A group the account is in and can use: a group's type, normal status, neither dissolved nor frozen, the
+    account a member (not one who only looks in)."""
+    return (info.get("type") in CHAT_GROUP_TYPES and info.get("status") in (None, 0, "NORMAL")
+            and not info.get("isDissolved") and not info.get("isFrozen") and info.get("role") not in CHAT_NOT_MEMBER)
+
+
+def reacted_by(d: dict, user_id: str, only: Optional[Set[str]] = None, ignore: Tuple[str, ...] = ()) -> Dict[str, float]:
+    """{message id: when (seconds, 0 when unknown)} of the messages user_id has a reaction on, from a
+    reactions.PullReactionsResponse or a reactions.PushReactions read back (protobuf_to_dict): each message's
+    reactions with the users on them, and a response's own selfReactionStatus (not the cancelled ones). Reactions
+    of the types in ignore do not count."""
+    skip = {str(t).lower() for t in ignore if t}
+    out: Dict[str, float] = {}
+    uid = str(user_id or "")
+    if not uid or not isinstance(d, dict):
+        return out
+    for mr in d.get("messageReactions") or []:
+        mid = str((mr or {}).get("messageId") or "") if isinstance(mr, dict) else ""
+        if not mid or (only is not None and mid not in only):
+            continue
+        for r in mr.get("reactions") or []:
+            if not isinstance(r, dict) or str(r.get("type") or "").lower() in skip:
+                continue
+            users = {str(x) for x in (r.get("userIds") or []) + (r.get("chatterIds") or [])}
+            if uid in users:
+                times = r.get("udpateTimes") or {}
+                t = _int(times.get(uid)) if isinstance(times, dict) else 0
+                out[mid] = max(out.get(mid, 0.0), _seconds(t) if t else _int(r.get("nanoUpdateTime")) / 1e9)
+    for st in d.get("selfReactionStatus") or []:
+        if (not isinstance(st, dict) or st.get("isCancelled") or str(st.get("userId") or uid) != uid
+                or str(st.get("reactionType") or "").lower() in skip):
+            continue
+        mid = str(st.get("messageId") or "")
+        if mid and (only is None or mid in only):
+            out[mid] = max(out.get(mid, 0.0), _int(st.get("nanoUpdateTime")) / 1e9)
+    return out
 
 
 def pushed_done(payload: bytes) -> Dict[str, float]:
@@ -401,6 +452,16 @@ class LarkXBackend(Backend):
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
         self._done_heard = False
+        # every group the account is in (group_candidates): newest joined first, for the account that read them
+        self._groups: List[Chat] = []
+        self._groups_join: Dict[str, int] = {}
+        self._groups_owner = ""
+        self._groups_at = 0.0  # time.monotonic() of the last whole read (0: none yet)
+        self._groups_tried = 0.0
+        self._groups_mu = threading.Lock()
+        self._groups_busy = False
+        self._groups_soon = False  # a push named a group the list lacks: read again at the next chance
+        self._groups_delta: List[tuple] = []  # changes heard while a whole read is out: put on its result
 
     # ------------------------------------------------------------ the session
 
@@ -606,6 +667,9 @@ class LarkXBackend(Backend):
             self._own = None
             self._qr.clear()
             self._names.clear()
+        with self._groups_mu:
+            self._groups, self._groups_join, self._groups_owner, self._groups_at = [], {}, "", 0.0
+            self._groups_tried, self._groups_soon, self._groups_delta = 0.0, False, []
         if old is not None:
             self._close_client(old)
 
@@ -726,6 +790,12 @@ class LarkXBackend(Backend):
         if cmd == PUSH_FEED_CARDS_CMD and packet.get("payload"):
             inbox.put({"feed_cards": packet["payload"]})
             return
+        if cmd == PUSH_CHATS_CMD and packet.get("payload"):
+            inbox.put({"chats": packet["payload"]})
+            return
+        if cmd == PUSH_REACTIONS_CMD and packet.get("payload"):
+            inbox.put({"reactions": packet["payload"]})
+            return
         if cmd != PUSH_CMD:
             return
         try:
@@ -739,9 +809,13 @@ class LarkXBackend(Backend):
 
     def _deliver(self, inbox: "queue.Queue", client, me: Account, on_message) -> None:
         """Maps pushed messages and hands them to the core in order, off the connection's loop (the core may look
-        names up), so acks and heartbeats never wait for it."""
+        names up), so acks and heartbeats never wait for it. Meanwhile keeps the list of every group fresh."""
         while True:
-            item = inbox.get()
+            self._refresh_groups(client, me)  # cheap unless due: due ones read in a thread of their own
+            try:
+                item = inbox.get(timeout=GROUPS_SPACING)
+            except queue.Empty:
+                continue
             if item is None:
                 return
             if "doc_feed" in item:
@@ -749,6 +823,12 @@ class LarkXBackend(Backend):
                 continue
             if "feed_cards" in item:
                 self._feed_cards(item["feed_cards"])
+                continue
+            if "chats" in item:
+                self._pushed_chats(item["chats"], me)
+                continue
+            if "reactions" in item:
+                self._pushed_reactions(item["reactions"], me)
                 continue
             try:
                 msg = self._message(item, me.id, client)
@@ -761,6 +841,243 @@ class LarkXBackend(Backend):
                 on_message(msg)
             except Exception as e:
                 log.warning("a pushed message was not taken (%s)", type(e).__name__)
+            self._seen_group(msg.chat_id, me)  # after the core: it reads a chat it does not know (chat_info)
+
+    # ------------------------------------------------------------ every group (自动代答's list)
+
+    def group_candidates(self, limit: int) -> List[Chat]:
+        _, me = self._session()
+        with self._groups_mu:
+            if me is None or self._groups_owner != me.id:
+                return []
+            return list(self._groups[: max(0, limit)])
+
+    def _refresh_groups(self, client, me: Account) -> None:
+        """Read every group again when due (GROUPS_EVERY, never read for this account, or a push named one the list
+        lacks), in a thread of its own: one at a time, never more often than GROUPS_SPACING."""
+        now = time.monotonic()
+        with self._groups_mu:
+            mine = self._groups_owner == me.id
+            due = not mine or not self._groups_at or now - self._groups_at >= GROUPS_EVERY or self._groups_soon
+            if not due or self._groups_busy or (self._groups_tried and now - self._groups_tried < GROUPS_SPACING):
+                return
+            self._groups_busy = True
+            self._groups_soon = False
+            self._groups_tried = now
+            self._groups_delta = []
+        threading.Thread(target=self._groups_work, args=(client, me), name="openmate-larkx-groups", daemon=True).start()
+
+    def _groups_work(self, client, me: Account) -> None:
+        try:
+            groups, joined, whole = self._read_groups(client)
+            _, now_me = self._session()
+            if now_me is None or now_me.id != me.id:
+                return  # another account signed in meanwhile: these are not its groups
+            with self._groups_mu:  # published, then what was heard while it was out (newer), in order, at once
+                self._groups, self._groups_join, self._groups_owner = groups, joined, me.id
+                if whole:
+                    self._groups_at = time.monotonic()
+                else:
+                    self._groups_soon = True
+                for infos, gone in self._groups_delta:
+                    self._apply_chats_locked(infos, gone, me)
+                self._groups_delta = []
+                self._groups_busy = False
+            log.info("Feishu groups: %d%s", len(groups), "" if whole else " (not all of them: read again soon)")
+        except BackendError as e:
+            log.info("the groups could not be read: %s", e.kind)
+            with self._groups_mu:
+                self._groups_soon = True  # again after GROUPS_SPACING
+        except Exception as e:
+            log.warning("the groups could not be read (%s)", type(e).__name__)
+            with self._groups_mu:
+                self._groups_soon = True
+        finally:
+            with self._groups_mu:
+                self._groups_busy = False
+
+    @staticmethod
+    def _answer(resp, what: str) -> dict:
+        """A request's answer, or BackendError for a packet without one (the service said a status, not a reply)."""
+        if not isinstance(resp, dict):
+            raise BackendError("飞书的回答看不懂（%s时）" % what, "unknown")
+        status = resp.get("status")
+        if status is not None and _int(status) not in (0, 200):
+            raise BackendError("飞书暂时没有回答（%s时）" % what, "unreachable")
+        return resp
+
+    def _read_groups(self, client) -> Tuple[List[Chat], Dict[str, int], bool]:
+        """Every group the account is in: their ids page by page (chats.PullGroupChatsRequest), then their names in
+        batches (chats.PullChatsByIdsRequest); dissolved, frozen, deleted ones and ones it only looks in left out.
+        Newest joined first. Whether it read them all (else a part, read again soon). BackendError: nothing kept."""
+        ids: List[str] = []
+        joined: Dict[str, int] = {}
+        cursor, whole = 0, False
+        for _ in range(GROUPS_PAGES):
+            try:
+                resp = self._answer(client.api("chats.PullGroupChatsRequest",
+                                               {"type": GROUPS_JOINED, "count": GROUPS_PAGE, "updateTime": cursor}) or {},
+                                    "读取群列表")
+            except BackendError:
+                raise
+            except Exception as e:
+                raise self._net(e, "读取群列表")
+            times = resp.get("chatJoinTimes") or {}
+            for cid in (str(x) for x in resp.get("chatIds") or [] if str(x)):
+                if cid not in joined:
+                    ids.append(cid)
+                    joined[cid] = _int(times.get(cid) if isinstance(times, dict) else 0)
+            nxt = _int(resp.get("nextUpdateTime"))
+            if not resp.get("hasMore"):
+                whole = True
+                break
+            if not nxt or nxt == cursor:
+                break  # more said, but no way on: what was read is a part
+            cursor = nxt
+        infos: Dict[str, dict] = {}
+        for i in range(0, len(ids), GROUPS_INFO_MOST):
+            part = ids[i:i + GROUPS_INFO_MOST]
+            try:
+                resp = self._answer(client.api("chats.PullChatsByIdsRequest", {"chatIds": part}) or {}, "读取群信息")
+            except BackendError:
+                raise
+            except Exception as e:
+                raise self._net(e, "读取群信息")
+            chats = resp.get("chats") or {}
+            for cid in part:
+                info = chats.get(cid) if isinstance(chats, dict) else None
+                if isinstance(info, dict):
+                    infos[cid] = info
+        out = []
+        for cid in ids:
+            info = infos.get(cid)
+            if info is None or not group_alive(info):
+                continue
+            joined[cid] = _int(info.get("joinTimeMs")) // 1000 or joined.get(cid) or _int(info.get("createTime"))
+            out.append(self._chat_of(cid, info))
+        out.sort(key=lambda c: -joined.get(c.id, 0))
+        return out, {c.id: joined.get(c.id, 0) for c in out}, whole
+
+    def _pushed_chats(self, payload: bytes, me: Account) -> None:
+        """Chats that changed (chats.PushChatsRequest): a listed group renamed gets its new name, one left, deleted
+        or dissolved goes; a group the list lacks has it read again soon (a push alone does not say the account is
+        a member)."""
+        try:
+            from larkx.proto import lark_all_pb2
+            from protobuf_to_dict import protobuf_to_dict
+
+            req = lark_all_pb2.chats.PushChatsRequest()
+            req.ParseFromString(payload)
+            d = protobuf_to_dict(req)
+        except Exception as e:
+            log.info("a chat change could not be decoded (%s)", type(e).__name__)
+            return
+        self._apply_chats(d.get("chats") or {}, [str(x) for x in d.get("inValidChatIds") or []], me)
+
+    def _apply_chats(self, chats: dict, gone: List[str], me: Account) -> None:
+        infos = {}
+        for key, info in (chats.items() if isinstance(chats, dict) else []):
+            if isinstance(info, dict):
+                infos[str(info.get("id") or key)] = info
+        with self._groups_mu:
+            if self._groups_busy:
+                self._groups_delta.append((infos, list(gone)))  # put on the read's result too, when it comes
+            self._apply_chats_locked(infos, gone, me)
+
+    def _apply_chats_locked(self, infos: Dict[str, dict], gone: List[str], me: Account) -> None:
+        if self._groups_owner != me.id:
+            return
+        known = {g.id: g for g in self._groups}
+        drop = {str(g) for g in gone}
+        update: Dict[str, Chat] = {}
+        soon = False
+        for cid, info in infos.items():
+            if cid in drop:
+                continue
+            old = known.get(cid)
+            ended = (info.get("status") not in (None, 0, "NORMAL") or info.get("isDissolved") or info.get("isFrozen")
+                     or info.get("role") in CHAT_NOT_MEMBER)
+            if old is not None:
+                if ended:
+                    drop.add(cid)
+                    continue
+                name = str(info.get("name") or "") or old.name  # a push carries only what changed
+                if not info.get("name"):
+                    names = info.get("i18nNames") or {}
+                    if isinstance(names, dict) and names:
+                        name = str(names.get(self.region.locale.lower()) or next(iter(names.values())) or "") or old.name
+                members = _int(info.get("memberCount")) or _int(info.get("userCount")) or old.members
+                update[cid] = Chat(id=cid, kind="group", name=name, members=members, topic=old.topic)
+            elif not ended and info.get("type") in CHAT_GROUP_TYPES:
+                soon = True  # made or joined: the next read lists it (with what the account is in it)
+        self._groups = [update.get(g.id, g) for g in self._groups if g.id not in drop]
+        for cid in drop:
+            self._groups_join.pop(cid, None)  # joined again later: a new time, on top
+        if soon:
+            self._groups_soon = True
+
+    def _seen_group(self, chat_id: str, me: Account) -> None:
+        """A message in a group the list lacks (a group just made or joined says so first): read every group again
+        soon (the read says whether the account is a member, not one who only looks in)."""
+        with self._lock:
+            hit = self._chats.get(chat_id)
+        chat = hit[1] if hit is not None else None
+        if chat is None or chat.kind != "group":
+            return
+        with self._groups_mu:
+            if self._groups_owner == me.id and chat_id not in self._groups_join:
+                self._groups_soon = True
+
+    # ------------------------------------------------------------ the account's reactions (an answer without words)
+
+    def my_reactions(self, message_ids: List[str], ignore: Tuple[str, ...] = ()) -> Dict[str, float]:
+        client, me = self._signed_in()
+        ids = list(dict.fromkeys(_id(m) for m in message_ids if _id(m)))
+        out: Dict[str, float] = {}
+        failed: Optional[BackendError] = None
+        answered = False
+        for i in range(0, len(ids), REACTIONS_ASK_MOST):
+            part = ids[i:i + REACTIONS_ASK_MOST]
+            try:
+                resp = self._answer(client.api("reactions.PullReactionsRequest", {"messageIds": part}) or {},
+                                    "读取表情回应")
+            except BackendError as e:
+                failed = failed or e
+                continue
+            except Exception as e:
+                failed = failed or self._net(e, "读取表情回应")
+                continue
+            answered = True
+            out.update(reacted_by(resp, me.id, set(part), ignore))
+        if failed is not None and not answered:
+            raise failed
+        return out
+
+    def _pushed_reactions(self, payload: bytes, me: Account) -> None:
+        """A message's reactions changed (reactions.PushReactions): the ones with the account's go to the core."""
+        try:
+            from larkx.proto import lark_all_pb2
+            from protobuf_to_dict import protobuf_to_dict
+
+            req = lark_all_pb2.reactions.PushReactions()
+            req.ParseFromString(payload)
+            d = protobuf_to_dict(req)
+        except Exception as e:
+            log.info("a reaction change could not be decoded (%s)", type(e).__name__)
+            return
+        ids = set(reacted_by(d, me.id))
+        extra = d.get("reactionExtraInfos") or {}
+        if isinstance(extra, dict) and any(isinstance(x, dict) and str(x.get("reactionChatterId") or "") == me.id
+                                           and not x.get("isCancelled") for x in extra.values()):
+            ids.update(str(mr.get("messageId")) for mr in d.get("messageReactions") or []  # the account did it: ask
+                       if isinstance(mr, dict) and mr.get("messageId"))
+        ids = sorted(ids)
+        cb = self.on_reacted
+        if ids and cb is not None:
+            try:
+                cb(ids)
+            except Exception as e:
+                log.warning("a reaction was not taken (%s)", type(e).__name__)
 
     # ------------------------------------------------------------ 完成 (a chat's done mark)
 
@@ -799,9 +1116,13 @@ class LarkXBackend(Backend):
             cards = resp.get("cards") or {}
             if isinstance(cards, dict):  # a card keyed by its id may leave the id out of itself
                 cards = [dict(c, id=c.get("id") or k) for k, c in cards.items() if isinstance(c, dict)]
-            done = done_cards(cards, None, set(part))
-            for c in part:
-                out[c] = done.get(c)  # answered: done (when) or not (None)
+            asked = set(part)
+            out.update(done_cards(cards, None, asked))
+            for c in cards:  # explicitly in the inbox: not done. No card, or no feedType: not answered (left out)
+                cid = str(c.get("id") or "") if isinstance(c, dict) else ""
+                if (cid in asked and cid not in out and c.get("type") in FEED_CHAT and c.get("feedType") in FEED_INBOX
+                        and c.get("status") not in FEED_GONE):
+                    out[cid] = None
         if failed is not None and not out:
             raise failed
         return out

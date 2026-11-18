@@ -55,6 +55,10 @@ class FixtureWorld:
         self.done_asks: List[List[str]] = []  # chat_done_states calls
         self.done_fail = False  # chat_done_states raises
         self.done_hook: Optional[Callable[[], None]] = None  # run by chat_done_states after it read its answer
+        self.my_reacted: Dict[str, Tuple[float, str]] = {}  # message id → (when, type) of the account's reaction on it
+        self.reactions_fail = False  # my_reactions raises
+        self.reacted_listener: Optional[Callable] = None
+        self.reactions_asks: List[List[str]] = []
         self.react_fail = False
         self.edits: List[Tuple[str, str, str]] = []  # (chat, message, new text) by edit
         self.edit_fail = False
@@ -164,6 +168,14 @@ class FixtureWorld:
         if listener is not None:
             listener({chat_id: at})
 
+    def react_as_me(self, message_id: str, when: Optional[float] = None, push: bool = True, kind: str = "DONE") -> None:
+        """The user puts a reaction on a message in the service's own client: told to the live listener (push)."""
+        with self.lock:
+            self.my_reacted[message_id] = (time.time() if when is None else when, kind)
+            listener = self.reacted_listener if push else None
+        if listener is not None:
+            listener([message_id])
+
     def mark_inbox(self, chat_id: str) -> None:
         """The user moves a chat back from 完成 in the service's own client (no new message)."""
         with self.lock:
@@ -241,6 +253,7 @@ class FixtureBackend(Backend):
             w.listener = on_message
             w.doc_listener = lambda m: self.on_doc_mention(m) if self.on_doc_mention is not None else None
             w.done_listener = lambda d: self.on_chats_done(d) if self.on_chats_done is not None else None
+            w.reacted_listener = lambda ids: self.on_reacted(ids) if self.on_reacted is not None else None
         w.up_event.set()
         on_link("up", "")
         try:
@@ -254,6 +267,7 @@ class FixtureBackend(Backend):
                 w.listener = None
                 w.doc_listener = None
                 w.done_listener = None
+                w.reacted_listener = None
             w.up_event.clear()
 
     # reads
@@ -310,6 +324,14 @@ class FixtureBackend(Backend):
         if hook is not None:
             hook()  # what happens while the answer is on its way back
         return answer
+
+    def my_reactions(self, message_ids: List[str], ignore: Tuple[str, ...] = ()) -> Dict[str, float]:
+        w = self.world
+        with w.lock:
+            w.reactions_asks.append(list(message_ids))
+            if w.reactions_fail:
+                raise BackendError("连不上（读取表情回应时）", "unreachable")
+            return {m: w.my_reacted[m][0] for m in message_ids if m in w.my_reacted and w.my_reacted[m][1] not in ignore}
 
     def doc_text(self, doc_url: str, most: int) -> str:
         with self.world.lock:

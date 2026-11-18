@@ -219,6 +219,7 @@ class ConnectorApp:
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_doc_mention = self._doc_mention
                 self.backend.on_chats_done = self._chats_done
+                self.backend.on_reacted = self._reacted
             except BackendError as e:
                 self.setup_error = e.message
                 self.setup_kind = e.kind
@@ -383,6 +384,16 @@ class ConnectorApp:
         says neither which message it covers nor whether one came after, so only the answer to a question counts."""
         self.ask_done(list(done or {}))
 
+    def _reacted(self, message_ids: List[str]) -> None:
+        """The live link heard the account react to messages: ask about their chats (off its thread)."""
+        if self.store is None or self.closing.is_set():
+            return
+        try:
+            self.ask_done(self.store.chats_of_messages(message_ids))
+        except Exception:
+            if not self.closing.is_set():
+                log.exception("a reaction could not be taken")
+
     def ask_done(self, chat_ids: List[str]) -> None:
         """Ask the service soon whether these chats are done there (a backend with done_marks; others: nothing)."""
         if self.backend is None or not getattr(self.backend, "done_marks", False):
@@ -442,7 +453,29 @@ class ConnectorApp:
             needs, marked = today.done_snapshot(only)
         if not needs:
             return 0
-        states = self.backend.chat_done_states([t["_chat"]["id"] for t in needs])
+        states: Dict[str, Optional[float]] = {}
+        reacted: Dict[str, float] = {}
+        failed: Optional[BackendError] = None
+        try:
+            states = self.backend.chat_done_states([t["_chat"]["id"] for t in needs])
+        except CredentialsExpired:
+            raise
+        except BackendError as e:
+            failed = e
+        agent = self.agent
+        ignore = tuple(r for r in (getattr(agent, "ack", ""), getattr(agent, "fail_reaction", "")) if r)
+        try:  # a reaction of the account's on the message that made the need: answered without words
+            reacted = self.backend.my_reactions([t["_version"] for t in needs], ignore)
+        except CredentialsExpired:
+            raise
+        except BackendError as e:
+            failed = failed or e
+            states = {c: w for c, w in states.items() if w is not None}  # not known not to be answered: 恢复 marks stay
+        if failed is not None and not states and not reacted:
+            raise failed
+        for t in needs:
+            if t["_version"] in reacted:  # that very message: its version (no time to weigh), whatever 完成 said
+                states[t["_chat"]["id"]] = 0.0
         with self._done_mu:
             with self.lock:
                 same = gen == self._gen and epoch == self._account_epoch
@@ -499,6 +532,9 @@ class ConnectorApp:
             if restore:
                 try:
                     acct = self.backend.restore(dict(self._credentials or {}))
+                    if stop.is_set() or gen != self._gen:
+                        return  # signed out or in again meanwhile: this restore is not the account's any more
+                    self._bind_account(acct)  # a sign-in stopped half-way may have left another account's store
                     self._remember_account(acct)
                     restore = False
                 except CredentialsExpired as e:
@@ -552,6 +588,15 @@ class ConnectorApp:
             self._set_link(gen, kind, reason)
             stop.wait(backoff)
             backoff = min(backoff * 2, t.backoff_max)
+
+    def _bind_account(self, acct: Account) -> None:
+        """The store belongs to this account from now on: another account's chats and marks are forgotten first."""
+        prev = self.store.meta_get("account_id") if self.store is not None else None
+        if prev and acct.id and prev != acct.id:
+            with self._done_mu:  # a done round of the account before must not write into this one's
+                self.store.wipe_account_data()  # another account: forget the previous one's chats
+                with self.lock:
+                    self._account_epoch += 1
 
     def _remember_account(self, acct: Account) -> None:
         self.account = acct
@@ -778,12 +823,7 @@ class ConnectorApp:
                 raise RPCError("登录成功了，但保存登录信息失败，请重新登录")
             self._login = None
             acct = done.account
-            prev = self.store.meta_get("account_id")
-            if prev and acct.id and prev != acct.id:
-                with self._done_mu:  # a done round of the account before must not write into this one's
-                    self.store.wipe_account_data()  # another account: forget the previous one's chats
-                    with self.lock:
-                        self._account_epoch += 1
+            self._bind_account(acct)
             self._credentials = done.credentials
             self.creds = "present"
             self._remember_account(acct)

@@ -209,9 +209,10 @@ class ServiceDoneTest(unittest.TestCase):
         self.rounds_after(h, n, "the push's round")
         self.assertIn("示例同事甲", self.needs(self.page(h)), "恢复 holds against that 完成")
         h.world.mark_inbox("chat_example_dm_a")  # moved back in Feishu: the 恢复 has done its job…
-        n = h.app.done_rounds
         h.world.drop()
-        self.rounds_after(h, n, "a round that sees it not done")
+        key = "chat:chat_example_dm_a"
+        wait_until(lambda: key not in h.app.store.dismissed([key]), what="a round that saw it not done dropped the 恢复 mark")
+        self.assertIn("示例同事甲", self.needs(self.page(h)), "still there until a new 完成")
         h.world.mark_done("chat_example_dm_a")  # …so a new 完成 there counts
         wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="a new 完成 after the 恢复")
 
@@ -240,6 +241,74 @@ class ServiceDoneTest(unittest.TestCase):
         st.dismiss("inbox:item1", "v1")
         st.wipe_account_data()
         self.assertEqual(st.dismissed(["chat:chat_example_dm_a", "inbox:item1"]), {"inbox:item1": "v1"})
+
+    def test_a_restore_as_another_account_forgets_the_one_before(self):
+        h = self.ready()
+        h.app.store.dismiss("chat:chat_example_team", "v1")
+        from openmate_core.backend import Account
+
+        h.world.me = Account("user_example_other", "另一个账号")  # a sign-in that stopped half-way left B's credentials
+        h2 = h.restart()
+        wait_until(lambda: h2.app.store is not None and h2.app.store.meta_get("account_id") == "user_example_other",
+                   what="restored as the other account")
+        self.assertEqual(h2.app.store.dismissed(["chat:chat_example_team"]), {}, "the account before's marks are gone")
+
+    def version_of(self, h, chat_id):
+        from openmate_core.ui import ChatsToday
+
+        return next(t["_version"] for t in ChatsToday(h.app).needs() if t["_chat"]["id"] == chat_id)
+
+    def test_a_reaction_of_mine_on_the_message_counts(self):
+        h = self.ready()
+        rows = [r for r in h.app.store.messages_before("chat_example_dm_a", None, 10) if not r.get("mine")]
+        v = self.version_of(h, "chat_example_dm_a")
+        earlier = [r["id"] for r in rows if r["id"] != v][0]
+        n = h.app.done_rounds
+        h.world.react_as_me(earlier)  # a reaction on an older line: the newest still asks
+        self.rounds_after(h, n, "the push's round")
+        self.assertIn("示例同事甲", self.needs(self.page(h)))
+        self.assertIn(v, h.world.reactions_asks[-1], "asked about the message that made the need")
+        h.world.react_as_me(v)  # DONE on the message itself
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="a reaction: answered without words")
+        h.world.push("chat_example_dm_a", "user_example_a", "那就这样定了？")
+        wait_until(lambda: "示例同事甲" in self.needs(self.page(h)), what="a new message brings it back")
+
+    def test_the_agents_own_thinking_reaction_is_no_answer(self):
+        h = self.ready()
+        v = self.version_of(h, "chat_example_team")
+        n = h.app.done_rounds
+        h.world.react_as_me(v, kind="THINKING")  # 自动代答 took it, and may yet fail
+        self.rounds_after(h, n, "the push's round")
+        self.assertIn("示例项目群", self.needs(self.page(h)))
+        h.world.react_as_me(v, kind="CrossMark")
+        self.rounds_after(h, h.app.done_rounds, "another round")
+        self.assertIn("示例项目群", self.needs(self.page(h)), "❌: it failed, nothing was answered")
+
+    def test_a_restore_holds_while_the_reactions_cannot_be_read(self):
+        h = self.ready()
+        v = self.version_of(h, "chat_example_dm_a")
+        h.world.react_as_me(v)
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="a reaction: 处理完")
+        n = h.app.done_rounds
+        self.act(h, "undone:chat:chat_example_dm_a")
+        self.rounds_after(h, n, "恢复 asks about the chat")
+        h.world.reactions_fail = True
+        n = h.app.done_rounds
+        h.app.ask_done(["chat_example_dm_a"])  # Feishu says not 完成; the reactions cannot be read this time
+        self.rounds_after(h, n, "a round without the reactions")
+        h.world.reactions_fail = False
+        n = h.app.done_rounds
+        h.app.ask_done(["chat_example_dm_a"])
+        self.rounds_after(h, n, "a round with them again")
+        self.assertIn("示例同事甲", self.needs(self.page(h)), "恢复 holds against the reaction it came after")
+
+    def test_a_reaction_made_while_away_is_found_after_the_catch_up(self):
+        h = self.ready()
+        v = self.version_of(h, "chat_example_team")
+        h.world.drop()
+        wait_until(lambda: not h.world.connected, what="the link is down")
+        h.world.react_as_me(v, push=False)
+        wait_until(lambda: "示例项目群" not in self.needs(self.page(h)), what="found after the catch-up")
 
     def test_asking_fails_quietly(self):
         h = Harness(self, timing=fast(done_check=0.2))

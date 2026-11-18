@@ -618,12 +618,17 @@ class ReadTest(Base):
         S.api_answers["feed.PullFeedCardsByIdsRequest"] = {"cards": {
             "500": {"id": "500", "type": 1, "feedType": 2, "updateTimeMs": 1763000000500},
             "501": {"id": "501", "type": 1, "feedType": 1},
-            "502": {"type": 1, "feedType": 2, "updateTime": 1763000002}}}  # keyed by its id, without it inside
-        self.assertEqual(self.b.chat_done_states(["500", "501", "502", "503", "500", ""]),
-                         {"500": 1763000000.5, "501": None, "502": 1763000002.0, "503": None},
-                         "answered: done (when) or not (None), a chat without a card is not done")
-        self.assertEqual(S.api_calls[-1], ("feed.PullFeedCardsByIdsRequest", {"feedCardIdentities": [
-            {"id": "500", "type": 1}, {"id": "501", "type": 1}, {"id": "502", "type": 1}, {"id": "503", "type": 1}]}))
+            "502": {"type": 1, "feedType": 2, "updateTime": 1763000002},  # keyed by its id, without it inside
+            "504": {"id": "504", "type": 1}}}  # no feedType: not an answer
+        self.assertEqual(self.b.chat_done_states(["500", "501", "502", "503", "504", "500", ""]),
+                         {"500": 1763000000.5, "501": None, "502": 1763000002.0},
+                         "answered: done (when) or in the inbox (None); no card or no feedType is no answer")
+        S.api_answers["feed.PullFeedCardsByIdsRequest"] = {"status": 503}  # an error packet: no cards at all
+        self.assertEqual(self.b.chat_done_states(["500"]), {}, "nothing said: nothing answered")
+        S.api_answers["feed.PullFeedCardsByIdsRequest"] = {"cards": {"500": {"id": "500", "type": 1, "feedType": 2}}}
+        self.assertEqual(S.api_calls[-2], ("feed.PullFeedCardsByIdsRequest", {"feedCardIdentities": [
+            {"id": "500", "type": 1}, {"id": "501", "type": 1}, {"id": "502", "type": 1}, {"id": "503", "type": 1},
+            {"id": "504", "type": 1}]}))
         n = len(S.api_calls)
         self.b.chat_done_states([str(i) for i in range(120)])
         self.assertEqual(len(S.api_calls) - n, 3, "at most DONE_ASK_MOST a request")
@@ -648,6 +653,142 @@ class ReadTest(Base):
         with self.assertRaises(BackendError) as e:
             self.b.chat_done_states(["500"])
         self.assertEqual(e.exception.kind, "unreachable", "none answered: an error")
+
+    def test_every_group_page_by_page_newest_joined_first(self):
+        client, me = self.b._signed_in()
+        asked = []
+
+        def answer(kind, data=None, raw=None):
+            asked.append((kind, data))
+            if kind == "chats.PullGroupChatsRequest":
+                if data["updateTime"] == 0:
+                    return {"chatIds": ["g1", "g2", "g4"], "hasMore": True, "nextUpdateTime": 100,
+                            "chatJoinTimes": {"g1": 10, "g2": 20, "g4": 15}}
+                return {"chatIds": ["g3", "g1"], "hasMore": False, "nextUpdateTime": 200}
+            if kind == "chats.PullChatsByIdsRequest":
+                every = {"g1": {"id": "g1", "type": 2, "name": "项目群", "joinTimeMs": 10000, "memberCount": 9},
+                         "g2": {"id": "g2", "type": 2, "name": "解散的群", "isDissolved": True},
+                         "g3": {"id": "g3", "type": 3, "name": "话题群", "joinTimeMs": 30000},
+                         "g4": {"id": "g4", "type": 2, "name": "冻结的群", "isFrozen": True}}
+                return {"chats": {c: every[c] for c in data["chatIds"] if c in every}}
+            raise ValueError(kind)
+
+        orig = client.api
+        client.api = answer
+        self.addCleanup(setattr, client, "api", orig)
+        self.assertEqual(self.b.group_candidates(10), [], "nothing until read")
+        self.b._groups_work(client, me)
+        groups = self.b.group_candidates(10)
+        self.assertEqual([(g.id, g.name, g.kind) for g in groups], [("g3", "话题群", "group"), ("g1", "项目群", "group")])
+        self.assertEqual(groups[1].members, 9)
+        self.assertEqual([d["updateTime"] for k, d in asked if k == "chats.PullGroupChatsRequest"], [0, 100])
+        self.assertEqual([d["chatIds"] for k, d in asked if k == "chats.PullChatsByIdsRequest"], [["g1", "g2", "g4", "g3"]])
+        self.assertEqual([g.id for g in self.b.group_candidates(1)], ["g3"])
+        self.b.logout()
+        self.assertEqual(self.b.group_candidates(10), [], "another sign-in starts from nothing")
+
+    def set_groups(self, me, groups):
+        with self.b._groups_mu:
+            self.b._groups_owner = me.id
+            self.b._groups = [larkagentx.Chat(id=i, kind="group", name=n, members=m, topic=t) for i, n, m, t in groups]
+            self.b._groups_join = {g[0]: 100 - k for k, g in enumerate(groups)}
+
+    def test_groups_change_with_pushes_and_messages(self):
+        client, me = self.b._signed_in()
+        self.set_groups(me, [("g1", "旧名", 5, True), ("g3", "话题群", 3, False), ("g4", "围观的群", 2, False)])
+        self.b._apply_chats({"g9": {"id": "g9", "type": 2, "name": "新建的群"}, "g1": {"id": "g1", "type": 2, "name": "新名"},
+                             "g4": {"id": "g4", "role": 2}, "d1": {"id": "d1", "type": 1, "name": "某人"}}, ["g3"], me)
+        groups = self.b.group_candidates(10)
+        self.assertEqual([(g.id, g.name, g.members, g.topic) for g in groups], [("g1", "新名", 5, True)],
+                         "renamed with what it had kept; left, and only looked in: gone")
+        self.assertTrue(self.b._groups_soon, "a group the list lacks: read again soon, not taken from the push alone")
+        self.b._apply_chats({"g1": {"id": "g1", "isDissolved": True}}, [], me)
+        self.assertEqual(self.b.group_candidates(10), [], "dissolved: gone, even without its type")
+        self.assertNotIn("g1", self.b._groups_join, "joined again later: a new time")
+        with self.b._lock:
+            self.b._chats["g8"] = (time.monotonic() + 600, larkagentx.Chat(id="g8", kind="group", name="刚被拉进的群"))
+            self.b._chats["d2"] = (time.monotonic() + 600, larkagentx.Chat(id="d2", kind="dm", name="某人"))
+        self.b._groups_soon = False
+        self.b._seen_group("d2", me)
+        self.b._seen_group("unknown", me)
+        self.assertFalse(self.b._groups_soon, "a direct chat, or one not read: nothing")
+        self.b._seen_group("g8", me)
+        self.assertEqual(self.b.group_candidates(10), [], "a message alone does not say the account is a member…")
+        self.assertTrue(self.b._groups_soon, "…the next read does")
+        self.set_groups(me, [("g8", "群八", 2, False)])
+        other = larkagentx.Account("someone-else", "别人")
+        self.b._apply_chats({"g8": {"id": "g8", "isDissolved": True}}, [], other)
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g8"], "another account's push changes nothing")
+
+    def test_what_is_heard_during_a_read_is_put_on_its_result(self):
+        client, me = self.b._signed_in()
+        self.set_groups(me, [("g1", "要退的群", 3, False)])
+        real = self.b._read_groups
+
+        def read(c):
+            self.b._apply_chats({}, ["g1"], me)  # left while the read was out
+            self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二新名"}}, [], me)
+            return [larkagentx.Chat(id="g1", kind="group", name="要退的群"), larkagentx.Chat(id="g2", kind="group", name="群二")], \
+                {"g1": 5, "g2": 4}, True
+
+        self.b._read_groups = read
+        self.addCleanup(setattr, self.b, "_read_groups", real)
+        with self.b._groups_mu:
+            self.b._groups_busy = True
+        self.b._groups_work(client, me)
+        self.assertEqual([(g.id, g.name) for g in self.b.group_candidates(10)], [("g2", "群二新名")],
+                         "the read's older list does not bring it back, nor the old name")
+        self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二又改名"}}, [], me)
+        self.assertEqual([g.name for g in self.b.group_candidates(10)], ["群二又改名"], "a later push stays")
+        self.assertEqual(self.b._groups_delta, [])
+
+    def test_a_status_packet_keeps_the_list(self):
+        client, me = self.b._signed_in()
+        self.set_groups(me, [("g1", "群一", 3, False)])
+        orig = client.api
+        client.api = lambda kind, data=None, raw=None: {"status": 503}
+        self.addCleanup(setattr, client, "api", orig)
+        self.b._groups_work(client, me)
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g1"])
+
+        pages = []
+
+        def answer(kind, data=None, raw=None):
+            if kind == "chats.PullGroupChatsRequest":
+                pages.append(data["updateTime"])
+                if data["updateTime"] == 0:
+                    return {"hasMore": True, "nextUpdateTime": 50}  # an empty page, more after it
+                return {"chatIds": ["g5"], "hasMore": False}
+            return {"chats": {"g5": {"id": "g5", "type": 2, "name": "群五"}}}
+
+        client.api = answer
+        self.b._groups_work(client, me)
+        self.assertEqual(pages, [0, 50])
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g5"])
+
+    def test_reacted_by_both_forms(self):
+        f = larkagentx.reacted_by
+        d = {"messageReactions": [
+                {"messageId": "m1", "reactions": [{"type": "DONE", "userIds": ["me", "u2"], "udpateTimes": {"me": 1763000000}}]},
+                {"messageId": "m2", "reactions": [{"type": "OK", "userIds": ["u2"]}]},
+                {"messageId": "m3", "reactions": [{"type": "OK", "chatterIds": ["me"], "nanoUpdateTime": 1763000005000000000}]},
+                "junk"],
+             "selfReactionStatus": [{"userId": "me", "messageId": "m4", "reactionType": "DONE", "nanoUpdateTime": 1763000009000000000},
+                                    {"userId": "me", "messageId": "m5", "isCancelled": True}]}
+        self.assertEqual(f(d, "me"), {"m1": 1763000000.0, "m3": 1763000005.0, "m4": 1763000009.0})
+        self.assertEqual(f(d, "me", {"m1"}), {"m1": 1763000000.0}, "only the messages asked about")
+        self.assertEqual(f(d, "me", None, ("done", "OK")), {}, "the types ignored (the /agent's own 🤔 and ❌)")
+        self.assertEqual(f(d, ""), {})
+
+    def test_my_reactions_asks_by_message(self):
+        client, me = self.b._signed_in()
+        S.api_answers["reactions.PullReactionsRequest"] = {"messageReactions": [
+            {"messageId": "201", "reactions": [{"type": "DONE", "userIds": [me.id]}]}]}
+        self.assertEqual(self.b.my_reactions(["201", "202", "201", ""]), {"201": 0.0})
+        self.assertEqual(S.api_calls[-1], ("reactions.PullReactionsRequest", {"messageIds": ["201", "202"]}))
+        S.api_answers["reactions.PullReactionsRequest"] = {"status": 503}
+        with self.assertRaises(BackendError):
+            self.b.my_reactions(["201"])
 
     def test_chat_info_topic_and_cache(self):
         S.chats["502"] = {"id": "502", "type": 2, "chatMode": 3, "name": "", "i18nNames": {"zh_cn": "话题群"}}
@@ -890,6 +1031,18 @@ class ListenTest(Base):
         self.stop.set()
         t.join(5)
         self.assertEqual(self.error, [])
+
+    def test_reaction_pushes_go_to_their_reader(self):
+        from larkx._fake import frame
+
+        got = []
+        self.b._pushed_reactions = lambda payload, me: got.append(payload)  # the real decoding: test_smoke_larkx
+        t = self.start()
+        S.frames.put(frame(sid="r1", cmd=larkagentx.PUSH_REACTIONS_CMD, payload=b"reactions"))
+        wait_until(lambda: got == [b"reactions"], what="handed on")
+        self.assertIn(("ack", "r1"), S.ws_sent)
+        self.stop.set()
+        t.join(5)
 
     def test_up_without_frames_after_the_grace(self):
         t = self.start()

@@ -192,6 +192,9 @@ class Backend(abc.ABC):
     #: marked chats done in the service's own client (Feishu's 完成), from the listener's own thread (it returns at
     #: once). The core takes it as a hint and asks chat_done_states about those chats. For a backend with done_marks.
     on_chats_done: Optional[Callable[[Dict[str, float]], None]] = None
+    #: Set by the core: call it with the ids of messages the live link hears the account put a reaction on (from the
+    #: listener's own thread; it returns at once). The core takes it as a hint and asks my_reactions. With done_marks.
+    on_reacted: Optional[Callable[[List[str]], None]] = None
     #: The service has a per-chat done mark (Feishu's 完成: the chat leaves the message list until a new message): the
     #: core asks chat_done_states about the chats that need the user and counts the marked ones as 处理完.
     done_marks: bool = False
@@ -259,6 +262,13 @@ class Backend(abc.ABC):
         changed there (unix seconds, 0 when unknown) for one the user marked done and no new message reopened, None
         for one that is not done. A chat it could not ask about is left out; BackendError when it could ask about
         none (CredentialsExpired when the sign-in is gone). A backend with done_marks."""
+        return {}
+
+    def my_reactions(self, message_ids: List[str], ignore: Tuple[str, ...] = ()) -> Dict[str, float]:
+        """Of these messages, the ones the account has a reaction on now (a DONE, a 👍 …: an answer without words),
+        reactions of the types in ignore not counted (the /agent's own 🤔 and ❌ say nothing was answered):
+        {message_id: when (unix seconds, 0 when unknown)}. BackendError when it could ask about none. With
+        done_marks; the core counts the need that message made as 处理完, as a reply would."""
         return {}
 
     def doc_text(self, doc_url: str, most: int) -> str:
