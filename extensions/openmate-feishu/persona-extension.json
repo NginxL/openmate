@@ -16,7 +16,7 @@
       {
         "id": "matefeishu",
         "name": "飞书（OpenMate）",
-        "capabilities": ["status", "tools", "actions", "events", "inbox", "archive", "login", "threads"],
+        "capabilities": ["status", "tools", "actions", "events", "inbox", "archive", "history", "login", "threads"],
         "agent_tools": ["matefeishu_status", "matefeishu_chats", "matefeishu_messages", "matefeishu_search", "matefeishu_docs", "matefeishu_agent_reply", "matefeishu_starkmesh"],
         "confirm_always": ["matefeishu_*"],
         "sends_as_user": true,

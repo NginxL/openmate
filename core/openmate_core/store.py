@@ -489,6 +489,19 @@ class Store:
         )
         return [_message_row(r) for r in rows]
 
+    def has_before(self, chat_id: str, position: int) -> bool:
+        """A message of chat is stored before this position."""
+        return self._one("SELECT 1 FROM messages WHERE chat_id = ? AND position < ? LIMIT 1", (chat_id, int(position))) is not None
+
+    def has_after(self, chat_id: str, position: int) -> bool:
+        """A message of chat is stored after this position."""
+        return self._one("SELECT 1 FROM messages WHERE chat_id = ? AND position > ? LIMIT 1", (chat_id, int(position))) is not None
+
+    def message_counts(self) -> Dict[str, int]:
+        """How many messages (not system lines) each chat has stored."""
+        rows = self._all("SELECT chat_id, COUNT(*) AS n FROM messages WHERE type != 'SYSTEM' GROUP BY chat_id")
+        return {r["chat_id"]: int(r["n"] or 0) for r in rows}
+
     def archive_rows(self, after_seq: int, limit: int) -> List[dict]:
         rows = self._all("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE seq > ? ORDER BY seq LIMIT ?", (after_seq, limit))
         return [_message_row(r) for r in rows]
@@ -624,6 +637,10 @@ class Store:
             db.execute("DELETE FROM autoreply WHERE chat_id = ?", (chat_id,))
 
         self._tx(run)
+
+    def is_gone(self, chat_id: str) -> bool:
+        """The account left or deleted this chat (chat_gone), and no newer message brought it back."""
+        return self._one("SELECT 1 FROM gone WHERE chat_id = ?", (chat_id,)) is not None
 
     def chats_back(self, latest: Dict[str, float]) -> int:
         """Chats with a message newer than when they went (joined again): back in the lists. How many came back."""

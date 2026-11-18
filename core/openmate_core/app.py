@@ -43,6 +43,13 @@ ARCHIVE_UNDECIDED_HOURS = 6  # a message of a chat the archive rule cannot decid
 ARCHIVE_ASK_MOST = 3  # undecided chats the backend is asked about per archive read
 STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, backend, saved sign-in) waits this long
 SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
+# History (capability "history": history.chats, archive.history), read from the store: what the program has stored of
+# a chat since it signed in (live messages, catch-ups, history reads). Pages are hints of HISTORY_PAGE messages, at most
+# HISTORY_MOST (the hub's own cap); the store is read in steps of HISTORY_STEP rows.
+HISTORY_PAGE = 50
+HISTORY_MOST = 200
+HISTORY_STEP = 500
+HISTORY_CHATS_MOST = 5000
 
 # Connector methods of capabilities this connector does not declare: answered no_capability (unknown ones are
 # unknown_method).
@@ -147,6 +154,10 @@ class ConnectorApp:
             "login.step": self.m_login_step,
             "logout": self.m_logout,
         }
+        if "history" in self._capabilities():
+            # only for a connector whose manifest declares it (the hub asks no other, and the method stays off then)
+            self._methods["history.chats"] = self.m_history_chats
+            self._methods["archive.history"] = self.m_archive_history
         for m in getattr(platform, "methods_off", ()) or ():
             self._methods.pop(m, None)
         self.ui: Optional[UI] = None
@@ -1404,6 +1415,130 @@ class ConnectorApp:
             out.append({"chat": views.archive_chat(chat, chat_id),
                         "messages": [views.archive_message(r, me, self.platform.handle_kind) for r in msgs]})
         return {"batches": out, "next": str(scanned), "more": more}
+
+    # ------------------------------------------------------------------ history (the knowledge base's import and its
+    # per-chat settings: Persona lists history.chats in 设置 → 知识库选择 → 添加聊天)
+
+    def _capabilities(self) -> List[str]:
+        for c in ((self.manifest.get("contributes") or {}).get("connectors") or []):
+            if isinstance(c, dict) and c.get("id") == self.cid:
+                return [str(x) for x in (c.get("capabilities") or [])]
+        return []
+
+    def _history_open(self, chat_id: str, chat: Optional[dict]) -> bool:
+        """The archive would hand this chat over: no platform rule, or the rule says yes (undecided is no)."""
+        keep = getattr(self.platform, "archive_chat", None)
+        if keep is None:
+            return True
+        try:
+            return keep(chat_id, chat, self.config or {}) is True
+        except Exception:
+            log.exception("the archive rule failed: the chat is left out of the history")
+            return False
+
+    @staticmethod
+    def _history_row(r: dict) -> bool:
+        return not views.is_system(r) and views.has_content(r)  # what archive.changes hands over
+
+    def m_history_chats(self, params: dict) -> dict:
+        if self.store is None:
+            return {"chats": []}
+        counts = self.store.message_counts()
+        out = []
+        for chat in self.store.chats_recent(HISTORY_CHATS_MOST):  # the newest first, without the chats gone
+            cid = chat.get("id") or ""
+            if not cid or not self._history_open(cid, chat):
+                continue
+            item: Dict[str, Any] = {"id": cid, "name": views.chat_name(chat, cid), "kind": views.chat_kind(chat)}
+            if chat.get("muted"):
+                item["muted"] = True
+            if counts.get(cid):
+                item["estimate"] = counts[cid]
+            out.append(item)
+        return {"chats": out}
+
+    def _history_back(self, chat_id: str, before: Optional[int], want: int):
+        """Up to want rows to hand over older than before (from the newest when None), oldest first, and the oldest
+        position looked at (None when nothing was): rows the archive leaves out are passed over, however many."""
+        got: List[dict] = []
+        oldest: Optional[int] = None
+        cur = before
+        while len(got) < want:
+            rows = self.store.messages_before(chat_id, cur, HISTORY_STEP)
+            for r in reversed(rows):
+                oldest = int(r["position"])
+                if self._history_row(r):
+                    got.append(r)
+                    if len(got) >= want:
+                        break
+            if len(rows) < HISTORY_STEP or oldest is None:
+                break
+            cur = oldest
+        got.reverse()
+        return got, oldest
+
+    def _history_forward(self, chat_id: str, after: int, want: int):
+        """Up to want rows to hand over newer than after, oldest first, and the newest position looked at."""
+        got: List[dict] = []
+        newest: Optional[int] = None
+        cur = after
+        while len(got) < want:
+            rows = self.store.messages_after(chat_id, cur, HISTORY_STEP)
+            for r in rows:
+                newest = int(r["position"])
+                if self._history_row(r):
+                    got.append(r)
+                    if len(got) >= want:
+                        break
+            if len(rows) < HISTORY_STEP or newest is None:
+                break
+            cur = newest
+        return got, newest
+
+    def m_archive_history(self, params: dict) -> dict:
+        chat_id = str(params.get("chat") or "")
+        if not chat_id:
+            raise RPCError("archive.history 没有 chat")
+        marks = {k: str(params[k]) for k in ("before", "after", "around") if params.get(k) not in (None, "")}
+        if len(marks) > 1:
+            raise RPCError("before、after、around 最多给一个")
+
+        def position(s: str) -> int:
+            try:
+                return int(s)
+            except ValueError:
+                raise RPCError("位置不是这个连接器给出的：%s" % s[:40])
+
+        want = _int(params.get("limit"), HISTORY_PAGE, 1, HISTORY_MOST)
+        if self.store is None:
+            return {"pace": {"stop": True, "reason": "扩展还没有准备好（没有登录或设置有误），请先在连接器设置里登录"}}
+        chat = self.store.get_chat(chat_id)
+        if chat is None or self.store.is_gone(chat_id) or not self._history_open(chat_id, chat):
+            return {"unreadable": True}  # never seen here, left, or kept out of the archive: skip it for good
+        back: List[dict] = []
+        fwd: List[dict] = []
+        oldest = newest = None
+        if "around" in marks:
+            p = position(marks["around"])
+            back, oldest = self._history_back(chat_id, p + 1, (want + 1) // 2)  # the message at p, and older
+            fwd, newest = self._history_forward(chat_id, p, want - len(back))
+        elif "after" in marks:
+            fwd, newest = self._history_forward(chat_id, position(marks["after"]), want)
+        else:
+            back, oldest = self._history_back(chat_id, position(marks["before"]) if "before" in marks else None, want)
+        rows = back + fwd
+        if not rows:
+            return {}  # nothing there: the start (or, going forward, nothing newer yet)
+        me = self.me_name()
+        page: Dict[str, Any] = {"messages": [views.archive_message(r, me, self.platform.handle_kind) for r in rows]}
+        low = oldest if back else int(rows[0]["position"])
+        if self.store.has_before(chat_id, low):
+            page["more"] = True
+            page["older"] = str(low)
+        high = newest if fwd else int(rows[-1]["position"])
+        if self.store.has_after(chat_id, high):
+            page["newer"] = str(high)
+        return page
 
 
 def _int(v: Any, default: int, lo: int, hi: int) -> int:
