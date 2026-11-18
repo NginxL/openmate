@@ -368,6 +368,37 @@ class GroupsTest(Base):
         self.listen(b, lambda g, l, e: g)
         self.assertTrue(self.wait(lambda: "群new7" in {c.name for c in b.group_candidates(50)}))
 
+    def test_another_account_reads_its_groups_afresh(self):
+        b = self.backend([{"event": "link", "up": True}, {"sleep": 1.0}])
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: l)
+        self.assertTrue(self.wait(lambda: b.store.get("groups_at")))
+        b.restore({"state": {"k": "v2", "who": "wxid_other"}})
+        self.assertEqual(b.store.get("groups_at"), "", "the old account's scan does not count for the new one")
+        self.assertEqual(b.group_candidates(50), [])
+
+    def test_an_incomplete_scan_is_not_counted(self):
+        os.environ["FAKE_GROUPS_COMPLETE"] = "0"
+        b = self.backend([{"event": "link", "up": True}, {"sleep": 1.0}])
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: l)
+        self.assertTrue(self.wait(lambda: len(b.group_candidates(50)) == 2))
+        self.assertEqual(b.store.get("groups_at"), "", "read again at the next chance")
+
+    def test_unnamed_groups_have_no_stored_stand_in(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b.store.add_groups(["q1@chatroom"])
+        self.assertEqual([(c.id, c.name) for c in b.group_candidates(10)], [("q1@chatroom", "")])
+
+    def test_a_quote_travels_with_the_message(self):
+        ev = dict(msg("qq", "1@chatroom", "wxid_bob", "@我 请确认是谁负责这个？", at_me=True), parent="77",
+                  quoted_sender="小李", quoted_text="需求负责人是郑元")
+        b = self.backend([ev])
+        b.restore({"state": {"k": "v1"}})
+        got, _, _ = self.listen(b, lambda g, l, e: g)
+        self.assertEqual(got[0].text, "@我 请确认是谁负责这个？\n「引用 小李：需求负责人是郑元」")
+
     def test_no_lookup_for_an_empty_id(self):
         b = self.backend()
         b.restore({"state": {"k": "v1"}})

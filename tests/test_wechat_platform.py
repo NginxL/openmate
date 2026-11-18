@@ -245,6 +245,12 @@ class RoundNineTest(unittest.TestCase):
         b = ask(h, "/agent 帮我润色这条文案\n🤖 AI 代答，让客户少等一分钟。")
         running(h, b)
 
+    def test_a_dot_without_spaces_is_text_not_a_mark(self):
+        h = wechat(self)
+        h.app.store.autoreply_set(TEAM, True)
+        m = h.world.push(TEAM, "user_example_b", "@示例用户\u2005🤖 AI 回复·为什么总是超时？", at_me=True)
+        self.assertEqual(running(h, m)["kind"], "auto")
+
     def test_an_answer_line_like_a_mark_is_kept_and_a_mark_only_answer_is_refused(self):
         h = wechat(self)
         msg = ask(h, "/agent 状态")

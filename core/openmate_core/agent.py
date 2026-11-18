@@ -133,7 +133,7 @@ def model_label(model: str) -> str:
 
 
 # a built-in mark as we render it: alone, or before " · model" ("🤖 AI 回复 API 有延迟吗？" is a question)
-_BUILTIN_MARK = re.compile("^(?:%s)(?:$|\\s*·)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
+_BUILTIN_MARK = re.compile("^(?:%s)(?:$| · \\S)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
 _GENERIC_MARK = re.compile("^%s(?:$|\\s*·|\\s*[：:])" % re.escape(AI_MARKS[2]))  # another AI's "🤖 AI · …" / "🤖 AI：…"
 
 
@@ -1032,7 +1032,7 @@ class AgentRunner:
                         text = full.get("text") or text
                     except HubError:
                         pass
-                if text.strip():
+                if text.strip() and self._clean_answer(text, cur).strip():  # never a mark alone
                     cur["fallback"] = "claimed"  # first, so a reply through the tool now cannot also go out
                     post = text
             cur["state"] = "done"
@@ -1117,8 +1117,9 @@ class AgentRunner:
         run["model"], run["effort"] = model, effort
         return model, effort
 
-    def _clean_answer(self, text: str, run: Optional[dict]) -> str:
-        """The Agent's answer without a mark it wrote itself (so marks are never doubled)."""
+    def _clean_answer(self, text: str, run: Optional[dict], model_effort: Optional[tuple] = None) -> str:
+        """The Agent's answer without a mark it wrote itself (so marks are never doubled). model_effort: the model
+        the mark is rendered with (None: what the run has stored, without asking the hub)."""
         t = (text or "").strip()
         if getattr(self.app.platform, "mark_view", None) is None:  # Feishu: as it always cleaned
             for s in {self.suffix.strip(), DEFAULT_SUFFIX, KNOWN_SUFFIXES[0]}:
@@ -1129,8 +1130,10 @@ class AgentRunner:
             marks = self._header_marks()
             is_mark = lambda line: any(line.lstrip("> ").strip().startswith(m) for m in marks)  # noqa: E731
         else:  # WeChat: only a whole line equal to this run's own rendered mark or an old end mark goes
-            header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
-            model, effort = self._model_of(run, header) if (run and header) else ("", "")
+            if model_effort is not None:
+                model, effort = model_effort
+            else:
+                model, effort = (run or {}).get("model") or "", (run or {}).get("effort") or ""
             own = {fill_header(h, model, effort).lstrip("> ").strip() for h in (self.header, self.auto_header) if h}
             own |= {DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]}
             if self.suffix.strip():
@@ -1145,10 +1148,11 @@ class AgentRunner:
     def with_suffix(self, text: str, run: Optional[dict] = None) -> str:
         """The message as it goes out: the AI mark line (the model and effort that answered) after the answer, or on
         top with agent_mark_position "top"; the end mark if one is set. A mark the Agent wrote itself is not doubled."""
-        t = self._clean_answer(text, run)
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
+        me = self._model_of(run, header) if header else ("", "")  # asked once: the cleaning and the mark agree
+        t = self._clean_answer(text, run, me)
         if header:
-            line = fill_header(header, *self._model_of(run, header))
+            line = fill_header(header, *me)
             if run and run.get("kind") == "doc":
                 line = line.lstrip("> ").strip()  # a comment shows a quote mark as it is
             t = (line + "\n" + t) if self.mark_position == "top" else (t + "\n\n" + line)

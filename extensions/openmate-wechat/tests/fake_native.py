@@ -96,7 +96,8 @@ def answer(req):
         return ok(room_id=req.get("room_id"), member_count=3, members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
     if op == "groups":
-        return ok(groups=json.loads(os.environ.get("FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')))
+        return ok(groups=json.loads(os.environ.get("FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')),
+                  complete=os.environ.get("FAKE_GROUPS_COMPLETE", "1") == "1")
     if op == "hello":
         return ok(protocol=int(os.environ.get("FAKE_PROTOCOL", "2")), version="fake")
     if op in ("stop", "logout"):

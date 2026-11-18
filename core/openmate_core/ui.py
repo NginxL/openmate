@@ -27,6 +27,7 @@ NEEDS_MOST = 30
 GROUPS_MOST = 10
 AUTOREPLY_ROWS = 20  # groups offered for 自动代答 (the marked ones always)
 CANDIDATES_MOST = 300  # then every other group the backend can list (Backend.group_candidates)
+ADOPT_MOST = 5000  # a switched group is looked up this far (it may have moved down the list since the page drew)
 SLOW_RENDER = 0.3
 THREAD_LINES = 30
 REFRESH = 60
@@ -451,13 +452,18 @@ class ChatsPage(Page):
             if aid.startswith("autoreply:"):  # an app without switches: autoreply:on:<chat> / autoreply:off:<chat>
                 _, how, chat_id = aid.split(":", 2)
                 changes[chat_id] = how == "on"
+            missing = []
             for chat_id, on in changes.items():
                 if on and self.app.store.get_chat(chat_id) is None:
                     self._adopt_candidate(chat_id)  # a group from the backend's list, with no message here yet
                 if self.app.store.get_chat(chat_id) is not None:
                     self.app.store.autoreply_set(chat_id, on)
+                elif on:
+                    missing.append(chat_id)
             if not changes:
                 return {}
+            if missing:
+                return {"toast": "没能开启：这个群暂时找不到了，请刷新页面再试", "view": here()}
             on = any(changes.values())
             return {"toast": "已开启自动代答：有人 @ 你时 AI 直接代你回复" if on else "已关闭自动代答", "view": here()}
         return {}
@@ -473,8 +479,14 @@ class ChatsPage(Page):
             return []
 
     def _adopt_candidate(self, chat_id: str) -> None:
-        for g in self._candidates():
-            if g.id == chat_id:
+        backend = getattr(self.app, "backend", None)
+        try:
+            listed = backend.group_candidates(ADOPT_MOST) if backend is not None else []
+        except Exception:
+            log.exception("the backend's group list could not be read")
+            listed = []
+        for g in listed:
+            if g.id == chat_id and g.kind != "dm":
                 self.app.store.upsert_chat(g)
                 return
 
@@ -496,7 +508,9 @@ class ChatsPage(Page):
         for g in self._candidates():  # every other group the service lists: a new one shows up at the next refresh
             if g.id not in seen:
                 known = app.store.get_chat(g.id)
-                chats.append(known or {"id": g.id, "name": g.name, "kind": "group"})
+                # an unnamed group shows a stand-in here only; nothing is stored under it
+                chats.append(known or {"id": g.id, "name": g.name or "未命名的群（%s）" % g.id.split("@", 1)[0][-4:],
+                                       "kind": "group"})
                 seen.add(g.id)
         if not chats:
             return None

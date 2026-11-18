@@ -711,7 +711,12 @@ fn op_groups(app: &App) -> Result<Value> {
     let client = app.client()?;
     let (mut contacts, mut rooms) = (0u32, 0u32);
     let mut groups = std::collections::BTreeSet::new();
+    let deadline = Instant::now() + Duration::from_secs(150); // within the backend's wait: never a page after it gave up
+    let mut complete = false;
     for _ in 0..200 {
+        if Instant::now() >= deadline {
+            break;
+        }
         let page = app
             .rt
             .block_on(async { tokio::time::timeout(Duration::from_secs(20), client.init_contacts(contacts, rooms)).await })
@@ -724,11 +729,15 @@ fn op_groups(app: &App) -> Result<Value> {
         let moved = page.contact_sequence != contacts || page.room_sequence != rooms;
         contacts = page.contact_sequence;
         rooms = page.room_sequence;
-        if !page.more || !moved {
+        if !page.more {
+            complete = true;
+            break;
+        }
+        if !moved {
             break;
         }
     }
-    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>()}))
+    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete}))
 }
 
 // ---------------------------------------------------------------- main
