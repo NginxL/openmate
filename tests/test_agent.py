@@ -645,29 +645,38 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(h.http.starts(), [])
         self.assertEqual(run_of(h, m)["state"], "failed")
 
-    def test_a_start_whose_answer_was_lost_goes_on_under_a_new_id(self):
+    def test_a_start_whose_answer_was_lost_is_answered_by_the_same_operation(self):
         h = agent(self)
         h.http.lost_starts = 1
         m = ask(h, "/agent 回答丢了")
         run = running(h, m)
         starts = h.http.starts()
         self.assertEqual(len(starts), 2)
-        self.assertEqual(run["ref"], run["id"] + ".2")
-        self.assertIn('"%s"' % run["id"], starts[0]["body"]["prompt"])
-        self.assertIn('"%s.2"' % run["id"], starts[1]["body"]["prompt"])
-        self.assertEqual(run["session_id"], "sess-2")
-        # the conversation the lost start opened can never answer into the chat
-        for stale in (run["id"], run["id"] + ".3"):
-            with self.assertRaises(HubSideError) as e:
-                h.tool("agent_reply", request=stale, text="第一个会话的回答")
-            self.assertIn("另一个会话", e.exception.message)
-        h.tool("agent_reply", request=run["id"] + ".2", text="第二个会话的回答")
-        self.assertEqual([s["text"] for s in replies(h)], ["第二个会话的回答\n\n" + SUFFIX])
-        # and its turn's end is not ours to answer
-        h.http.add("sess-1", "assistant", "text", "孤儿会话的回答")
-        h.http.end_turn("sess-1")
-        time.sleep(0.2)
-        self.assertEqual(len(replies(h)), 1)
+        self.assertTrue(starts[0]["op"] and starts[0]["op"] == starts[1]["op"], "one operation id")
+        self.assertEqual(starts[0]["body"], starts[1]["body"], "the very same request")
+        self.assertNotIn("ref", run)
+        self.assertEqual(run["session_id"], "sess-1", "the conversation the first try opened")
+        self.assertEqual(len(h.http.sessions), 1, "one conversation, never a second")
+        h.tool("agent_reply", request=run["id"], text="唯一会话的回答")
+        self.assertEqual([s["text"] for s in replies(h)], ["唯一会话的回答\n\n" + SUFFIX])
+
+    def test_a_start_still_under_way_is_waited_for(self):
+        h = agent(self)
+        h.http.start_pending = 2
+        m = ask(h, "/agent 还在处理")
+        run = running(h, m)
+        self.assertEqual(len({s["op"] for s in h.http.starts()}), 1)
+        self.assertEqual(len(h.http.sessions), 1)
+        self.assertEqual(run["session_id"], "sess-1")
+
+    def test_a_start_nobody_knows_about_is_not_sent_again(self):
+        h = agent(self)
+        h.http.start_unknown = True
+        m = ask(h, "/agent 不知道有没有开始")
+        wait_until(lambda: replies(h), what="the explanation")
+        self.assertIn("在 Persona 里看看", replies(h)[0]["text"])
+        self.assertEqual(len(h.http.starts()), 1, "never asked again on its own")
+        self.assertEqual(run_of(h, m)["state"], "failed")
 
     def test_lost_starts_are_tried_three_times(self):
         h = agent(self)
@@ -675,9 +684,12 @@ class NetworkTest(unittest.TestCase):
         m = ask(h, "/agent 一直丢")
         wait_until(lambda: replies(h), what="the explanation")
         self.assertIn("试了 3 次", replies(h)[0]["text"])
+        self.assertIn("在 Persona 里看看", replies(h)[0]["text"])
         self.assertEqual(len(h.http.starts()), 3)
+        self.assertEqual(len({s["op"] for s in h.http.starts()}), 1, "the same operation each time")
+        self.assertEqual(len(h.http.sessions), 1, "one conversation at most")
         run = run_of(h, m)
-        self.assertEqual((run["state"], run["ref"]), ("failed", run["id"] + ".3"))
+        self.assertEqual((run["state"], run.get("ref")), ("failed", None), "never a new ref")
 
     def test_a_continuation_whose_answer_was_lost_is_sent_once(self):
         h = agent(self)
@@ -721,13 +733,15 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(h.http.sessions, {})
         self.assertEqual(run_of(h, m)["state"], "failed")
 
-    def test_a_start_the_machine_may_have_run_goes_on_under_a_new_id(self):
+    def test_a_start_the_machine_may_have_run_is_asked_again_as_the_same_operation(self):
         h = agent(self)
         h.http.lost_starts, h.http.lost_code = 1, "node_unreachable"
         m = ask(h, "/agent 电脑那边断了")
         run = running(h, m)
         self.assertEqual(len(h.http.starts()), 2)
-        self.assertEqual(run["ref"], run["id"] + ".2")
+        self.assertEqual(len({s["op"] for s in h.http.starts()}), 1)
+        self.assertNotIn("ref", run)
+        self.assertEqual(len(h.http.sessions), 1)
 
     def test_a_restart_while_it_waits_asks_to_send_it_again(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))

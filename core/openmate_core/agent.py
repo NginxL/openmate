@@ -29,6 +29,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
@@ -630,8 +631,13 @@ class AgentRunner:
         deadline = time.time() + t.agent_hub_wait
         cmid = "openmate-" + run["id"]
         baseline: Optional[int] = None
+        op = ""
         if prev is not None:
             self._supersede(prev["id"], run["id"])
+        else:
+            # a new conversation is started once: one operation id and the very same request on every try, and after
+            # a restart too (the hub answers a repeat with the first answer), never a second start under a new ref
+            run, op, prompt = self._start_op(run, prompt)
         tries = 1
         while True:
             if self._stop.is_set():  # shutting down: the next start tells the user to send it again
@@ -657,16 +663,27 @@ class AgentRunner:
                         self._fail(run["id"], "hub 不支持访客会话")
                         return
                     sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
-                                                       guest_tools=["%s_agent_reply" % self.app.cid])
+                                                       guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True, "guest": True}
                 else:
-                    sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher)
+                    sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True}
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
+                if op and e.code == "unknown":
+                    self._fail(run["id"], "Persona 不确定这个 /agent 有没有开始处理（网络中途断了）。请先在 Persona 里看看有没有"
+                                          "新开的会话；没有的话再重新发送。")
+                    return
+                if op and e.code == "pending":  # under way at the hub: ask again with the same operation
+                    if time.time() >= deadline:
+                        self._fail(run["id"], "Persona 迟迟没有确认这个 /agent 有没有开始处理。请先在 Persona 里看看有没有"
+                                              "新开的会话；没有的话再重新发送。")
+                        return
+                    self._stop.wait(min(t.agent_hub_probe, max(0.0, deadline - time.time())))
+                    continue
                 if not e.transient:
                     self._fail(run["id"], "没能启动 Agent：%s" % (e.message or "hub 拒绝了请求"))
                     return
@@ -675,15 +692,12 @@ class AgentRunner:
                                % (_hub_words(e), _span(t.agent_hub_wait)))
                     return
                 if prev is None and not e.unsent:
-                    # it may have reached the hub and opened a conversation: start again under a new request id
+                    # it may have reached the hub: the same operation again gets its first answer, never a second start
                     if tries >= t.agent_start_tries:
-                        self._fail(run["id"], "没能启动 Agent：这台电脑和 Persona 之间的网络不稳定，试了 %d 次都没成功，请稍后重新发送。"
-                                   % tries)
+                        self._fail(run["id"], "没能确认 Agent 有没有启动：这台电脑和 Persona 之间的网络不稳定，试了 %d 次。"
+                                              "请先在 Persona 里看看有没有新开的会话；没有的话再重新发送。" % tries)
                         return
                     tries += 1
-                    old = self._ref(run)
-                    run = self._retry_as(run["id"], "%s.%d" % (run["id"], tries)) or run
-                    prompt = prompt.replace(old, self._ref(run))
                 self._stop.wait(min(t.agent_hub_probe, max(0.0, deadline - time.time())))
         stopped = False
         with self._lock(run["id"]):
@@ -720,6 +734,17 @@ class AgentRunner:
             if left <= 0:
                 return False
             self._stop.wait(min(t.agent_hub_probe, left))
+
+    def _start_op(self, run: dict, prompt: str):
+        """(run, op id, prompt) of a new conversation's start: made once and kept with the run, so every try (and a
+        resume after a restart) sends the same operation and the same body."""
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"]) or run
+            if not cur.get("start_op"):
+                cur["start_op"] = str(uuid.uuid4())
+                cur["start_prompt"] = prompt
+                self.store.run_put(cur)
+        return cur, cur["start_op"], cur.get("start_prompt") or prompt
 
     def _retry_as(self, run_id: str, ref: str) -> Optional[dict]:
         with self._lock(run_id):

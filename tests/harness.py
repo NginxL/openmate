@@ -208,6 +208,9 @@ class FakeHubHTTP:
         self.lost_code = "hub_unreachable"  # … with this code (the relay's, or the hub's node_unreachable)
         self.machine_offline = 0  # the next this many starts find the machine offline (503, nothing ran)
         self.lost_sends = 0  # the next this many messages are typed, but the answer is lost (502)
+        self.ops: Dict[str, dict] = {}  # X-Persona-Op-Id of conversation starts → their receipt (assistant_start_ops)
+        self.start_pending = 0  # the next this many asks about a start find it still under way (202 pending)
+        self.start_unknown = False  # the next start ends with nobody knowing whether it started (202 unknown)
         self._n = itertools.count(1)
         hub = self
 
@@ -231,12 +234,13 @@ class FakeHubHTTP:
                 if n:
                     body = json.loads(self.rfile.read(n))
                 rec = {"method": method, "path": urllib.parse.unquote(u.path), "query": query, "body": body,
-                       "auth": self.headers.get("Authorization"), "lang": self.headers.get("Accept-Language")}
+                       "auth": self.headers.get("Authorization"), "lang": self.headers.get("Accept-Language"),
+                       "op": self.headers.get("X-Persona-Op-Id") or ""}
                 with hub.lock:
                     hub.requests.append(rec)
                 if rec["auth"] != "Bearer " + hub.token:
                     return self._reply(401, {"error": "bad token"})
-                status, obj = hub.route(method, rec["path"].split("/")[1:], query, body)
+                status, obj = hub.route(method, rec["path"].split("/")[1:], query, body, rec["op"])
                 self._reply(status, obj)
 
             def do_GET(self):
@@ -291,7 +295,7 @@ class FakeHubHTTP:
 
     # ---- routes ----
 
-    def route(self, method: str, parts: List[str], query: dict, body: Any):
+    def route(self, method: str, parts: List[str], query: dict, body: Any, op: str = ""):
         p = "/" + "/".join(parts)
         with self.lock:
             if self.offline > 0:
@@ -303,6 +307,21 @@ class FakeHubHTTP:
             if method == "GET" and p == "/api/v1/assistant/capabilities":
                 return (404, {"error": "no route"}) if self.no_guest else (200, {"guest_conversations": True})
             if method == "POST" and p == "/api/v1/assistant/conversations":
+                if op and op in self.ops:  # a start asked again: its receipt, never a second conversation
+                    rec = self.ops[op]
+                    if rec["body"] != body:
+                        return 409, {"error": "op id reused with other parameters", "code": "op_id_reused"}
+                    if rec["state"] == "pending":
+                        if self.start_pending > 0:
+                            self.start_pending -= 1
+                            return 202, {"state": "pending"}
+                        rec["state"] = "done"
+                    if rec["state"] == "unknown":
+                        return 202, {"state": "unknown"}
+                    if self.lost_starts > 0:  # the relay loses the answer again
+                        self.lost_starts -= 1
+                        return 502, {"error": "the manager could not reach the hub", "code": self.lost_code}
+                    return rec["status"], rec["answer"]
                 if self.start_fail:
                     return self.start_fail, {"error": "refused"}
                 if self.machine_offline > 0:
@@ -314,10 +333,21 @@ class FakeHubHTTP:
                 self.sessions[sid] = {"machine": mid, "items": [], "reporter": bool((body or {}).get("report_tasks")),
                                       "working": True, "stopped": False}
                 self.add(sid, "user", "text", (body or {}).get("prompt") or "")
+                answer = {"session": {"machine_id": mid, "session_id": sid, "title": ""}}
+                if op:
+                    self.ops[op] = {"body": body, "state": "done", "status": 200, "answer": answer}
+                    if self.start_unknown:
+                        self.start_unknown = False
+                        self.ops[op]["state"] = "unknown"
+                        return 202, {"state": "unknown"}
+                    if self.start_pending > 0:
+                        self.start_pending -= 1
+                        self.ops[op]["state"] = "pending"
+                        return 202, {"state": "pending"}
                 if self.lost_starts > 0:
                     self.lost_starts -= 1
                     return 502, {"error": "the manager could not reach the hub", "code": self.lost_code}
-                return 200, {"session": {"machine_id": mid, "session_id": sid, "title": ""}}
+                return 200, answer
             if method == "POST" and len(parts) == 6 and parts[:3] == ["api", "v1", "assistant"] and parts[5] == "stop":
                 sid = parts[4]
                 if sid in self.stop_status:

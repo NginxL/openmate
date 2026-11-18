@@ -82,7 +82,7 @@ class HubAPI:
         return bool(self.base and self.token)
 
     def request(self, method: str, path: str, body: Optional[dict] = None, query: Optional[Dict[str, Any]] = None,
-                timeout: Optional[float] = None) -> Any:
+                timeout: Optional[float] = None, op_id: str = "") -> Any:
         if not self.available:
             raise HubError(0, "没有 Persona hub 的地址或令牌")
         url = self.base + path
@@ -94,6 +94,8 @@ class HubAPI:
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        if op_id:
+            headers["X-Persona-Op-Id"] = op_id  # one operation however often it is sent (docs: "Operation receipts")
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with self._opener.open(req, timeout=timeout or self.timeout) as resp:
@@ -145,9 +147,12 @@ class HubAPI:
             raise
 
     def start_conversation(self, prompt: str, purpose: str, report_tasks: bool, machine_id: str = "", launcher: str = "",
-                           guest_tools: Optional[List[str]] = None) -> dict:
+                           guest_tools: Optional[List[str]] = None, op_id: str = "") -> dict:
         """A conversation; with guest_tools a guest one (docs/assistant/assistant.md "Guest conversations"): it answers
-        someone else for the user, with none of the assistant's powers but these connector tools."""
+        someone else for the user, with none of the assistant's powers but these connector tools. With op_id the hub
+        starts it once however often it is asked (assistant_start_ops): the same op_id and body get the first answer.
+        HubError code "pending": that start is still under way (ask again); "unknown": nobody can tell whether it
+        started (never ask again on your own)."""
         body: Dict[str, Any] = {"prompt": prompt, "purpose": purpose, "report_tasks": bool(report_tasks)}
         if guest_tools:
             body["guest"] = {"tools": list(guest_tools)}
@@ -155,7 +160,10 @@ class HubAPI:
             body["machine_id"] = machine_id
         if launcher:
             body["launcher"] = launcher
-        out = self.request("POST", "/api/v1/assistant/conversations", body, timeout=120)
+        out = self.request("POST", "/api/v1/assistant/conversations", body, timeout=120, op_id=op_id)
+        state = str((out or {}).get("state") or "") if isinstance(out, dict) else ""
+        if state in ("pending", "unknown") and not (out or {}).get("session"):
+            raise HubError(202, "hub 还在处理这次启动" if state == "pending" else "hub 不确定这次有没有启动", state)
         sess = (out or {}).get("session") or {}
         if not sess.get("session_id"):
             raise HubError(0, "hub 没有给出会话 id")
