@@ -57,6 +57,8 @@ class Platform:
     #: the extensions (X-Persona-Device "extension:<id>") that may read this one's chats for their 今天 through its own
     #: HTTP (todayapi; the manifest needs runtime.http). Empty: no HTTP at all
     today_api_callers: Tuple[str, ...] = ()
+    #: the platform's own read tools: app → {tool name: (schema, run(arguments) → text)} (WeChat's matewechat_media)
+    tools: Optional[Callable[[Any], Dict[str, Any]]] = None
 
 
 @dataclass

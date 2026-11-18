@@ -82,9 +82,14 @@ def _DOCS_TOOL(c: str, p: str) -> dict:  # noqa: N802
 
 
 def _page_tools(app) -> dict:
-    """The read tools the platform's pages add (UI.tools: the StarkMesh quota, say); none from an app without pages."""
+    """The read tools the platform's pages add (UI.tools: the StarkMesh quota, say; none from an app without pages),
+    and the platform's own (Platform.tools: WeChat's matewechat_media)."""
     ui = getattr(app, "_ui", None)
-    return ui().tools() if ui is not None else {}
+    out = dict(ui().tools()) if ui is not None else {}
+    extra = getattr(getattr(app, "platform", None), "tools", None)
+    if extra is not None:
+        out.update(extra(app))
+    return out
 
 
 def write_tools(app) -> List[dict]:
