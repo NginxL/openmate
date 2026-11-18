@@ -64,7 +64,8 @@ class AutoReplyTest(unittest.TestCase):
         self.assertEqual(sent["text"], "接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
         self.assertEqual(sent["reply_to"], msg.id, "quoting their message")
         sec = [s for s in page(h)["sections"] if s.get("title") == "自动代答"][0]
-        self.assertEqual([r["subtitle"] for r in sec["items"] if r["key"] == "auto:" + TEAM], ["开着 · 今天代答 1 次"])
+        subs = [r["subtitle"] for r in sec["items"] if r["key"] == "auto:" + TEAM]
+        self.assertTrue(len(subs) == 1 and subs[0].startswith("开着 · 今天代答 1 次"), subs)  # then when "I" last wrote there
         act(h, "autoreply", {"auto:" + TEAM: "false"})
         self.assertEqual(h.app.store.autoreply_chats(), [])
 

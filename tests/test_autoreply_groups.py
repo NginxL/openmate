@@ -44,7 +44,7 @@ class GroupsTest(unittest.TestCase):
         rows = auto_rows(v)
         self.assertEqual(rows[0]["key"], "auto:" + TEAM, "the marked one first")
         groups = [r for r in rows[1:] if r["key"].startswith("auto:")]
-        self.assertEqual(len(groups), AUTOREPLY_MOST)
+        self.assertEqual(len(groups), AUTOREPLY_MOST - 1, "50 group rows in all, the marked one among them")
         self.assertEqual([r["title"] for r in groups[:3]], ["发过言的群59", "发过言的群58", "发过言的群57"],
                          "the one I wrote in last first")
         self.assertIn("我最近", groups[0]["subtitle"])
@@ -78,6 +78,33 @@ class GroupsTest(unittest.TestCase):
         none = h.hub.request("ui.action", {"contribution": "chats", "action": {"id": "groups:search"}, "values": {"q": "不存在"},
                                            "state": json.dumps({"groups": 1}), "ui_version": 6})["view"]
         self.assertEqual(none["sections"][0]["items"][1]["title"], "没有名字里带“不存在”的群")
+
+    def test_many_marked_still_fifty_rows_the_one_i_wrote_in_last_first(self):
+        h = self.h
+        for i in range(60):
+            h.app.store.autoreply_set("spoke_%02d" % i, True)
+        v = view(h)
+        self.assertEqual(check_view(v), [])
+        rows = auto_rows(v)
+        groups = [r for r in rows if r["key"].startswith("auto:")]
+        self.assertEqual(len(groups), AUTOREPLY_MOST)
+        self.assertEqual([r["title"] for r in groups[:2]], ["发过言的群59", "发过言的群58"], "marked ones by when I wrote")
+        self.assertTrue(all(r["subtitle"].startswith("开着") for r in groups))
+
+    def test_the_services_newer_name_is_found(self):
+        h = self.h
+        renamed = [Chat(id="spoke_05", kind="group", name="改过名的群")]
+        h.app.backend.group_candidates = lambda limit: renamed
+        out = h.hub.request("ui.action", {"contribution": "chats", "action": {"id": "groups:search"}, "values": {"q": "改过名"},
+                                          "state": json.dumps({"groups": 1}), "ui_version": 6})["view"]
+        self.assertEqual([r["title"] for r in auto_rows(out)], ["改过名的群"])
+
+    def test_a_long_query_still_draws(self):
+        out = self.h.hub.request("ui.action", {"contribution": "chats", "action": {"id": "groups:search"},
+                                               "values": {"q": "无" * 2000}, "state": json.dumps({"groups": 1}),
+                                               "ui_version": 6})["view"]
+        self.assertEqual(check_view(out), [])
+        self.assertLessEqual(len(out["sections"][0]["items"][0]["text"]), 120)
 
     def test_thousands_of_groups_still_draw(self):
         many = [Chat(id="many_%04d" % i, kind="group", name="群%04d" % i) for i in range(4000)]

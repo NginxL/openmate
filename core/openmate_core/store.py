@@ -302,7 +302,8 @@ class Store:
     def groups_i_spoke_in(self, limit: int) -> List[dict]:
         """Group chats with the account's own messages, the one it wrote in last first (mine_at: that time)."""
         rows = self._all("SELECT c.*, MAX(m.at) AS mine_at FROM messages m JOIN chats c ON c.id = m.chat_id "
-                         "WHERE m.mine = 1 AND c.kind != 'dm' GROUP BY m.chat_id ORDER BY mine_at DESC, c.id LIMIT ?",
+                         "WHERE m.mine = 1 AND m.type != 'SYSTEM' AND c.kind != 'dm' "
+                         "GROUP BY m.chat_id ORDER BY mine_at DESC, c.id LIMIT ?",
                          (int(limit),))
         out = []
         for r in rows:

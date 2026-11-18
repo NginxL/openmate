@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-wechat",
   "name": "微信（OpenMate）",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",

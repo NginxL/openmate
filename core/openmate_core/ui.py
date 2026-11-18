@@ -497,7 +497,7 @@ class ChatsPage(Page):
     def _adopt_candidate(self, chat_id: str) -> None:
         backend = getattr(self.app, "backend", None)
         try:
-            listed = backend.group_candidates(ADOPT_MOST) if backend is not None else []
+            listed = backend.group_candidates(GROUPS_ALL) if backend is not None else []  # as far as 找群 looks
         except Exception:
             log.exception("the backend's group list could not be read")
             listed = []
@@ -507,33 +507,45 @@ class ChatsPage(Page):
                 return
 
     def _groups(self, q: str = "") -> Tuple[List[dict], set, int]:
-        """The groups for 自动代答, in order: the marked ones, then those the user wrote in (the latest first), then
-        those active this week, then every other one the service lists (the newest joined first); with q, only those
-        whose name holds it. (groups, the marked ids, how many groups there are in all.)"""
+        """The groups for 自动代答, in order: the marked ones (those the user wrote in last first), then those the user
+        wrote in (the latest first), then those active this week, then every other one the service lists (the newest
+        joined first); with q, only those whose name holds it. The service's name wins over a stored older one.
+        (groups, the marked ids, how many groups there are in all.)"""
         app = self.app
         marked = app.store.autoreply_chats()
+        spoke = app.store.groups_i_spoke_in(SPOKE_MOST)
+        mine_at = {c["id"]: c["mine_at"] for c in spoke}
+        listed = self._candidates()  # a group made or joined shows up at the next refresh of the service's list
+        names = {g.id: g.name for g in listed if g.name}
         pool: Dict[str, dict] = {}
 
         def put(c) -> None:
-            if c is not None and c["id"] not in pool and views.chat_kind(c) != "dm":
-                pool[c["id"]] = c
+            if c is None or c["id"] in pool or views.chat_kind(c) == "dm":
+                return
+            c = dict(c)
+            if names.get(c["id"]):
+                c["name"] = names[c["id"]]
+            if c["id"] in mine_at:
+                c["mine_at"] = mine_at[c["id"]]
+            pool[c["id"]] = c
 
         for cid in marked:
             put(app.store.get_chat(cid))
-        for c in app.store.groups_i_spoke_in(SPOKE_MOST):
+        for c in spoke:
             put(c)
-        for c in app.store.chats_since(time.time() - 7 * 86400, 60):
+        for c in app.store.chats_since(time.time() - 7 * 86400, 200):
             put(c)
-        listed = self._candidates()  # a group made or joined shows up at the next refresh of the service's list
         if listed:
             stored = {c["id"]: c for c in app.store.chats_recent(GROUPS_ALL)}  # one read, not one per group
             for g in listed:
                 if g.id not in pool:
-                    # an unnamed group shows a stand-in here only; nothing is stored under it
-                    put(stored.get(g.id) or {"id": g.id, "name": g.name or "未命名的群（%s）" % g.id.split("@", 1)[0][-4:],
-                                             "kind": "group"})
+                    put(stored.get(g.id) or {"id": g.id, "name": g.name, "kind": "group"})
+        for c in pool.values():
+            if not c.get("name"):  # an unnamed group shows a stand-in here only; nothing is stored under it
+                c["name"] = "未命名的群（%s）" % c["id"].split("@", 1)[0][-4:]
         total = len(pool)
-        groups = list(pool.values())
+        on = sorted((c for c in pool.values() if c["id"] in set(marked)), key=lambda c: -float(c.get("mine_at") or 0))
+        groups = on + [c for c in pool.values() if c["id"] not in set(marked)]
         if q:
             needle = q.casefold()
             groups = [c for c in groups if needle in views.chat_name(c, c["id"]).casefold() or c["id"] == q]
@@ -570,7 +582,7 @@ class ChatsPage(Page):
         groups, marked, total = self._groups()
         if not groups:
             return None
-        shown = [c for c in groups if c["id"] in marked] + [c for c in groups if c["id"] not in marked][:AUTOREPLY_MOST]
+        shown = groups[:AUTOREPLY_MOST]  # the marked ones first: 50 rows in all (a page holds 300 items)
         rows = self._switch_rows(shown, marked, version)
         if total > len(shown):
             title = "找群：搜索全部 %d 个群" % total
@@ -597,13 +609,13 @@ class ChatsPage(Page):
         if q:
             shown = groups[:SEARCH_MOST]
             more = len(groups) - len(shown)
-            head = "“%s”：%d 个群" % (q, len(groups)) + ("，先列出 %d 个，换个更具体的词试试" % len(shown) if more else "")
+            head = "“%s”：%d 个群" % (one_line(q, 40), len(groups)) + ("，先列出 %d 个，换个更具体的词试试" % len(shown) if more else "")
         else:
-            shown = [c for c in groups if c["id"] in marked] + [c for c in groups if c["id"] not in marked][:AUTOREPLY_MOST]
+            shown = groups[:AUTOREPLY_MOST]
             head = "共 %d 个群；没搜的时候列出开着的和你最近发过言的" % total
         rows = self._switch_rows(shown, marked, version)
         view["sections"] = [{"title": "自动代答", "items": [{"type": "text", "style": "caption", "text": head}]
-                             + (rows or [empty("没有名字里带“%s”的群" % q if q else "还没有可以选的群", "", version)]),
+                             + (rows or [empty("没有名字里带“%s”的群" % one_line(q, 40) if q else "还没有可以选的群", "", version)]),
                              "footer": self._autoreply_footer()}]
         return view
 
