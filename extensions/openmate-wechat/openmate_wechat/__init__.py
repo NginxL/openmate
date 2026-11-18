@@ -21,10 +21,10 @@ EXTENSION_ID = "openmate-wechat"
 CONNECTOR_ID = "matewechat"
 CHATS_PAGE = "wechat-chats"
 CHATS_CARD = "wechat-chats-today"
-# One of WeChat's real @s: "@name" ended by U+2005. A name may hold "@" only inside an address-like word (Alice@Acme);
-# any other "@" in it is a typed "@x …" before the real one, and then nothing is taken off.
+# One of WeChat's real @s: "@name" ended by U+2005. A name with an "@" in it cannot be told from a typed "@x …" before a
+# real @, so it is never taken off: a missed /agent is safe, a sentence turned into a command is not.
 AT_ONE = re.compile("^\\s*@([^\u2005\\n]{1,1024}?)\u2005")
-TYPED_AT = re.compile("(?<![A-Za-z0-9._-])@")  # an "@" not inside an address-like name (Alice@Acme) is a typed one
+TYPED_AT = re.compile("@")  # any "@" inside means a typed "@x …" came first: then nothing is taken off
 
 
 def mark_view(text: str) -> str:

@@ -132,7 +132,8 @@ def model_label(model: str) -> str:
     return out + (" 1M" if one_m else "")
 
 
-_BUILTIN_MARK = re.compile("^(?:%s)(?:$|\\s|·|，|,)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
+# a built-in mark as we render it: alone, or before " · model" ("🤖 AI 回复 API 有延迟吗？" is a question)
+_BUILTIN_MARK = re.compile("^(?:%s)(?:$|\\s*·)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
 _GENERIC_MARK = re.compile("^%s(?:$|\\s*·|\\s*[：:])" % re.escape(AI_MARKS[2]))  # another AI's "🤖 AI · …" / "🤖 AI：…"
 
 
@@ -322,15 +323,20 @@ class AgentRunner:
         """WeChat: a line that is an AI mark (a built-in one as a word: "🤖 AI 代答功能…" is text; or a whole
         configured header)."""
         line = line.lstrip("> ").strip()
-        return bool(_BUILTIN_MARK.match(line)) or any(p.fullmatch(line) for p in self._header_patterns())
+        return bool(_BUILTIN_MARK.match(line)) or line == KNOWN_SUFFIXES[0] \
+            or any(p.fullmatch(line) for p in self._header_patterns())
 
     def is_agent_text(self, text: str) -> bool:
         t = (text or "").rstrip()
-        for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
-            if s and t.endswith(s):
-                return True
-        if getattr(self.app.platform, "mark_view", None) is None:
-            return ai_marked(t, self._header_marks())  # Feishu: as it always read
+        if getattr(self.app.platform, "mark_view", None) is None:  # Feishu: as it always read
+            for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
+                if s and t.endswith(s):
+                    return True
+            return ai_marked(t, self._header_marks())
+        # WeChat: an end mark only as a whole last line ("…这个机器人 🤖" is a request)
+        last_line = t.rsplit("\n", 1)[-1].lstrip("> ").strip()
+        if last_line in {x.lstrip("> ").strip() for x in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES if x}:
+            return True
         # WeChat: after the real @s, a built-in mark or a whole configured header on the first or last line
         first, last = mark_lines(self._mark_view(t))
         return self._is_mark_line(first) or self._is_mark_line(last)
@@ -557,14 +563,20 @@ class AgentRunner:
         if not self.ack or backend is None or run.get("kind") == "doc" or not self.store.seen_add("ack:%s" % run["id"]):
             return  # a document's comment has no chat message to react on
         try:
-            backend.react(run["chat_id"], run["request_id"], self.ack)
+            mid = backend.react(run["chat_id"], run["request_id"], self.ack)
         except Exception as e:
             log.info("the /agent request's reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
             return
+        sent = mid if isinstance(mid, str) and mid else ""  # a service without reactions sent a message (WeChat)
+        if sent:
+            self.app.record_sent(run["chat_id"], self.ack, sent, reply_to=run["request_id"], setting="agent",
+                                 summary="/agent 接单提示")
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur is not None:
                 cur["acked"] = self.ack
+                if sent:
+                    cur["ack_id"] = sent  # a /stop that quotes it finds the run
                 self.store.run_put(cur)
 
     def _end_reaction(self, run_id: str, outcome: str) -> None:
@@ -591,7 +603,8 @@ class AgentRunner:
                 log.info("the /agent request's end reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
 
     def _start_run(self, run: dict, row: dict) -> None:
-        self._ack_request(run)
+        if run.get("kind") not in GUEST_KINDS or self._guest_supported():  # never "处理中" for what cannot start
+            self._ack_request(run)
         try:
             self._start(run, row)
         except Exception:
@@ -1104,24 +1117,35 @@ class AgentRunner:
         run["model"], run["effort"] = model, effort
         return model, effort
 
-    def with_suffix(self, text: str, run: Optional[dict] = None) -> str:
-        """The message as it goes out: the AI mark line (the model and effort that answered) after the answer, or on
-        top with agent_mark_position "top"; the end mark if one is set. A mark the Agent wrote itself is not doubled."""
+    def _clean_answer(self, text: str, run: Optional[dict]) -> str:
+        """The Agent's answer without a mark it wrote itself (so marks are never doubled)."""
         t = (text or "").strip()
-        for s in {self.suffix.strip(), DEFAULT_SUFFIX, KNOWN_SUFFIXES[0]}:
-            while s and t.endswith(s):
-                t = t[: -len(s)].rstrip()
-                if t.endswith(">"):
-                    t = t[:-1].rstrip()
         if getattr(self.app.platform, "mark_view", None) is None:  # Feishu: as it always cleaned
+            for s in {self.suffix.strip(), DEFAULT_SUFFIX, KNOWN_SUFFIXES[0]}:
+                while s and t.endswith(s):
+                    t = t[: -len(s)].rstrip()
+                    if t.endswith(">"):
+                        t = t[:-1].rstrip()
             marks = self._header_marks()
             is_mark = lambda line: any(line.lstrip("> ").strip().startswith(m) for m in marks)  # noqa: E731
-        else:  # WeChat: only a line that is a mark as we render it (or the old end mark) goes; answers stay whole
-            is_mark = self._is_own_mark_line
+        else:  # WeChat: only a whole line equal to this run's own rendered mark or an old end mark goes
+            header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
+            model, effort = self._model_of(run, header) if (run and header) else ("", "")
+            own = {fill_header(h, model, effort).lstrip("> ").strip() for h in (self.header, self.auto_header) if h}
+            own |= {DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]}
+            if self.suffix.strip():
+                own.add(self.suffix.strip().lstrip("> ").strip())
+            is_mark = lambda line: line.lstrip("> ").strip() in own  # noqa: E731
         while t and is_mark(t.split("\n", 1)[0]):
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
         while t and is_mark(t.rsplit("\n", 1)[-1]):
             t = t.rsplit("\n", 1)[0].rstrip() if "\n" in t else ""
+        return t
+
+    def with_suffix(self, text: str, run: Optional[dict] = None) -> str:
+        """The message as it goes out: the AI mark line (the model and effort that answered) after the answer, or on
+        top with agent_mark_position "top"; the end mark if one is set. A mark the Agent wrote itself is not doubled."""
+        t = self._clean_answer(text, run)
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
         if header:
             line = fill_header(header, *self._model_of(run, header))
@@ -1195,6 +1219,8 @@ class AgentRunner:
             raise RPCError("这个 /agent 请求已经过期了")
         if not text.strip():
             raise RPCError("回复内容是空的")
+        if not progress and not self._clean_answer(text, run).strip():
+            raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message
             if not self._can_edit():  # every update would be one more message in the chat, as the user
                 return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
@@ -1332,7 +1358,7 @@ class AgentRunner:
         parent = row.get("parent_id") or ""
         if parent:
             for r in self.store.runs_in_chat(chat_id):
-                if r["request_id"] == parent or parent in (r.get("reply_ids") or []):
+                if r["request_id"] == parent or parent in (r.get("reply_ids") or []) or parent == r.get("ack_id"):
                     return r
         root = row.get("root_id") or ""
         if root:

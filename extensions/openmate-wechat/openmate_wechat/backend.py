@@ -250,6 +250,7 @@ class WeChatBackend(Backend):
         self._gen = 0
         self._groups_mu = threading.Lock()
         self._groups_busy = False
+        self._closed = False
         self._groups_full_at = 0.0  # the last time the contacts' group list was read (this run)
         self._ready_for: Optional[Native] = None  # the program that has the sign-in (restored or just signed in)
 
@@ -318,6 +319,7 @@ class WeChatBackend(Backend):
         return ok
 
     def close(self) -> None:
+        self._closed = True
         n = self._native
         if n is not None:
             n.close()
@@ -605,7 +607,7 @@ class WeChatBackend(Backend):
         """In the background, one at a time: read the contacts' groups (full, at most once a minute), then the names
         of the groups that have none yet."""
         with self._groups_mu:
-            if self._groups_busy:
+            if self._groups_busy or self._closed:
                 return
             if full and time.time() - self._groups_full_at < GROUPS_SPACING:
                 full = False
@@ -639,12 +641,17 @@ class WeChatBackend(Backend):
 
     # ---------------------------------------------------------------- writes
 
-    def react(self, chat_id: str, message_id: str, reaction: str) -> None:
-        """The request was taken: the ack line, quoting the request, as the account (no @: the answer will @ them).
-        Only the configured line goes out; any other "reaction" (a Feishu code such as DONE) is not a WeChat thing."""
+    def react(self, chat_id: str, message_id: str, reaction: str) -> Optional[str]:
+        """The request was taken: the ack line, quoting the request, as the account (no @: the answer will @ them);
+        its message id. Only the configured line, once per request; any other "reaction" (a Feishu code such as DONE,
+        or a done reaction set to the same words) is not a WeChat message."""
         if not self.ack_text or reaction.strip() != self.ack_text:
-            return
-        self.send(chat_id, self.ack_text, reply_to=message_id, mention=False)
+            return None
+        key = "acked:%s:%s" % (chat_id, message_id)
+        if self.store.get(key):
+            return None
+        self.store.put(key, "1")
+        return self.send(chat_id, self.ack_text, reply_to=message_id, mention=False)
 
     def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
         """Nothing to take back: the ack line stays (a recall works only for 2 minutes and leaves a notice)."""
@@ -663,9 +670,10 @@ class WeChatBackend(Backend):
             sender = str(ev.get("sender") or "")
             mine = bool(ev.get("mine")) or sender == self.me
             name = ""
-            if mention and is_group(chat_id) and sender and not mine:  # answering someone in a group: @ them
-                name = self._mention_name(sender, chat_id)
-                params["mentions"] = [{"id": sender, "name": name}]
+            if is_group(chat_id) and sender and not mine:
+                name = self._mention_name(sender, chat_id)  # their group nickname, shown in the quote too
+                if mention:  # answering someone in a group: @ them for real
+                    params["mentions"] = [{"id": sender, "name": name}]
             if ev.get("quotable"):  # a text message: quoted (anything else gets the plain answer)
                 params["quote"] = {"server_id": str(ev.get("id")), "sender": sender, "outgoing": mine,
                                    "display_name": name or (self.me_name if mine else sender),

@@ -309,11 +309,13 @@ class AckTest(Base):
         b.ack_text = "🤖 贾维斯处理中..."
         b.restore({"state": {"k": "v1"}})
         b.store.add_message(msg("a1", "1@chatroom", "wxid_bob", "@我 帮我看看", at_me=True))
-        b.react("1@chatroom", "a1", "🤖 贾维斯处理中...")
+        self.assertTrue(b.react("1@chatroom", "a1", "🤖 贾维斯处理中...").startswith("srv_"), "its message id")
         r = self.requests("send")[-1]
         self.assertEqual((r["chat"], r["text"], r["quote"]["server_id"]), ("1@chatroom", "🤖 贾维斯处理中...", "a1"))
         self.assertNotIn("mentions", r, "the answer @s them, the ack does not")
+        self.assertEqual(r["quote"]["display_name"], "群里的鲍勃", "the quote shows the group nickname")
         n = len(self.requests("send"))
+        self.assertIsNone(b.react("1@chatroom", "a1", "🤖 贾维斯处理中..."), "once per request")
         b.react("1@chatroom", "a1", "DONE")  # a Feishu code: not a WeChat message
         b.unreact("1@chatroom", "a1", "🤖 贾维斯处理中...")  # nothing to take back
         self.assertEqual(len(self.requests("send")), n)
@@ -397,7 +399,9 @@ class NamesTest(Base):
         self.assertEqual(v("@鲍勃 你好"), "@鲍勃 你好", "a typed @ is not a real one")
         self.assertEqual(v("@运营 例子 @Bob Smith\u2005/agent x"), "@运营 例子 @Bob Smith\u2005/agent x",
                          "never past a typed @")
-        self.assertEqual(v("@Alice@Acme Chen\u2005/agent 整理"), "/agent 整理", "a name may hold @")
+        self.assertEqual(v("@Alice@Acme Chen\u2005/agent 整理"), "@Alice@Acme Chen\u2005/agent 整理",
+                         "a name with @ cannot be told from a typed @: kept (a missed /agent is safe)")
+        self.assertEqual(v("@运营 请群里负责 API@张三\u2005/agent 写周报"), "@运营 请群里负责 API@张三\u2005/agent 写周报")
         self.assertEqual(v("@运营 举例：@张三\u2005/agent 写周报"), "@运营 举例：@张三\u2005/agent 写周报")
 
     def test_proxy_variables_never_reach_the_program(self):

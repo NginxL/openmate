@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 
-from harness import ROOT, Harness, wait_until
+from harness import ROOT, Harness, wait_until  # noqa: F401
 from test_agent import ask, run_of, running
 
 sys.path.insert(0, os.path.join(ROOT, "extensions", "openmate-wechat"))
@@ -232,6 +232,38 @@ class MarksAndMentionsTest(unittest.TestCase):
         h.tool("agent_reply", request=run["id"], text="【前提】下面只指测试环境。\n可以发布。")
         sent = h.sent()[-1]["text"]
         self.assertTrue(sent.startswith("【前提】下面只指测试环境。\n可以发布。"), sent)
+
+
+class RoundNineTest(unittest.TestCase):
+    def test_questions_that_look_like_marks_are_requests(self):
+        h = wechat(self)
+        h.app.store.autoreply_set(TEAM, True)
+        m = h.world.push(TEAM, "user_example_b", "@示例用户\u2005🤖 AI 回复 API 有延迟吗？", at_me=True)
+        self.assertEqual(running(h, m)["kind"], "auto")
+        a = ask(h, "/agent 帮我找一下这个机器人 🤖")
+        self.assertEqual(running(h, a)["request_text"], "帮我找一下这个机器人 🤖")
+        b = ask(h, "/agent 帮我润色这条文案\n🤖 AI 代答，让客户少等一分钟。")
+        running(h, b)
+
+    def test_an_answer_line_like_a_mark_is_kept_and_a_mark_only_answer_is_refused(self):
+        h = wechat(self)
+        msg = ask(h, "/agent 状态")
+        run = running(h, msg)
+        with self.assertRaises(Exception) as c:
+            h.tool("agent_reply", request=run["id"], text="> 🤖 AI 代答，仅供参考")
+        self.assertIn("只有 AI 标记", str(c.exception))
+        h.tool("agent_reply", request=run["id"], text="🤖 AI 回复 · API 仍不可用。")
+        self.assertTrue(h.sent()[-1]["text"].startswith("🤖 AI 回复 · API 仍不可用。"), "the refused try took no reply")
+
+    def test_the_ack_is_recorded_and_a_stop_quoting_it_stops_the_run(self):
+        h = wechat(self, agent_ack_reaction="🤖 贾维斯处理中...")
+        h.app.backend.react = lambda chat, mid, reaction: "ack_1"
+        msg = ask(h, "/agent 长任务")
+        run = running(h, msg)
+        wait_until(lambda: h.app.store.run_get(run["id"]).get("ack_id") == "ack_1", what="ack id")
+        wait_until(lambda: any(r.get("text") == "🤖 贾维斯处理中..." for r in h.hub.sent_records), what="recorded")
+        ask(h, "/stop", parent_id="ack_1")
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "stopped", what="stopped")
 
 
 class GroupCandidatesTest(unittest.TestCase):
