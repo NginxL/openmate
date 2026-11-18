@@ -215,6 +215,7 @@ class Fetcher:
         self._closed = False
         self._finished = threading.Condition(threading.Lock())
         self._epoch = 0  # an account's fetches: another account signed in drops them (reset)
+        self._recalled: set = set()  # messages recalled: their media is never fetched or served again
         self._room_at = 0.0
         self._clean_mu = threading.Lock()  # one clean-up at a time (by age, by room): measured and done together
         os.makedirs(root, exist_ok=True)
@@ -274,7 +275,7 @@ class Fetcher:
             return
         # read, mark pending and queue in one go: a clean-up in between cannot turn a queued request into "gone"
         with self._cv:
-            if self._closed or mid in self._busy or any(q[0] == mid for q in self._queue):
+            if self._closed or mid in self._recalled or mid in self._busy or any(q[0] == mid for q in self._queue):
                 return
             st = self.state(mid)
             if st is not None and not force and st["state"] in ("done", "failed", "gone"):
@@ -308,6 +309,16 @@ class Fetcher:
             self._queue.clear()
             self._cv.notify_all()
 
+    def forget(self, mid: str) -> None:
+        """A message recalled: its media is not served any more. A queued fetch is dropped, one running now keeps
+        nothing, the copies and the record go."""
+        with self._cv:
+            self._recalled.add(mid)
+            self._queue[:] = [q for q in self._queue if q[0] != mid]
+            st = self.state(mid)
+            self._db("DELETE FROM media WHERE id=?", (mid,), False)
+        self._remove(mid, (st or {}).get("files"))
+
     def reset(self) -> None:
         """Another account signed in: its queued fetches are dropped, and one running now keeps nothing."""
         with self._cv:
@@ -335,7 +346,7 @@ class Fetcher:
                 files, note = self.fetch(mid, media)
                 # the check and the write under one lock: reset() (before the wipe of another account) waits for it
                 with self._cv:
-                    stale = epoch != self._epoch
+                    stale = epoch != self._epoch or mid in self._recalled
                     if not stale:
                         # what this fetch got, over what is still on disk from before (a cover fetched again while
                         # the video failed keeps the video)
@@ -467,7 +478,8 @@ class Fetcher:
                 why = reason(e)
         if not ok and m.get("length"):
             try:
-                self._call("voice", 120, server_id=mid, length=int(m["length"]), path=out)
+                extra = {"ref": str(m["ref"])} if m.get("ref") else {}  # AgentWechat's message id (hub.py)
+                self._call("voice", 120, server_id=mid, length=int(m["length"]), path=out, **extra)
                 ok = True
             except Exception as e:  # noqa: BLE001
                 why = reason(e)

@@ -35,6 +35,25 @@ class CommitFailureTest(unittest.TestCase):
         self.assertEqual(st.meta_get("k"), "v2")
 
 
+class RecallClearsMediaTest(unittest.TestCase):
+    def test_a_message_renewed_as_a_notice_offers_no_media(self):
+        from openmate_core.backend import Media
+
+        d = tempfile.mkdtemp(prefix="openmate-recall-")
+        self.addCleanup(shutil.rmtree, d, True)
+        st = Store(os.path.join(d, "t.db"))
+        self.addCleanup(st.close)
+        pic = Message(id="m1", chat_id="c1", position=1, sender_id="u", type="IMAGE", text="[图片]", at=1.0,
+                      media=[Media(kind="image", ref="wx:m1")])
+        st.add_messages([pic], from_history=False)
+        self.assertEqual(len(st.message("c1", "m1")["media"]), 1)
+        recalled = Message(id="m1", chat_id="c1", position=1, sender_id="u", type="SYSTEM",
+                           text="[撤回了一条消息]", at=1.0)
+        st.add_messages([recalled], from_history=True)
+        row = st.message("c1", "m1")
+        self.assertEqual((row["type"], row["text"], row["media"]), ("SYSTEM", "[撤回了一条消息]", []))
+
+
 class ChangedTest(unittest.TestCase):
     def test_at_most_one_per_interval_and_none_lost(self):
         got = []

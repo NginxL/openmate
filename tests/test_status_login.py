@@ -173,6 +173,54 @@ class LoginTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
+class DirectLoginTest(unittest.TestCase):
+    """An adapter signed in where it connects (WeChat through AgentWechat): 登录 needs no QR."""
+
+    def harness(self, fail: str = ""):
+        from openmate_core.backend import LoginDone
+        from openmate_core.fixture import FixtureBackend, FixtureWorld
+
+        calls = []
+
+        class Direct(FixtureBackend):
+            def login_direct(self):
+                calls.append(1)
+                if fail:
+                    raise BackendError(fail, "unreachable")
+                self.signed_in = self.world.me
+                return LoginDone(credentials={"fixture_token": "direct", "user": self.world.me.id},
+                                 account=self.world.me)
+
+        world = FixtureWorld()
+        return calls, Harness(self, world=world, backend_factory=lambda cfg, d: Direct(world))
+
+    def test_done_at_once_and_sealed(self):
+        calls, h = self.harness()
+        done = h.c("login.step", step="", values={})
+        self.assertEqual(done, {"done": True, "account": "示例用户"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(secret_json(h.hub.secrets[CID])["fixture_token"], "direct")
+        h.wait_ok()
+        # signed out, then in again: once more without a QR
+        self.assertEqual(h.c("logout"), {})
+        self.assertEqual(h.status()["state"], "not_signed_in")
+        self.assertTrue(h.c("login.step", step="")["done"])
+        self.assertEqual(len(calls), 2)
+        h.wait_ok()
+
+    def test_a_reason_it_cannot_is_shown(self):
+        calls, h = self.harness(fail="AgentWechat 里的微信还没登录")
+        with self.assertRaises(HubSideError) as e:
+            h.c("login.step", step="")
+        self.assertIn("AgentWechat 里的微信还没登录", e.exception.message)
+        self.assertNotIn(CID, h.hub.secrets)
+        self.assertEqual(h.status()["state"], "not_signed_in")
+
+    def test_a_qr_backend_still_gets_its_qr(self):
+        h = Harness(self)
+        self.assertEqual(h.c("login.step", step="")["kind"], "qr")
+
+
 class CatchUpTest(unittest.TestCase):
     def test_initial_history_once_bounded_by_history_chats(self):
         h = Harness(self, config={"history_chats": 2})
