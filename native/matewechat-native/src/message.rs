@@ -134,7 +134,7 @@ fn app_message(content: &str) -> (&'static str, String, String, String, String) 
 }
 
 /// A read the account made on another device (the phone): WeChat syncs it as the account's own type-51 control
-/// `<msg><op id="1|2|5"><username>chat</username>…</op></msg>` (1 read up to a message, 2 opened, 5 left the chat; the
+/// `<msg><op id="1|2|5"><username>chat</username><name>lastMessage</name><arg>…</arg></op></msg>` (1 read up to a message, 2 opened, 5 left the chat; the
 /// shapes agent-wechat's daemon reads). The chat and when; None for anything else.
 pub fn read_control(raw: &Raw, own: &str) -> Option<(String, u32)> {
     if raw.message_type != 51 || !raw.outgoing || own.is_empty() || raw.from != own || raw.created_at == 0 {
@@ -156,6 +156,9 @@ pub fn read_control(raw: &Raw, own: &str) -> Option<(String, u32)> {
     let op = ops[0];
     if !matches!(op.attribute("id"), Some("1") | Some("2") | Some("5")) {
         return None;
+    }
+    if xml_text(op, &["name"]).as_deref() != Some("lastMessage") || xml_text(op, &["arg"]).is_none() {
+        return None; // the read controls name the last message read, as the daemon requires
     }
     let chat = xml_text(op, &["username"])?;
     // the control is the account's own message to that very chat: one naming another chat is not taken
@@ -380,6 +383,8 @@ mod tests {
         assert_eq!(read_control(&elsewhere, "wxid_me"), None, "the outer chat must be the one it names");
         let other = Raw { from: "wxid_bob", outgoing: false, ..r };
         assert_eq!(read_control(&other, "wxid_me"), None);
+        let unnamed = Raw { content: "<msg><op id='2'><username>1@chatroom</username></op></msg>", ..r };
+        assert_eq!(read_control(&unnamed, "wxid_me"), None, "only the lastMessage controls");
         let op9 = Raw { content: "<msg><op id='9'><username>x</username></op></msg>", ..r };
         assert_eq!(read_control(&op9, "wxid_me"), None);
     }

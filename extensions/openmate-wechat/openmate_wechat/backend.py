@@ -72,7 +72,7 @@ SCHEMA = (
 )
 
 
-GROUP_SQL = "(id LIKE '%@chatroom%' OR id LIKE '%@im.chatroom' OR id LIKE '%@qy_g')"
+GROUP_SQL = "(id GLOB '*@chatroom*' OR id GLOB '*@im.chatroom' OR id GLOB '*@qy_g')"  # literal, as is_group
 
 
 def is_group(chat_id: str) -> bool:
@@ -95,7 +95,7 @@ def kind_of(user_id: str) -> str:
         return "bot"
     if is_group(user_id):
         return ""
-    if user_id.endswith("@openim"):  # a WeCom member in a WeChat group: a person's work account
+    if user_id.endswith(("@openim", "@qy_u")):  # a WeCom member / account: a person's work account
         return "user"
     return "user" if PERSON_ID.match(user_id) else ""
 
@@ -234,9 +234,8 @@ class Store:
 
     def unclassified_people(self, known: set, limit: int) -> List[str]:
         """Direct chats with no kind learnt yet (kept from before kinds were read): to look up in the background."""
-        with self._mu:
-            rows = self._db.execute("SELECT id FROM chats WHERE NOT (" + GROUP_SQL + ") ORDER BY last_at DESC LIMIT ?",
-                                    (limit * 4,)).fetchall()
+        with self._mu:  # every direct chat (a person's account has some thousands at most): none is left behind
+            rows = self._db.execute("SELECT id FROM chats WHERE NOT (" + GROUP_SQL + ") ORDER BY last_at DESC").fetchall()
         return [r[0] for r in rows if r[0] not in known and kind_of(r[0]) == "user"][:limit]
 
     def last_incoming(self, chat: str) -> int:
@@ -765,8 +764,8 @@ class WeChatBackend(Backend):
                     if self._closed or self.me != me:
                         return
                     pair = todo[i:i + 2]
-                    self._kind_tried.update(pair)
-                    self._lookup_names(pair)
+                    if self._lookup_names(pair):  # WeChat answered: asked; a failed request is tried next round
+                        self._kind_tried.update(pair)
                     time.sleep(GROUP_NAME_PAUSE)
             except BackendError as e:
                 log.info("WeChat groups were not read now: %s", e.message)
@@ -855,7 +854,8 @@ class WeChatBackend(Backend):
         ev = {"event": "message", "origin": "local_send", "id": mid, "chat": chat_id, "group": is_group(chat_id),
               "sender": self.me, "mine": True, "type": "TEXT", "text": shown, "at": sent_at or int(time.time()),
               "parent": str((params.get("quote") or {}).get("server_id") or ""),
-              "quotable": True, "content": shown, "msgsource": ""}
+              # plain text can be quoted as such; a quote reply went out as WeChat's quote message, not as text
+              "quotable": not params.get("quote"), "content": shown, "msgsource": ""}
         new, pos = self.store.add_message(ev)
         if new and self.on_history is not None:
             msg = self._message(ev, pos)
