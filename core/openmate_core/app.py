@@ -33,6 +33,7 @@ from .wire import Peer, RPCError
 log = logging.getLogger("openmate")
 
 EMPTY_PAGES = 6  # a re-read of the messages stored with no text: at most this many pages per chat
+PENDING_CHATS = 10  # at every catch-up, the chats with a message of the last day still empty or held, read again
 
 PROTOCOL = 1
 THREAD_MOST = 50
@@ -253,6 +254,8 @@ class ConnectorApp:
             self.changed = Changed(self._emit_changed, self.timing.debounce)
             try:
                 self.backend = self._make_backend(self.config, self.data_dir)
+                if getattr(self.backend, "pending_text", ""):
+                    self.store.pending_text = self.backend.pending_text
                 self.backend.on_credentials = self._credentials_rotated
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_history = self._history_from_backend
@@ -868,7 +871,7 @@ class ConnectorApp:
                             self.ingest(got, live=False)
                 empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
                 again = False
-                if empty:
+                if empty:  # a new reading: every one of the window
                     # messages stored with no text (an older reading, also from a first sync cut short): read again
                     # where they are, from right after the newest back to the oldest (bounded); a chat that cannot be
                     # read is passed over, and the whole re-read is tried again next time only for a network failure
@@ -895,6 +898,9 @@ class ConnectorApp:
                             again = again or e.kind in ("unreachable", "unknown", "proxy")
                 if not again:
                     self.store.meta_set("render_version", version)
+            elif tuple(getattr(self.backend, "rerender_empty", ()) or ()):
+                # the same reading: the ones of the last day still empty or held for review, read again (bounded)
+                self._read_blank_again(gen, time.time() - 86400.0, PENDING_CHATS, 2)
             self.last_sync = time.time()
             self.mark_changed("inbox", "chats")
             self._ask_done()
@@ -903,6 +909,31 @@ class ConnectorApp:
         except Exception:
             if not self.closing.is_set():
                 log.exception("history catch-up failed")
+
+    def _read_blank_again(self, gen: int, since: float, chats: int, pages: int) -> None:
+        """Read the messages stored with no text (or held for review) since then where they are, a few pages per chat;
+        a chat that cannot be read is passed over."""
+        t = self.timing
+        empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
+        for chat_id, (lo, hi, _) in self.store.empty_positions(empty, since, chats).items():
+            before = hi + 1
+            try:
+                for _ in range(pages):
+                    if gen != self._gen or self.link != "up":
+                        return
+                    got = self.backend.history(chat_id, before, t.rerender_messages)
+                    if gen != self._gen:
+                        return
+                    self.ingest(got, live=False)
+                    if not got:
+                        break
+                    before = min(m.position for m in got)
+                    if before <= lo:
+                        break
+            except CredentialsExpired:
+                raise
+            except BackendError as e:
+                log.info("reading again the messages held or empty: a chat could not be read (%s)", e.kind)
 
     def _caught_up_since(self) -> float:
         """Messages of a chat new to the store are kept from here: the last whole catch-up (less a margin), else the

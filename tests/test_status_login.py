@@ -273,6 +273,27 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(store.message("chat_example_chatter", old.id)["text"], "示例文章 https://example.com/a")
         self.assertEqual(store.meta_get("render_version"), "9")
 
+    def test_a_held_text_is_read_again_at_a_catch_up_and_archived_once_it_reads(self):
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        store, backend = h.app.store, h.app.backend
+        backend.pending_text = store.pending_text = "[审核中]"
+        backend.rerender_empty = ("TEXT",)
+        backend.render_version = store.meta_get("render_version") or ""
+        if not backend.render_version:
+            backend.render_version = "1"
+            store.meta_set("render_version", "1")
+        held = h.world.make("chat_example_team", "user_example_a", "[审核中]", ago=600)
+        store.add_messages([held], True)
+        cursor = max(r["seq"] for r in store.archive_rows(0, 100000))
+        held.text = "审核通过的正文"  # the service lets it through
+        h.app._catchup_done.clear()
+        h.app._request_catch_up(h.app._gen)
+        wait_until(lambda: h.app._catchup_done.is_set(), what="a catch-up")
+        self.assertEqual(store.message("chat_example_team", held.id)["text"], "审核通过的正文")
+        self.assertEqual([r["text"] for r in store.archive_rows(cursor, 100) if r["id"] == held.id], ["审核通过的正文"])
+
     def test_a_text_that_comes_back_reaches_the_archive_again(self):
         h = Harness(self)
         h.sign_in()

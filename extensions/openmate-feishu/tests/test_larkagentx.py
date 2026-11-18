@@ -644,8 +644,8 @@ class ReadTest(Base):
         with self.assertLogs("openmate.larkx", level="INFO") as logs:
             msgs = self.b.history("660", None, 10)
         self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT, "blocked: said so, never worked around")
-        self.assertEqual(msgs[1].text, "", "under review: left empty, read again later")
-        self.assertTrue(getattr(msgs[1], "review", False))
+        self.assertEqual(msgs[1].text, larkagentx.PENDING_TEXT, "under review: said so, read again by the core")
+        self.assertEqual(self.b.pending_text, larkagentx.PENDING_TEXT)
         self.assertTrue(any('"dlpReviewState": 3' in line for line in logs.output), logs.output)
 
     def test_a_held_text_is_not_shown_through_its_preview(self):
@@ -658,30 +658,7 @@ class ReadTest(Base):
             "2": {"id": "672", "contentState": {"dlpReviewState": 1}, "urlPreviewHangPointMap": hang}}}
         msgs = self.b.history("670", None, 10)
         self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT)
-        self.assertEqual(msgs[1].text, "")
-        self.assertTrue(getattr(msgs[1], "review", False), "still read again later")
-
-    def test_a_re_read_is_one_per_message_and_ends_with_the_account(self):
-        got = []
-        self.b.on_history = got.append
-        gate = threading.Event()
-        real = self.b.history
-
-        def slow(chat_id, before=None, limit=50):
-            gate.wait(2)
-            return [larkagentx.Message(id="681", chat_id="680", position=1, sender_id="7002", text="审核过了")]
-
-        self.b.history = slow
-        msg = larkagentx.Message(id="681", chat_id="680", position=1, sender_id="7002", type="TEXT", text="")
-        for _ in range(5):
-            self.b._refill_later(msg)  # the same message pushed again and again
-        self.assertEqual(len(self.b._refilling), 1, "one re-read")
-        self.b.logout()  # signed out before the answer came
-        gate.set()
-        time.sleep(0.3)
-        self.b.history = real
-        self.assertEqual(got, [], "nothing handed over for an account signed out")
-        self.assertEqual(self.b._refilling, set())
+        self.assertEqual(msgs[1].text, larkagentx.PENDING_TEXT, "not its preview link either")
 
     def test_a_text_read_as_nothing_is_noted(self):
         empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}

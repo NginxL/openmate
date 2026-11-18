@@ -58,7 +58,7 @@ MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 RENDER_VERSION = "8"  # 7: a text whose content is empty takes the links of its preview hang points; 8: DLP marks
 DLP_IN_PROGRESS, DLP_BLOCK = (1, "IN_PROGRESS"), (3, "BLOCK")  # Message.ContentState.dlpReviewState
 DLP_BLOCKED_TEXT = "[飞书的安全策略拦下了这条消息，内容看不到]"
-REFILL_AFTER = (600.0, 3000.0, 18000.0)  # a text held for review: read again 10 min, 1 h and 6 h after it came
+PENDING_TEXT = "[飞书正在安全审核这条消息，内容暂时看不到]"  # read again by the core's catch-up until it reads
 RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
@@ -441,6 +441,7 @@ class LarkXBackend(Backend):
     render_version = RENDER_VERSION
     rerender_types = RERENDER_TYPES
     rerender_empty = RERENDER_EMPTY
+    pending_text = PENDING_TEXT
     done_marks = True  # a chat's 完成
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
@@ -453,9 +454,6 @@ class LarkXBackend(Backend):
     heartbeat = 30.0
 
     def __init__(self, lx: types.SimpleNamespace, region: str):
-        self._closing_ev = threading.Event()  # set by close(): every later re-read ends
-        self._refill_gen = 0  # moved on by a logout: a re-read of the account before hands nothing over
-        self._refilling: Set[str] = set()  # message ids with a re-read under way (one each)
         self.lx = lx
         self.region_name = region
         self.region = lx.region.get_region(region)
@@ -684,7 +682,6 @@ class LarkXBackend(Backend):
 
     def logout(self) -> None:
         with self._lock:
-            self._refill_gen += 1  # the re-reads under way are this account's: they hand nothing over now
             old = self._client
             self._auth = self._client = self._me = self._creds = None
             self._own = None
@@ -698,7 +695,6 @@ class LarkXBackend(Backend):
             self._close_client(old)
 
     def close(self) -> None:
-        self._closing_ev.set()  # the later re-reads of texts held for review stop
         self.logout()
 
     # ------------------------------------------------------------ the live link
@@ -866,8 +862,6 @@ class LarkXBackend(Backend):
                 on_message(msg)
             except Exception as e:
                 log.warning("a pushed message was not taken (%s)", type(e).__name__)
-            if msg.type in ("TEXT", "POST") and not (msg.text or "").strip():
-                self._refill_later(msg)  # a link shown only as a card: its entity has it
             self._seen_group(msg.chat_id, me)  # after the core: it reads a chat it does not know (chat_info)
 
     # ------------------------------------------------------------ every group (自动代答's list)
@@ -1528,7 +1522,7 @@ class LarkXBackend(Backend):
                 note_flags(m.type, entity_flags(ent))
                 continue
             if dlp in DLP_IN_PROGRESS:
-                m.review = True  # held for review: left empty, read again later
+                m.text = PENDING_TEXT  # held for review: said so; the core reads it again (pending_text)
                 note_flags(m.type, entity_flags(ent))
                 continue
             links = hang_links(ent)
@@ -1536,50 +1530,6 @@ class LarkXBackend(Backend):
                 m.text = " ".join(links)
             else:
                 note_flags(m.type, entity_flags(ent))
-
-    def _refill_later(self, msg: Message) -> None:
-        """A pushed text read as nothing: its entity read again in the background, handed to the core as history (the
-        stored row then takes the text); one Feishu holds for review is read again 10 min, 1 h and 6 h after it came.
-        One re-read per message; a logout or close ends it, and a re-read of an account signed out hands nothing over."""
-        cb = self.on_history
-        if cb is None:
-            return
-        with self._lock:
-            if msg.id in self._refilling or len(self._refilling) > 500:
-                return
-            self._refilling.add(msg.id)
-            gen = self._refill_gen
-        started = time.monotonic()
-
-        def mine() -> bool:
-            with self._lock:
-                return gen == self._refill_gen and self._me is not None
-
-        def run():
-            try:
-                for at in (0.0,) + REFILL_AFTER:
-                    left = at - (time.monotonic() - started)
-                    if left > 0 and self._closing_ev.wait(left):
-                        return
-                    if not mine():
-                        return
-                    try:
-                        got = [m for m in self.history(msg.chat_id, msg.position + 1, 1) if m.id == msg.id]
-                    except Exception as e:  # a network failure: the next time comes as planned
-                        log.info("a pushed message read as nothing was not read again (%s)", type(e).__name__)
-                        continue
-                    filled = [m for m in got if (m.text or "").strip()]
-                    if filled:
-                        if mine():
-                            cb(filled)
-                        return
-                    if got and not any(getattr(m, "review", False) for m in got):
-                        return  # read, and nothing held: nothing more to wait for
-            finally:
-                with self._lock:
-                    self._refilling.discard(msg.id)
-
-        threading.Thread(target=run, name="openmate-larkx-refill", daemon=True).start()
 
     def _chat_raw(self, client, chat_id: str) -> dict:
         try:

@@ -177,17 +177,28 @@ class WarmOwnerTest(unittest.TestCase):
             gate.wait(2)
             return "v"
 
-        f = Fresh(read, ahead=0, stale=900, clock=lambda: now[0], spawn=lambda fn: threading.Thread(target=fn, daemon=True).start())
+        entered = threading.Event()
+
+        def read_marked():
+            entered.set()
+            return read()
+
+        f = Fresh(read_marked, ahead=0, stale=900, clock=lambda: now[0],
+                  spawn=lambda fn: threading.Thread(target=fn, daemon=True).start())
         stop = threading.Event()
         self.addCleanup(stop.set)
-        f.warm(every=60.0, stop=stop)  # its first read waits at the gate
-        time.sleep(0.05)
+        f.warm(every=60.0, stop=stop)
+        self.assertTrue(entered.wait(2), "the warm read is under way")
         now[0] += ui_mod.WARM_IDLE + 10
-        threading.Thread(target=lambda: f.get(wait=0.01), daemon=True).start()  # someone looks meanwhile
-        time.sleep(0.05)
+        from openmate_core.ui import NotYet
+        with self.assertRaises(NotYet):
+            f.get(wait=0.01)  # someone looks meanwhile (the read is still at the gate)
+        looked = f._looked
         gate.set()
-        time.sleep(0.1)
-        self.assertGreaterEqual(f._looked, now[0], "the draw's look is not undone by the warm read")
+        wait_until(lambda: f._kept is not None, what="the warm read is in")
+        time.sleep(0.05)
+        self.assertEqual(f._looked, looked, "the draw's look is not undone by the warm read")
+        self.assertGreaterEqual(looked, now[0])
 
 
 class BoundedWaitTest(unittest.TestCase):

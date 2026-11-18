@@ -36,9 +36,10 @@ jobs:
       - name: Packages and persona-extensions.json are up to date, published packages unchanged
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "$base" = "0000000000000000000000000000000000000000" ]; then
             python -I -B scripts/package.py --check  # a first push: nothing published before it
           else
+            [ -n "$base" ] || base=$(git rev-parse HEAD~1)  # a manual run: against the commit before
             git cat-file -e "$base" 2>/dev/null || git fetch --no-tags origin "$base" || { echo "base $base not found"; exit 1; }
             python -I -B scripts/package.py --check --published "$base"
           fi

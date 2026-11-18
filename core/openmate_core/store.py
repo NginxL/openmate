@@ -156,6 +156,8 @@ def _chat_row(r: sqlite3.Row) -> dict:
 class Store:
     """Thread-safe: one connection behind one lock."""
 
+    pending_text = "\x00"  # the backend's text for a message held back for now (set by the app); never ''
+
     def __init__(self, path: str):
         self.path = path
         directory = os.path.dirname(path)
@@ -346,9 +348,9 @@ class Store:
             return {}
         rows = self._all(
             "SELECT chat_id, MIN(position) AS lo, MAX(position) AS hi, COUNT(*) AS n, MAX(at) AS last FROM messages "
-            "WHERE type IN (%s) AND text = '' AND at >= ? AND chat_id NOT IN (SELECT chat_id FROM gone) "
+            "WHERE type IN (%s) AND (text = '' OR text = ?) AND at >= ? AND chat_id NOT IN (SELECT chat_id FROM gone) "
             "GROUP BY chat_id ORDER BY last DESC LIMIT ?"
-            % ",".join("?" * len(types)), types + [since, limit])
+            % ",".join("?" * len(types)), types + [self.pending_text, since, limit])
         return {r["chat_id"]: (int(r["lo"]), int(r["hi"]), int(r["n"])) for r in rows}
 
     def get_chat(self, chat_id: str) -> Optional[dict]:
@@ -426,7 +428,8 @@ class Store:
                 )
                 if cur.rowcount != 1:
                     blank = db.execute("SELECT " + _INSERT_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ? "
-                                       "AND text = ''", (m.chat_id, m.id)).fetchone() if m.text else None
+                                       "AND (text = '' OR text = ?) AND text != ?",
+                                       (m.chat_id, m.id, self.pending_text, m.text)).fetchone() if m.text else None
                     if blank is not None:
                         # stored with no text by an older reading: moved to the end (a new seq), so the archive's
                         # cursor, already past it, hands it over with its text now
