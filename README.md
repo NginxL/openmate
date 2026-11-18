@@ -1,10 +1,12 @@
 # OpenMate
 
-OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认；只有你自己发起的 `/agent` 请求，回复不再确认，但每一条都会记进 Persona 的“以你身份发出的消息”记录。
+OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认。有三种回复不再逐条确认，但每一条都会记进 Persona 的“以你身份发出的消息”记录：你自己发起的 `/agent` 请求的回复；你勾选的群里有人真正 @ 你时的自动代答；飞书文档评论里 @ 你时的文档代答（默认关闭，要单独打开）。
 
 第一个扩展是**飞书**（`openmate-feishu`）。第二个是**微信**（`openmate-wechat`，一期做 `/agent`、群里自动代答和收图片等媒体，见下文）。钉钉以后再做。
 
-> **现状**：一期的平台无关核心（协议、存储、收件箱、会话页、知识库归档、扫码登录流程、写操作、`/agent`）和连接飞书的 LarkAgentX 后端（一期 1b）都已经完成，有完整的自动测试（后端用假的 LarkAgentX 测，另有不联网、不登录的真实 LarkAgentX 冒烟测试）。用真实账号扫码登录、收发消息的端到端验证还在进行。
+> **现状**：一期的平台无关核心（协议、存储、收件箱、会话页、知识库归档、扫码登录流程、写操作、`/agent`）和连接飞书的 LarkAgentX 后端（一期 1b）都已经完成，有完整的自动测试（后端用假的 LarkAgentX 测，另有不联网、不登录的真实 LarkAgentX 冒烟测试）。作者的账号每天在真实使用：飞书和微信的扫码登录、收发消息、`/agent`、群里自动代答、今天页都在用；文档代答还没有在真实账号上跑过。
+>
+> 飞书数据防泄漏（DLP）审核扣下的消息，飞书不会把正文发给这个客户端，OpenMate 也不会去绕过：被拦截的写明“被安全策略拦下”，审核中的过一会儿再读。
 
 ## 和 Persona 的关系
 
@@ -100,7 +102,10 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 - **与飞书 / Lark 官方无关。** OpenMate 是独立的开源项目，不是飞书或 Lark 的产品，也没有得到它们的认可；图标是本项目自己画的。
 - **不分发 LarkAgentX。** 本仓库和发布包里都不包含 LarkAgentX，需要你自己安装并遵守它的条款。
 - **微信扩展用的也是非官方协议。** 它以一台新电脑的身份登录你的微信：你已登录的电脑版微信可能会下线；账号被限制的可能无法排除，请自己判断。与腾讯官方无关，“微信”是腾讯的商标。
-- 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。`/agent` 只响应你自己发的消息，它的回复不再确认，但每一条都记进 Persona 的“以你身份发出的消息”记录。
+- 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。下面三种回复不再逐条确认，每一条都记进 Persona 的“以你身份发出的消息”记录：
+  - `/agent`：只响应你自己发的消息；
+  - 群里自动代答：只在你勾选的群、有人真正 @ 你时，用访客会话（读不到你的私人知识库）回复，每群每天有上限；
+  - 文档代答：飞书文档评论里 @ 你时回复，默认关闭，要在设置里单独打开；只有 lark-cli 登录的就是这个飞书账号时才会发。
 
 ## 开发
 
@@ -124,9 +129,11 @@ tests/                         用假的平台后端和假的 hub 驱动完整�
 
 OpenMate is a set of open-source (MIT) [Persona](https://github.com/nwverse/persona) extensions that bridge chat apps
 into Persona: direct and group messages flow into the Inbox and knowledge base, and Persona's assistant and Agents can
-answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first; only the
-replies to your own `/agent` requests go out unconfirmed, and each of them is recorded in Persona's sent-as-user ledger
-(the connector declares `sends_as_user`). The first extension is Feishu / Lark (`openmate-feishu`, connector
+answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first. Three kinds
+of reply go out unconfirmed, each recorded in Persona's sent-as-user ledger (the connector declares `sends_as_user`):
+the replies to your own `/agent` requests; the automatic answers when someone really @-mentions you in a group you
+marked (a guest conversation, capped per group and day); and, off unless you turn it on, the answers to a Feishu
+document comment that @-mentions you (only while lark-cli is signed in as this very account). The first extension is Feishu / Lark (`openmate-feishu`, connector
 `matefeishu`); the second is WeChat (`openmate-wechat`, connector `matewechat`: phase one is `/agent`, answering
 real @-mentions in the groups you mark, and pictures, voice notes, videos, files and forwarded chat records fetched
 into local files the assistant can read, over this repository's `native/matewechat-native`, built on thisnick/agent-wechat's
@@ -138,5 +145,7 @@ with `pip install -e <checkout>`, plus python-socks when the system proxy is SOC
 setting `larkx_python`: the extension re-executes itself there with `-I`. Turn the sandbox off for it on a Mac manager.
 It may break or trigger account risk controls. OpenMate is not affiliated with Feishu or Lark and does not distribute
 LarkAgentX. The core and the LarkAgentX backend are complete and tested (against a stand-in of LarkAgentX, plus an
-offline smoke test against the real one); end-to-end checks with a real account are under way. Run the tests with
+offline smoke test against the real one), and in daily use on the author's own accounts (sign-in, messages, `/agent`,
+group answers, the Today page; the document answers have not run on a real account yet). Messages Feishu's data-loss
+policy holds back never reach this client and are not worked around: a blocked one says so. Run the tests with
 `scripts/test.sh` (standard library only).
