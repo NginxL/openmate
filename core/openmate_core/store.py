@@ -299,6 +299,18 @@ class Store:
         rows = self._all("SELECT * FROM chats WHERE last_at >= ? ORDER BY last_at DESC, id LIMIT ?", (since, limit))
         return [_chat_row(r) for r in rows]
 
+    def groups_i_spoke_in(self, limit: int) -> List[dict]:
+        """Group chats with the account's own messages, the one it wrote in last first (mine_at: that time)."""
+        rows = self._all("SELECT c.*, MAX(m.at) AS mine_at FROM messages m JOIN chats c ON c.id = m.chat_id "
+                         "WHERE m.mine = 1 AND c.kind != 'dm' GROUP BY m.chat_id ORDER BY mine_at DESC, c.id LIMIT ?",
+                         (int(limit),))
+        out = []
+        for r in rows:
+            d = _chat_row(r)
+            d["mine_at"] = float(r["mine_at"] or 0)
+            out.append(d)
+        return out
+
     def chats_recent(self, limit: int, query: str = "") -> List[dict]:
         if query:
             rows = self._all(

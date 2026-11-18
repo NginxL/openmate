@@ -33,6 +33,7 @@ from .ui import ChatsToday, day_start
 log = logging.getLogger("openmate.http")
 
 BODY_MOST = 4096
+DRAIN_MOST = 65536  # a body this long at most is read before it is refused (one longer: refused unread)
 MOST_AT_ONCE = 4
 READ_WAIT = 10.0  # a connection that sends nothing this long is closed
 NEEDS_MOST = 200  # as many as ChatsToday looks at (Timing.inbox_most): the counts and the list agree
@@ -254,15 +255,19 @@ class TodayAPI:
 
     @staticmethod
     def _body(h: BaseHTTPRequestHandler) -> dict:
-        if "json" not in (h.headers.get("Content-Type") or "").lower():
-            raise Refused(415, "unsupported_media_type", "要 JSON")
+        """The request's JSON object. Its body is read (up to DRAIN_MOST) before any refusal: a caller still
+        sending it would otherwise meet a closed connection instead of the answer."""
         try:
             n = int(h.headers.get("Content-Length") or "")
         except ValueError:
             raise Refused(411, "length_required", "要给出 Content-Length")
-        if n < 0 or n > BODY_MOST:
+        if n < 0 or n > DRAIN_MOST:
             raise Refused(413, "too_large", "请求太大")
         raw = h.rfile.read(n)
+        if n > BODY_MOST:
+            raise Refused(413, "too_large", "请求太大")
+        if "json" not in (h.headers.get("Content-Type") or "").lower():
+            raise Refused(415, "unsupported_media_type", "要 JSON")
         try:
             body = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):

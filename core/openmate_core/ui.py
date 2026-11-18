@@ -25,8 +25,11 @@ CHATS_PAGE = "chats"
 CHATS_CARD = "chats-today"
 NEEDS_MOST = 30
 GROUPS_MOST = 10
-AUTOREPLY_ROWS = 20  # groups offered for 自动代答 (the marked ones always)
-CANDIDATES_MOST = 300  # then every other group the backend can list (Backend.group_candidates)
+DONE_MOST = 30  # 已标记处理完 rows on the chats page (a page holds 300 items at most)
+AUTOREPLY_MOST = 50  # groups offered for 自动代答 beside the marked ones: those the user wrote in last first
+SEARCH_MOST = 50  # 找群: at most this many matches shown
+GROUPS_ALL = 10000  # every group the backend can list (Backend.group_candidates), for 找群
+SPOKE_MOST = 500  # groups the user wrote in, looked at
 ADOPT_MOST = 5000  # a switched group is looked up this far (it may have moved down the list since the page drew)
 SLOW_RENDER = 0.3
 THREAD_LINES = 30
@@ -424,6 +427,8 @@ class ChatsPage(Page):
 
     def render(self, params: dict) -> dict:
         state = state_of(params)
+        if not self.card and state.get("groups"):
+            return self._groups_view(str(state.get("q") or ""), int(params.get("ui_version") or 1))
         if not self.card and state.get("chat"):
             return self._chat(str(state["chat"]), int(params.get("ui_version") or 1))
         return self._overview(int(params.get("ui_version") or 1))
@@ -436,7 +441,18 @@ class ChatsPage(Page):
         if aid == "back":
             return {"view": self._overview(version)}
         state = state_of(params)
-        here = lambda: self._chat(str(state["chat"]), version) if state.get("chat") and not self.card else self._overview(version)  # noqa: E731
+        if aid == "groups:search":  # 找群's search box: {"q": text}
+            return {"view": self._groups_view(str((params.get("values") or {}).get("q") or "").strip(), version)}
+        if aid == "groups:open":  # an app without push
+            return {"view": self._groups_view("", version)}
+
+        def here():
+            if state.get("groups") and not self.card:
+                return self._groups_view(str(state.get("q") or ""), version)
+            if state.get("chat") and not self.card:
+                return self._chat(str(state["chat"]), version)
+            return self._overview(version)
+
         if aid.startswith("done:chat:"):
             if not self.data.dismiss(aid[len("done:chat:"):]):
                 return {"toast": "这个会话现在没有要处理的了", "view": here()}
@@ -473,7 +489,7 @@ class ChatsPage(Page):
         if backend is None:
             return []
         try:
-            return [g for g in backend.group_candidates(CANDIDATES_MOST) if g.kind != "dm"]
+            return [g for g in backend.group_candidates(GROUPS_ALL) if g.kind != "dm"]
         except Exception:
             log.exception("the backend's group list could not be read")
             return []
@@ -490,37 +506,48 @@ class ChatsPage(Page):
                 self.app.store.upsert_chat(g)
                 return
 
-    def _autoreply(self, version: int) -> Optional[dict]:
-        """The groups the user can mark for 自动代答 (the ones marked, then the groups active this week), each a
-        switch (UI version 6) or a row that turns it on or off."""
+    def _groups(self, q: str = "") -> Tuple[List[dict], set, int]:
+        """The groups for 自动代答, in order: the marked ones, then those the user wrote in (the latest first), then
+        those active this week, then every other one the service lists (the newest joined first); with q, only those
+        whose name holds it. (groups, the marked ids, how many groups there are in all.)"""
         app = self.app
         marked = app.store.autoreply_chats()
-        seen, chats = set(), []
+        pool: Dict[str, dict] = {}
+
+        def put(c) -> None:
+            if c is not None and c["id"] not in pool and views.chat_kind(c) != "dm":
+                pool[c["id"]] = c
+
         for cid in marked:
-            c = app.store.get_chat(cid)
-            if c is not None:
-                chats.append(c)
-                seen.add(cid)
+            put(app.store.get_chat(cid))
+        for c in app.store.groups_i_spoke_in(SPOKE_MOST):
+            put(c)
         for c in app.store.chats_since(time.time() - 7 * 86400, 60):
-            if c["id"] not in seen and views.chat_kind(c) != "dm" and len(chats) < AUTOREPLY_ROWS:
-                chats.append(c)
-                seen.add(c["id"])
-        for g in self._candidates():  # every other group the service lists: a new one shows up at the next refresh
-            if g.id not in seen:
-                known = app.store.get_chat(g.id)
-                # an unnamed group shows a stand-in here only; nothing is stored under it
-                chats.append(known or {"id": g.id, "name": g.name or "未命名的群（%s）" % g.id.split("@", 1)[0][-4:],
-                                       "kind": "group"})
-                seen.add(g.id)
-        if not chats:
-            return None
-        agent = getattr(app, "agent", None)
-        most = getattr(agent, "auto_most", 20)
+            put(c)
+        listed = self._candidates()  # a group made or joined shows up at the next refresh of the service's list
+        if listed:
+            stored = {c["id"]: c for c in app.store.chats_recent(GROUPS_ALL)}  # one read, not one per group
+            for g in listed:
+                if g.id not in pool:
+                    # an unnamed group shows a stand-in here only; nothing is stored under it
+                    put(stored.get(g.id) or {"id": g.id, "name": g.name or "未命名的群（%s）" % g.id.split("@", 1)[0][-4:],
+                                             "kind": "group"})
+        total = len(pool)
+        groups = list(pool.values())
+        if q:
+            needle = q.casefold()
+            groups = [c for c in groups if needle in views.chat_name(c, c["id"]).casefold() or c["id"] == q]
+        return groups, set(marked), total
+
+    def _switch_rows(self, chats: List[dict], marked: set, version: int) -> List[dict]:
+        agent = getattr(self.app, "agent", None)
         rows = []
         for c in chats:
             on = c["id"] in marked
             used = agent.auto_used(c["id"]) if agent is not None and on else 0
             sub = ("开着 · 今天代答 %d 次" % used) if on else "关着"
+            if c.get("mine_at"):
+                sub += " · 我最近 %s 发过言" % when(c["mine_at"], self.app.tz)
             if version >= 6:
                 r = row(views.chat_name(c, c["id"]), sub, "", key="auto:" + c["id"])
                 r["control"] = {"kind": "switch", "name": "auto:" + c["id"], "on": on, "action": {"id": "autoreply"}}
@@ -528,10 +555,57 @@ class ChatsPage(Page):
                 r = row(views.chat_name(c, c["id"]), sub, "关掉" if on else "开启",
                         "autoreply:%s:%s" % ("off" if on else "on", c["id"]), key="auto:" + c["id"])
             rows.append(r)
+        return rows
+
+    def _autoreply_footer(self) -> str:
+        agent = getattr(self.app, "agent", None)
+        most = getattr(agent, "auto_most", 20)
         enabled = bool(getattr(agent, "enabled", False) and getattr(agent, "auto", False))
-        footer = ("开着的群里有人 @ 你，AI 直接以你的身份回复，不用你确认；每个群每天最多 %d 次。私聊、机器人和 @所有人 不代答。" % most
-                  if enabled else "自动代答没有生效：要先在 设置 › 连接器 里打开 /agent 和“自动代答”。")
-        return {"title": "自动代答", "items": rows, "footer": footer}
+        return ("开着的群里有人 @ 你，AI 直接以你的身份回复，不用你确认；每个群每天最多 %d 次。私聊、机器人和 @所有人 不代答。" % most
+                if enabled else "自动代答没有生效：要先在 设置 › 连接器 里打开 /agent 和“自动代答”。")
+
+    def _autoreply(self, version: int) -> Optional[dict]:
+        """The groups the user can mark for 自动代答: the marked ones, then AUTOREPLY_MOST more (those the user wrote
+        in last first), each a switch (UI version 6) or a row that turns it on or off; and 找群 for every other."""
+        groups, marked, total = self._groups()
+        if not groups:
+            return None
+        shown = [c for c in groups if c["id"] in marked] + [c for c in groups if c["id"] not in marked][:AUTOREPLY_MOST]
+        rows = self._switch_rows(shown, marked, version)
+        if total > len(shown):
+            title = "找群：搜索全部 %d 个群" % total
+            if version >= 3:
+                r = row(title, "按群名搜索，打开或关掉自动代答", "", key="groups:open")
+                r["action"] = {"push": {"ui": getattr(self.app.platform, "chats_page", CHATS_PAGE),
+                                        "state": state_text({"groups": 1}), "title": "自动代答 · 找群"}}
+            else:
+                r = row(title, "按群名搜索，打开或关掉自动代答", "", "groups:open", key="groups:open")
+            rows.append(r)
+        return {"title": "自动代答", "items": rows, "footer": self._autoreply_footer()}
+
+    def _groups_view(self, q: str, version: int) -> dict:
+        """找群: a search over every group (the name), at most SEARCH_MOST at a time; without words, the overview's."""
+        app = self.app
+        st = state_text({"groups": 1, "q": q}) if q else state_text({"groups": 1})
+        view: Dict[str, Any] = {"title": "自动代答 · 找群", "state": st}
+        if version >= 3:
+            view["search"] = {"placeholder": "搜索群名", "value": q, "action": {"id": "groups:search"}}
+        if app.store is None or not app.signed_in and app.creds != "present":
+            view["sections"] = [{"items": [empty("还没有登录%s" % app.platform.name, "", version)]}]
+            return view
+        groups, marked, total = self._groups(q)
+        if q:
+            shown = groups[:SEARCH_MOST]
+            more = len(groups) - len(shown)
+            head = "“%s”：%d 个群" % (q, len(groups)) + ("，先列出 %d 个，换个更具体的词试试" % len(shown) if more else "")
+        else:
+            shown = [c for c in groups if c["id"] in marked] + [c for c in groups if c["id"] not in marked][:AUTOREPLY_MOST]
+            head = "共 %d 个群；没搜的时候列出开着的和你最近发过言的" % total
+        rows = self._switch_rows(shown, marked, version)
+        view["sections"] = [{"title": "自动代答", "items": [{"type": "text", "style": "caption", "text": head}]
+                             + (rows or [empty("没有名字里带“%s”的群" % q if q else "还没有可以选的群", "", version)]),
+                             "footer": self._autoreply_footer()}]
+        return view
 
     def _summary(self, c: Dict[str, int], version: int) -> dict:
         stats = [stat("需要我", c["needs"], "机器人通知 %d 条不算在内" % c["bots"] if c.get("bots") else "",
@@ -571,7 +645,7 @@ class ChatsPage(Page):
                         key="done:" + t["_chat"]["id"],
                         actions=[{"title": "恢复", "icon": "refresh", "action": {"id": "undone:chat:" + t["_chat"]["id"]}}]
                         if version >= 6 else None)
-                    for t in self.data.done]
+                    for t in self.data.done[:DONE_MOST]]
             if done:
                 sections.append({"title": "已标记处理完", "items": done,
                                  "footer": "有新消息会自动回到“需要我”；要提前放回，在这一行的菜单里选“恢复”"})
