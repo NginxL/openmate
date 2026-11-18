@@ -45,9 +45,11 @@ STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, back
 SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
 # History (capability "history": history.chats, archive.history), read from the store: what the program has stored of
 # a chat since it signed in (live messages, catch-ups, history reads). Pages are hints of HISTORY_PAGE messages, at most
-# HISTORY_MOST (the hub's own cap); history.chats lists every chat (the cap only guards the query).
+# HISTORY_MOST (the hub's own cap); history.chats lists every chat (the cap only guards the query). The store is read
+# HISTORY_STEP lines at a time at least.
 HISTORY_PAGE = 50
 HISTORY_MOST = 200
+HISTORY_STEP = 200
 HISTORY_CHATS_MOST = 1000000
 
 # Connector methods of capabilities this connector does not declare: answered no_capability (unknown ones are
@@ -1454,24 +1456,39 @@ class ConnectorApp:
 
     def _history_take(self, chat_id: str, want: int, older_than=None, newer_than=None, inclusive=False) -> List[dict]:
         """Up to want lines archive.changes would hand over (views.has_content decides, as there), oldest first: the
-        store picks by a slightly wider rule (other Unicode blanks), so a line it let through is passed over here."""
-        got: List[dict] = []
+        store picks by a slightly wider rule (other Unicode blanks), so a line it let through is passed over here.
+        The store is read HISTORY_STEP lines at a time at least, so a long run of such lines costs few queries."""
+        got: List[dict] = []  # newer_than: oldest first; else newest first (turned round at the end)
         while len(got) < want:
-            ask = want - len(got)
+            step = max(want - len(got), HISTORY_STEP)
             rows = self.store.history_rows(chat_id, older_than=older_than, newer_than=newer_than, inclusive=inclusive,
-                                           limit=ask)
-            keep = [r for r in rows if views.has_content(r)]
-            if newer_than is not None:
-                got += keep
-                if len(rows) < ask:
-                    break
-                newer_than = rows[-1]["_key"]
-            else:
-                got = keep + got
-                if len(rows) < ask:
-                    break
-                older_than, inclusive = rows[0]["_key"], False
-        return got
+                                           limit=step)
+            for r in (rows if newer_than is not None else reversed(rows)):
+                if newer_than is not None:
+                    newer_than = r["_key"]
+                else:
+                    older_than, inclusive = r["_key"], False
+                if views.has_content(r):
+                    got.append(r)
+                    if len(got) >= want:
+                        break
+            if len(rows) < step:
+                break
+        return got if newer_than is not None else got[::-1]
+
+    def _position_bound(self, chat_id: str, raw: str, mark: str) -> tuple:
+        """A message's own position (SourceMessage.position) as a (when, seq) bound: before it is older than its oldest
+        line, after it newer than its newest, around it up to its newest (lines can share a Feishu position)."""
+        try:
+            p = int(raw)
+        except ValueError:
+            raise RPCError("位置不是这个连接器给出的：%s" % raw[:40])
+        if not (-_SEQ_MOST - 1 <= p <= _SEQ_MOST):
+            raise RPCError("位置超出范围：%s" % raw[:40])
+        keys = self.store.position_keys(chat_id, p)
+        if not keys:
+            raise RPCError("这个会话里没有位置 %s 的消息" % raw[:40])
+        return keys[0] if mark == "before" else keys[-1]
 
     def m_archive_history(self, params: dict) -> dict:
         """One page of a chat's stored messages, the lines archive.changes hands over only, walked by when they were
@@ -1488,7 +1505,7 @@ class ConnectorApp:
         mark, key = "", None
         if marks:
             (mark, raw), = marks.items()
-            key = _history_key(raw)
+            key = _history_key(raw) if ":" in raw else None  # a bare position is looked up below
         if self.store is None:
             return {"pace": {"stop": True, "reason": "扩展的本地存储没有打开（没有登录或设置有误），请先在连接器设置里处理"}}
         epoch = self._account_epoch
@@ -1498,6 +1515,8 @@ class ConnectorApp:
             if epoch != self._account_epoch:
                 return {"pace": {"retry_after_ms": 2000}}  # another account signing in: not a verdict on the chat
             return {"unreadable": True}  # never seen here, left, or kept out of the archive: skip it for good
+        if mark and key is None:
+            key = self._position_bound(chat_id, raw, mark)
         back: List[dict] = []
         fwd: List[dict] = []
         if mark == "after":

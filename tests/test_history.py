@@ -148,6 +148,38 @@ class HistoryTest(unittest.TestCase):
         older = self.read(limit=2)["older"]
         self.assertIn(self.content[-2], [m["id"] for m in self.read(around=older, limit=2)["messages"]])
 
+    def test_a_message_position_works_as_a_cursor(self):
+        # Positions are handed back as they are (SourceMessage.position too): before, after and around a message
+        page = self.read(limit=5)
+        m = page["messages"][2]
+        ids = [x["id"] for x in page["messages"]]
+        around = [x["id"] for x in self.read(around=m["position"], limit=3)["messages"]]
+        self.assertIn(m["id"], around)
+        before = [x["id"] for x in self.read(before=m["position"], limit=2)["messages"]]
+        self.assertEqual(before, ids[:2])
+        after = [x["id"] for x in self.read(after=m["position"], limit=2)["messages"]]
+        self.assertEqual(after, ids[3:5])
+        with self.assertRaises(HubSideError):
+            self.h.c("archive.history", chat=BIG, before="99999")  # no line there
+
+    def test_a_long_run_of_blank_lines_costs_few_queries(self):
+        now = time.time()
+        rows = [Message(id="msg_blank_%d" % i, chat_id=BIG, position=1000 + i, sender_id="user_example_a",
+                        text="\u2003", at=now - 3) for i in range(2500)]  # blanks the SQL rule lets through
+        self.h.app.store.add_messages(rows, from_history=False)
+        calls = []
+        real = self.h.app.store.history_rows
+
+        def counted(*a, **k):
+            calls.append(k.get("limit"))
+            return real(*a, **k)
+
+        self.h.app.store.history_rows = counted
+        page = self.read(limit=1)
+        self.assertEqual([x["id"] for x in page["messages"]], [self.content[-1]])
+        self.assertNotIn("newer", page)
+        self.assertLess(len(calls), 40, "one query per blank line")
+
     def test_cursors_never_lead_to_an_empty_page(self):
         now = time.time()
         self.h.app.store.upsert_chat(Chat("chat_example_edge", "group", "示例边界群"))
