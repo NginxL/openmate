@@ -232,6 +232,12 @@ def _packet_only(resp: dict, fields) -> bool:
     return not any(f in resp for f in fields) and any(k in resp for k in ("status", "cmd", "payloadType", "sid"))
 
 
+def group_over(info: dict) -> bool:
+    """The details say the account's membership is over: dissolved, frozen, deleted, or only looking in."""
+    return bool(info.get("isDissolved") or info.get("isFrozen") or info.get("status") not in (None, 0, "NORMAL")
+                or info.get("role") in CHAT_NOT_MEMBER)
+
+
 def group_alive(info: dict) -> bool:
     """A group the account is in and can use: a group's type, normal status, neither dissolved nor frozen, the
     account a member (not one who only looks in)."""
@@ -891,8 +897,6 @@ class LarkXBackend(Backend):
                     old = list(self._groups)
                 seen = self._groups_whole_ids | {g.id for g in old}  # every id known as a member before this read
                 left = ended & seen  # its details say it is over (dissolved, frozen, only looked into)
-                if whole and not listed and seen:
-                    whole = False  # in no group at all, beside a known list: not believed, taken as a part read
                 if whole:
                     if seen:
                         # an id seen as a member and no longer listed at all was left or dissolved; one listed without
@@ -965,7 +969,8 @@ class LarkXBackend(Backend):
                     joined[cid] = _int(times.get(cid) if isinstance(times, dict) else 0)
             nxt = _int(resp.get("nextUpdateTime"))
             if not resp.get("hasMore"):
-                whole = True
+                # the end: said outright ("hasMore": false), or a page with ids; an answer with neither is no end
+                whole = "hasMore" in resp or bool(ids)
                 break
             if not nxt or nxt == cursor:
                 break  # more said, but no way on: what was read is a part
@@ -990,9 +995,11 @@ class LarkXBackend(Backend):
             info = infos.get(cid)
             if info is None:
                 continue
-            if not group_alive(info):
+            if group_over(info):
                 ended.add(cid)  # its details say the account is not (or no longer) a member
                 continue
+            if not group_alive(info):
+                continue  # not a group's details (its type left out): kept as it was shown
             joined[cid] = _int(info.get("joinTimeMs")) // 1000 or joined.get(cid) or _int(info.get("createTime"))
             out.append(self._chat_of(cid, info))
         out.sort(key=lambda c: -joined.get(c.id, 0))

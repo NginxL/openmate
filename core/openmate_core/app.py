@@ -1018,6 +1018,7 @@ class ConnectorApp:
                 if self._creds_out and self._login_gen != self._creds_gen:
                     self._login = None
                     raise RPCError("已经退出登录了，请重新扫码登录")
+                self._login_gen = self._creds_gen  # no logout since: the renewed QR is this generation's
             else:
                 self._creds_out = False
                 self._login_gen = self._creds_gen

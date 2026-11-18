@@ -816,18 +816,18 @@ class ReadTest(Base):
         self.b._read_groups = read_whole(["g2"], listed=["g6"], ended=["g6"])
         self.b._groups_work(client, me)
         self.assertEqual(gone, ["g6"])
-        # a whole read of nothing beside a known list is not believed
-        del gone[:]
-        self.b._read_groups = read_whole([])
-        self.b._groups_work(client, me)
-        self.assertEqual(gone, [])
-        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g2"], "still shown")
         # a part read keeps what it did not reach on the list (找群 still finds a quiet group)
         self.b._read_groups = read_whole(["g2", "g7"])
         self.b._groups_work(client, me)
         self.b._read_groups = read_whole(["g7"], whole=False)
         self.b._groups_work(client, me)
         self.assertEqual(sorted(g.id for g in self.b.group_candidates(10)), ["g2", "g7"])
+        # a whole answer of no group at all (the service said so): the last ones were left
+        del gone[:]
+        self.b._read_groups = read_whole([])
+        self.b._groups_work(client, me)
+        self.assertEqual(sorted(gone), ["g2", "g7"])
+        self.assertEqual(self.b.group_candidates(10), [])
 
     def test_what_is_heard_during_a_read_is_put_on_its_result(self):
         client, me = self.b._signed_in()
@@ -853,6 +853,36 @@ class ReadTest(Base):
         self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二又改名"}}, [], me)
         self.assertEqual([g.name for g in self.b.group_candidates(10)], ["群二又改名"], "a later push stays")
         self.assertEqual(self.b._groups_delta, [])
+
+    def test_the_end_said_outright_or_not_at_all(self):
+        client, _ = self.b._signed_in()
+        orig = client.api
+        self.addCleanup(setattr, client, "api", orig)
+        client.api = lambda kind, data=None, raw=None: {"hasMore": False}
+        groups, _, whole, listed, ended = self.b._read_groups(client)
+        self.assertEqual((groups, whole, listed), ([], True, set()), "in no group: said outright")
+        client.api = lambda kind, data=None, raw=None: {"nextUpdateTime": 5}
+        _, _, whole, _, _ = self.b._read_groups(client)
+        self.assertFalse(whole, "neither ids nor an end: not the whole list")
+
+    def test_details_without_a_type_are_not_the_end(self):
+        client, me = self.b._signed_in()
+        gone = []
+        self.b.on_chat_gone = gone.append
+        self.set_groups(me, [("g1", "群一", 3, False)])
+        self.b._groups_whole_ids, self.b._groups_at = {"g1"}, 1.0
+
+        def answer(kind, data=None, raw=None):
+            if kind == "chats.PullGroupChatsRequest":
+                return {"chatIds": ["g1"], "hasMore": False}
+            return {"chats": {"g1": {"id": "g1", "name": "群一", "role": "MEMBER", "status": "NORMAL"}}}  # no type
+
+        orig = client.api
+        client.api = answer
+        self.addCleanup(setattr, client, "api", orig)
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [])
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g1"], "kept as it was shown")
 
     def test_a_packet_without_the_list_is_no_read(self):
         client, me = self.b._signed_in()

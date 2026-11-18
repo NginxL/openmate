@@ -190,5 +190,26 @@ class CredentialsTest(unittest.TestCase):
         self.assertIn(h.cid, h.hub.secrets)
 
 
+    def test_a_failed_save_then_a_new_qr_signs_in(self):
+        from harness import HubSideError
+
+        h = Harness(self)
+        h.hub.secrets_fail = True
+        p = h.c("login.step", step="", values={})
+        with self.assertRaises(HubSideError) as e:
+            for _ in range(5):
+                p = h.c("login.step", step=p["step"])
+                if p.get("done"):
+                    break
+        self.assertIn("保存登录信息失败", e.exception.message)
+        h.hub.secrets_fail = False
+        for _ in range(6):  # the page polls on: a new QR, scanned
+            p = h.c("login.step", step=p.get("step") or "qr")
+            if p.get("done"):
+                break
+        self.assertTrue(p.get("done"), p)
+        self.assertIn(h.cid, h.hub.secrets)
+
+
 if __name__ == "__main__":
     unittest.main()
