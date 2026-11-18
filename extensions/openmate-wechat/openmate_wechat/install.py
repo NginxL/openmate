@@ -26,7 +26,7 @@ URL = "https://github.com/NginxL/openmate/releases/download/matewechat-native-v{
 ASSETS = {
     ("darwin", "arm64"): {
         "name": "matewechat-native-0.1.10-darwin-arm64",
-        "sha256": "16ad5cd3f38732a8624be26ba6a4144f45f0981bd28e0193120b60192ee76ec2",
+        "sha256": "6f393ff80bff4c7a599e2f0321c6a3402a535bd97e16cc70900f8fd64ee44006",
         "size": 8298496,
     },
 }
