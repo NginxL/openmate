@@ -90,6 +90,7 @@ def is_group(chat_id: str) -> bool:
 # One backend per program, so the platform's archive rule (openmate_wechat.archive_chat) reads them here.
 BUSINESS: set = set()
 PERSONS: set = set()
+ANSWERED: set = set()  # accounts WeChat answered about without saying what they are (no verify flag)
 
 
 def kind_of(user_id: str) -> str:
@@ -150,9 +151,10 @@ class Store:
                 self._db.execute("DELETE FROM " + t)
             self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%' "
                              "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%' "
-                             "OR key LIKE 'gone:%' OR key LIKE 'member_at:%'")
+                             "OR key LIKE 'gone:%' OR key LIKE 'member_at:%' OR key LIKE 'answered:%'")
         BUSINESS.clear()
         PERSONS.clear()
+        ANSWERED.clear()
 
     def seen(self, mid: str) -> Optional[Tuple[int, bool]]:
         """(position, delivered) of a kept message, None when new."""
@@ -300,9 +302,21 @@ class WeChatBackend(Backend):
         self._native: Optional[Native] = None
         BUSINESS.update(k[4:] for k in self.store.keys("biz:"))
         PERSONS.update(k[7:] for k in self.store.keys("person:"))
+        ANSWERED.update(k[9:] for k in self.store.keys("answered:"))
         self._mu = threading.RLock()
         self._state: Optional[dict] = None  # the sign-in, as last sealed (to restore a restarted program)
-        self._device: Optional[dict] = None  # the device of the sign-in in progress (memory only)
+        # the computer this program signs in as, kept here (an id and a type, no key): a sign-in after a sign-out is
+        # the same computer, not a new one in the account's device list
+        try:
+            dev = json.loads(self.store.get("device") or "null")
+        except ValueError:
+            dev = None
+        self._device: Optional[dict] = dev if isinstance(dev, dict) else None
+        # sign-in epochs: a renewal sealed only while its epoch is current; a sign-out ends the epoch under the lock,
+        # so the hub's delete that follows is the last write of that sign-in
+        self._auth_mu = threading.Lock()
+        self._auth_epoch = 1
+        self._signed_out = False
         self.me = ""
         self.me_name = ""
         self._gen = 0
@@ -332,6 +346,7 @@ class WeChatBackend(Backend):
                     self._ready_for = n
                 return n
             n = Native(self._path(wait), self._persist)
+            n.epoch = -1 if self._signed_out else self._auth_epoch
             try:
                 n.start()
             except NativeGone as e:
@@ -366,18 +381,33 @@ class WeChatBackend(Backend):
                 raise CredentialsExpired(EXPIRED if e.kind == "expired" else "微信还没登录")
             raise BackendError(e.message, {"input": "rejected", "unsupported": "unsupported"}.get(e.kind, "unknown"))
 
-    def _persist(self, state: Dict[str, Any]) -> bool:
-        """The program renewed the sign-in: seal it before it is used."""
+    def _persist(self, state: Dict[str, Any], epoch: Optional[int] = None) -> bool:
+        """The program renewed the sign-in: seal it before it is used (not one from before a sign-out)."""
         creds = {"v": 1, "state": state}
-        ok = False
-        if self.on_credentials_sync is not None:
-            ok = bool(self.on_credentials_sync(creds))
-        elif self.on_credentials is not None:
-            self.on_credentials(creds)
-            ok = True
-        if ok:
-            self._state = state
-        return ok
+        with self._auth_mu:
+            if self._signed_out or (epoch is not None and epoch != self._auth_epoch):
+                log.info("a WeChat sign-in renewed before signing out is not kept")
+                return False
+            ok = False
+            if self.on_credentials_sync is not None:
+                ok = bool(self.on_credentials_sync(creds))
+            elif self.on_credentials is not None:
+                self.on_credentials(creds)
+                ok = True
+            if ok:
+                self._state = state
+            return ok
+
+    def _begin_sign_in(self, n: Native) -> None:
+        """A sign-in starts (a QR, or saved credentials): renewals from now on are this sign-in's."""
+        with self._auth_mu:
+            self._signed_out = False
+            n.epoch = self._auth_epoch
+
+    def _keep_device(self, device: Any) -> None:
+        if isinstance(device, dict) and device:
+            self._device = device
+            self.store.put("device", json.dumps(device))
 
     def close(self) -> None:
         self._closed = True
@@ -390,9 +420,10 @@ class WeChatBackend(Backend):
 
     def login_start(self) -> LoginQR:
         n = self._link(restore=False, wait=5.0)  # a sign-in step answers the hub within 10 s
+        self._begin_sign_in(n)
         device = self._device or (self._state or {}).get("device")  # the same computer as before, when known
         r = self._call(n, "login_start", 9, device=device)
-        self._device = r.get("device") or None
+        self._keep_device(r.get("device"))
         return LoginQR(url=str(r.get("qr") or ""), state="qr")
 
     def login_poll(self, state: str) -> str:
@@ -416,6 +447,7 @@ class WeChatBackend(Backend):
         if not isinstance(st, dict):
             raise BackendError("登录完成了，但没有拿到登录信息", "unknown")
         self._state = st
+        self._keep_device(st.get("device"))
         self._mark_ready(n)
         acct = self._adopt(r.get("account") or {})
         return LoginDone(credentials={"v": 1, "state": st}, account=acct)
@@ -425,7 +457,9 @@ class WeChatBackend(Backend):
         if not isinstance(st, dict):
             raise CredentialsExpired(EXPIRED)
         self._state = st
+        self._keep_device(st.get("device"))
         n = self._link(restore=False)
+        self._begin_sign_in(n)
         r = self._call(n, "restore", 20, state=st)
         self._mark_ready(n)
         account = self._adopt(r.get("account") or {})
@@ -450,7 +484,12 @@ class WeChatBackend(Backend):
 
     def logout(self) -> None:
         n = self._native
-        self._state = None
+        with self._auth_mu:  # waits for a renewal being sealed now; none is sealed after this
+            self._auth_epoch += 1
+            self._signed_out = True
+            self._state = None
+            if n is not None:
+                n.epoch = -1
         if n is not None and n.alive():
             try:
                 n.call("logout", timeout=12)
@@ -642,7 +681,10 @@ class WeChatBackend(Backend):
             if cid and not is_group(cid):
                 self.store.set_name(self._name_key(cid, ""), out[cid][0], nick)
                 if c.get("verify_flag") is None:
-                    pass  # WeChat said nothing about what it is: whatever was known stays
+                    # WeChat said nothing about what it is: whatever was known stays; asked, though
+                    if cid not in ANSWERED:
+                        ANSWERED.add(cid)
+                        self.store.put("answered:" + cid, "1")
                 elif c.get("business"):
                     if cid not in BUSINESS:
                         learnt[cid] = "bot"

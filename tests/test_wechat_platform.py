@@ -304,6 +304,33 @@ class AlignedWithFeishuTest(unittest.TestCase):
         h2 = wechat(self, archive_groups=True)
         self.assertIn(TEAM, self.archived(h2))
 
+    def test_an_undecided_chat_is_held_then_sent_or_dropped(self):
+        from openmate_core import app as core_app
+        from openmate_wechat import backend as wb
+
+        h = wechat(self)
+        for cid in ("chat_example_dm_a", "chat_example_dm_b"):
+            self.assertIsNone(openmate_wechat.archive_chat(cid, None, {}), "asked about nothing yet")
+        got = self.archived(h)
+        self.assertNotIn("chat_example_dm_a", got, "held while WeChat has not said what it is")
+        held = h.app.store.archive_held_chats()
+        self.assertIn("chat_example_dm_a", held)
+        wb.PERSONS.add("chat_example_dm_a")  # a person, as WeChat then says
+        self.addCleanup(wb.PERSONS.discard, "chat_example_dm_a")
+        wb.BUSINESS.add("chat_example_dm_b")  # an official account
+        self.addCleanup(wb.BUSINESS.discard, "chat_example_dm_b")
+        res = h.c("archive.changes", cursor=str(10 ** 9), limit=100)
+        sent = {b["chat"]["id"]: len(b["messages"]) for b in res["batches"]}
+        self.assertIn("chat_example_dm_a", sent, "sent once decided, even behind the cursor")
+        self.assertGreater(sent["chat_example_dm_a"], 0)
+        self.assertNotIn("chat_example_dm_b", sent, "an official account's never")
+        self.assertEqual(h.app.store.archive_held_chats(), {})
+        # one never decided on is dropped after ARCHIVE_HOLD_DAYS
+        h.app.store.archive_hold([{"seq": 1, "chat_id": "chat_example_never"}], now=time.time() - 4 * 86400)
+        h.c("archive.changes", cursor=str(10 ** 9), limit=100)
+        self.assertEqual(h.app.store.archive_held_chats(), {})
+        self.assertEqual(core_app.ARCHIVE_HOLD_DAYS, 3)
+
     def test_sends_and_the_inbox_are_there(self):
         h = wechat(self)
         names = [t["name"] for t in h.c("actions.list")["tools"]]

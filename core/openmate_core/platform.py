@@ -49,7 +49,10 @@ class Platform:
     mark_view: Optional[Callable[[str], str]] = None
     #: whether a chat's messages go to the knowledge base: (chat id, its stored row or None, the settings) → bool;
     #: None: every chat (Feishu). WeChat keeps groups out unless the user turns them on, and official accounts out
-    archive_chat: Optional[Callable[[str, Optional[dict], Dict], bool]] = None
+    #: May answer None for a chat it cannot decide on yet (WeChat: an account not yet known as a person or an
+    #: official account): the core holds that chat's messages and asks again with later archive reads (up to
+    #: ARCHIVE_HOLD_DAYS), sending them once it answers True, dropping them on False.
+    archive_chat: Optional[Callable[[str, Optional[dict], Dict], Optional[bool]]] = None
     #: the extensions (X-Persona-Device "extension:<id>") that may read this one's chats for their 今天 through its own
     #: HTTP (todayapi; the manifest needs runtime.http). Empty: no HTTP at all
     today_api_callers: Tuple[str, ...] = ()

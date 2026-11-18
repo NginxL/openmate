@@ -51,9 +51,12 @@ def clean_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 
 class Native:
-    def __init__(self, path: str, on_persist: Callable[[Dict[str, Any]], bool], env: Optional[Dict[str, str]] = None):
+    def __init__(self, path: str, on_persist: Callable[[Dict[str, Any], int], bool],
+                 env: Optional[Dict[str, str]] = None):
         self.path = path
         self.on_persist = on_persist
+        # the backend's sign-in epoch, stamped on each renewal as it arrives: one from before a sign-out is not kept
+        self.epoch = 0
         self.events: "queue.Queue[Optional[dict]]" = queue.Queue()
         self._env = clean_env(env)
         self._proc: Optional[subprocess.Popen] = None
@@ -187,6 +190,7 @@ class Native:
                             pass
                     continue
                 if msg.get("event") == "persist":
+                    msg["_epoch"] = self.epoch
                     self._persist_q.put(msg)
                     continue
                 with self._mu:
@@ -239,7 +243,7 @@ class Native:
                 return
             ok = False
             try:
-                ok = bool(self.on_persist(msg.get("state") or {}))
+                ok = bool(self.on_persist(msg.get("state") or {}, int(msg.get("_epoch", 0))))
             except Exception:
                 log.exception("sealing the rotated WeChat sign-in failed")
             if proc is not self._proc:

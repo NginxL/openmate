@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict
+from typing import Dict, Optional
 
 from openmate_core.backend import Backend, BackendError
 from openmate_core.main import run
@@ -55,18 +55,22 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
     return WeChatBackend(inst.path, data_dir, ack_text=str(config.get("agent_ack_reaction") or ""))
 
 
-def archive_chat(chat_id: str, chat, config: Dict) -> bool:
+def archive_chat(chat_id: str, chat, config: Dict) -> Optional[bool]:
     """What goes to the knowledge base: direct chats and the user's own notes (文件传输助手); groups only with the setting
-    群聊进知识库 (the others in them did not agree to be recorded); never official accounts or WeChat's own."""
-    from .backend import is_group, kind_of
+    群聊进知识库 (the others in them did not agree to be recorded); never official accounts or WeChat's own. A chat
+    with an account of its own choosing (腾讯科技 is qqtech) that WeChat has not been asked about yet: None, so the
+    core holds its messages until WeChat says (an official account's must never reach the archive first)."""
+    from .backend import ANSWERED, PERSONS, SURE_PEOPLE, is_group, kind_of
 
     if is_group(chat_id) or (chat or {}).get("kind") == "group":
         return bool(config.get("archive_groups"))
     if chat_id == "filehelper":
         return True
-    # a person's chat: an id that looks like one, unless WeChat said it is an official account (BUSINESS, which
-    # kind_of answers for); old chats are classified in the background
-    return kind_of(chat_id) == "user"
+    if kind_of(chat_id) != "user":
+        return False  # an official account (known as one), WeChat's own, or not a person's id at all
+    if chat_id.startswith("wxid_") or chat_id.endswith(SURE_PEOPLE) or chat_id in PERSONS or chat_id in ANSWERED:
+        return True  # wxid_… ids are given to people only; the others as WeChat described them
+    return None
 
 
 def platform(manifest_path: str = "") -> Platform:

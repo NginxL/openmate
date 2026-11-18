@@ -429,6 +429,59 @@ class KindsLaterTest(Base):
         self.assertEqual(len(self.requests("contacts")), n, "not again before NAME_RETRY")
 
 
+class ArchiveRuleTest(Base):
+    def test_a_custom_id_waits_for_wechat_and_wxid_never_does(self):
+        import openmate_wechat
+
+        os.environ["FAKE_BUSINESS"] = "qqtech"
+        os.environ["FAKE_NO_KIND"] = "lawliet321x"
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        rule = openmate_wechat.archive_chat
+        self.assertTrue(rule("wxid_new", None, {}), "wxid_ ids are people's")
+        self.assertTrue(rule("123@openim", None, {}))
+        for cid in ("qqtech", "maol111", "lawliet321x"):
+            self.assertIsNone(rule(cid, None, {}), "not asked yet: undecided")
+        b._lookup_names(["qqtech", "maol111"])
+        b._lookup_names(["lawliet321x"])
+        self.assertFalse(rule("qqtech", None, {}), "an official account")
+        self.assertTrue(rule("maol111", None, {}), "a person, as WeChat said")
+        self.assertTrue(rule("lawliet321x", None, {}), "asked, no flags: as its id looks")
+        self.assertFalse(rule("gh_abc", None, {}))
+        self.assertFalse(rule("1@chatroom", None, {}))
+
+
+class SignOutTest(Base):
+    def test_a_renewal_from_before_a_sign_out_is_never_sealed_after_it(self):
+        b = self.backend()
+        sealed = []
+        b.on_credentials_sync = lambda creds: sealed.append(creds["state"]) or True
+        b.restore({"state": {"k": "v1"}})
+        before = b._native.epoch
+        self.assertTrue(b._persist({"k": "v2"}, before))
+        b.logout()
+        self.assertFalse(b._persist({"k": "v3"}, before), "queued before the sign-out, sealed after: never")
+        self.assertFalse(b._persist({"k": "v4"}, b._native.epoch), "made while signing out: never")
+        self.assertIsNone(b._state)
+        self.assertEqual(sealed, [{"k": "v2"}])
+        b.login_start()
+        self.assertTrue(b._persist({"k": "v5"}, b._native.epoch), "a new sign-in's renewals are kept")
+        self.assertEqual(sealed, [{"k": "v2"}, {"k": "v5"}])
+
+    def test_signing_in_again_is_the_same_computer(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1", "device": {"device_id": "abc"}}})
+        b.logout()
+        b.login_start()
+        self.assertEqual(self.requests("login_start")[-1]["device"], {"device_id": "abc"},
+                         "restore, sign out, sign in: the device it had")
+        b.close()
+        b2 = self.backend()
+        b2.login_start()
+        self.assertEqual(self.requests("login_start")[-1]["device"], {"device": 1},
+                         "kept across a restart too (the last one WeChat gave)")
+
+
 class GroupGoneTest(Base):
     def setUp(self):
         super().setUp()
