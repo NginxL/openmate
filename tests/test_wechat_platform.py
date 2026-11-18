@@ -100,6 +100,30 @@ class WeChatPlatformTest(unittest.TestCase):
         self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
 
 
+class AckOnlyForAgentTest(unittest.TestCase):
+    def test_agent_gets_the_taken_line_an_at_of_the_user_does_not(self):
+        """WeChat has no reactions: the taken line is a message of its own in the chat. The user's /agent gets it;
+        someone else's @ of the user (自动代答) is answered straight away, with nothing in front of the group."""
+        h = wechat(self, agent_ack_reaction="🤖 贾维斯处理中...")
+        reacted = []
+        h.app.backend.react = lambda chat, mid, reaction: reacted.append((mid, reaction)) or "ack_%d" % len(reacted)
+        msg = ask(h, "/agent 你好")
+        running(h, msg)
+        wait_until(lambda: reacted, what="the /agent taken line")
+        self.assertEqual(reacted, [(msg.id, "🤖 贾维斯处理中...")])
+        act(h, "autoreply", {"auto:" + TEAM: "true"})
+        at = h.world.push(TEAM, "user_example_b", "@示例用户 这个接口什么时候能好？", at_me=True)
+        run = running(h, at)
+        self.assertEqual(run["kind"], "auto")
+        time.sleep(0.3)
+        self.assertEqual(len(reacted), 1, "no taken line for an @ of the user")
+        self.assertFalse(h.app.store.run_get(run["id"]).get("acked"))
+
+    def test_feishu_still_marks_an_auto_reply(self):
+        h = Harness(self, config={"agent": True, "agent_reply_header": " ", "agent_ack_reaction": "OnIt"})
+        self.assertTrue(h.platform.ack_auto)
+
+
 class TodayAPIGrantTest(unittest.TestCase):
     def test_feishus_today_may_read_its_chats(self):
         import json
