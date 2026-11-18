@@ -254,6 +254,25 @@ class CatchUpTest(unittest.TestCase):
         catch_up()
         self.assertNotIn("chat_example_old", {c for c, _, _ in h.world.history_calls}, "once")
 
+    def test_messages_stored_with_no_text_are_read_again_where_they_are(self):
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        store = h.app.store
+        old = h.world.make("chat_example_chatter", "user_example_a", "", ago=3600)  # read as nothing back then
+        store.add_messages([old], True)
+        for i in range(120):  # it is far below the newest
+            store.add_messages([h.world.make("chat_example_chatter", "user_example_b", "闲聊%d" % i)], True)
+        self.assertEqual(store.message("chat_example_chatter", old.id)["text"], "")
+        old.text = "示例文章 https://example.com/a"  # a newer reading reads it
+        backend = h.app.backend
+        backend.render_version, backend.rerender_types, backend.rerender_empty = "9", (), ("TEXT",)
+        h.app._catchup_done.clear()
+        h.app._request_catch_up(h.app._gen)
+        wait_until(lambda: h.app._catchup_done.is_set(), what="a catch-up")
+        self.assertEqual(store.message("chat_example_chatter", old.id)["text"], "示例文章 https://example.com/a")
+        self.assertEqual(store.meta_get("render_version"), "9")
+
     def test_a_link_up_during_a_catch_up_gets_its_own(self):
         h = Harness(self)
         h.sign_in()

@@ -565,6 +565,36 @@ class ReadTest(Base):
         S.history["500"] = {p: frame_msg(str(100 + p), "500", p, text_data("第%d条" % p), sender=ME if p == 9 else "7002")
                             for p in range(1, 11) if p not in (6, 7)}  # 6 and 7 were recalled
 
+    def test_a_text_that_is_a_link(self):
+        def pb(*fields):  # a protobuf message of string fields: (number, text)
+            out = b""
+            for n, text in fields:
+                raw = text.encode("utf-8")
+                out += bytes([(n << 3) | 2, len(raw)]) + raw
+            return out
+
+        url = "https://example.com/articles/7699"
+        link = {"richText": {"elementIds": ["a"], "elements": {"dictionary": {
+            "a": {"tag": 6, "property": pb((1, url), (2, "示例文章标题"))}}}}}
+        bare = {"richText": {"elementIds": ["a"], "elements": {"dictionary": {"a": {"tag": 6, "property": pb((1, url))}}}}}
+        mixed = {"richText": {"elementIds": ["t", "a"], "elements": {"dictionary": {
+            "t": {"tag": 1, "property": "推荐看看 ".encode("utf-8")}, "a": {"tag": 6, "property": pb((2, url), (3, url))}}}}}
+        inner = {"richText": {"innerText": "只有纯文本 " + url, "elements": {"dictionary": {}}}}
+        S.history["600"] = {1: frame_msg("601", "600", 1, link), 2: frame_msg("602", "600", 2, bare),
+                            3: frame_msg("603", "600", 3, mixed), 4: frame_msg("604", "600", 4, inner)}
+        S.chats["600"] = {"id": "600", "type": 2, "name": "示例群", "lastMessagePosition": 4}
+        texts = [m.text for m in self.b.history("600", None, 10)]
+        self.assertEqual(texts, ["示例文章标题 " + url, url, "推荐看看 " + url, "只有纯文本 " + url])
+
+    def test_a_text_read_as_nothing_is_noted(self):
+        empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}
+        S.history["610"] = {1: frame_msg("611", "610", 1, empty)}
+        S.chats["610"] = {"id": "610", "type": 2, "name": "示例群", "lastMessagePosition": 1}
+        larkagentx._SHAPES_SEEN.clear()
+        with self.assertLogs("openmate.larkx", level="INFO") as logs:
+            self.b.history("610", None, 10)
+        self.assertTrue(any("read as nothing" in line and "35:" in line for line in logs.output), logs.output)
+
     def test_history_oldest_first_and_gaps_filled(self):
         msgs = self.b.history("500", None, 5)
         self.assertEqual([m.position for m in msgs], [4, 5, 8, 9, 10])

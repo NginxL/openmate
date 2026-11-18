@@ -32,6 +32,8 @@ from .wire import Peer, RPCError
 
 log = logging.getLogger("openmate")
 
+EMPTY_PAGES = 6  # a re-read of the messages stored with no text: at most this many pages per chat
+
 PROTOCOL = 1
 THREAD_MOST = 50
 THREAD_MEDIA_MOST = 4 << 20
@@ -849,6 +851,25 @@ class ConnectorApp:
                             if gen != self._gen:
                                 return
                             self.ingest(got, live=False)
+                empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
+                if empty and not first:
+                    # messages stored with no text: read again where they are, a page ending right after the newest
+                    # of them, back to the oldest (bounded)
+                    gaps = self.store.empty_positions(empty, time.time() - t.rerender_window, t.rerender_chats)
+                    for chat_id, (lo, hi, _) in gaps.items():
+                        before = hi + 1
+                        for _ in range(EMPTY_PAGES):
+                            if gen != self._gen or self.link != "up":
+                                return
+                            got = self.backend.history(chat_id, before, t.rerender_messages)
+                            if gen != self._gen:
+                                return
+                            self.ingest(got, live=False)
+                            if len(got) < t.rerender_messages:
+                                break
+                            before = min(m.position for m in got)
+                            if before <= lo:
+                                break
                 self.store.meta_set("render_version", version)
             self.last_sync = time.time()
             self.mark_changed("inbox", "chats")

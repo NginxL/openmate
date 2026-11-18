@@ -208,6 +208,9 @@ class Backend(abc.ABC):
     #: The service has a per-chat done mark (Feishu's 完成: the chat leaves the message list until a new message): the
     #: core asks chat_done_states about the chats that need the user and counts the marked ones as 处理完.
     done_marks: bool = False
+    #: Types a message of which an older reading may have stored with no text at all (Feishu: a text that is only a
+    #: link). When render_version changes, the core reads those messages again where they are (not only the newest).
+    rerender_empty: Tuple[str, ...] = ()
     #: A reply in a group's thread quotes the thread's first message, whichever message of it was picked (Feishu: the
     #: send carries only the root). The confirm card says so, so it shows what the message will really quote.
     thread_reply_quotes_root: bool = False

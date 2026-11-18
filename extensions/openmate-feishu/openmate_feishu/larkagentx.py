@@ -55,7 +55,8 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
-RENDER_VERSION = "5"
+RENDER_VERSION = "6"
+RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
 TREE_LIST_MOST = 8
@@ -436,6 +437,7 @@ class LarkXBackend(Backend):
 
     render_version = RENDER_VERSION
     rerender_types = RERENDER_TYPES
+    rerender_empty = RERENDER_EMPTY
     done_marks = True  # a chat's 完成
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
@@ -1354,12 +1356,16 @@ class LarkXBackend(Backend):
         return _LEADING_ID.sub(name, text or "")
 
     def _rich_text(self, data: dict) -> str:
-        return str(self.lx.decoders.extract_rich_text(data.get("richText") or {}) or data.get("text") or "")
+        rich = data.get("richText") or {}
+        text = rich_text(rich, self.lx.P)
+        return text or str(rich.get("innerText") or "").strip() or str(data.get("text") or "")
 
     def _read_text(self, mt: int, name: str, data: Optional[dict], summary: str) -> str:
         text = self._text(mt, name, data, summary)
         if mt in (CARD, SHARE_CALENDAR_EVENT) and data is not None and (not text or text == summary):
             note_shape(name, data)
+        elif mt in (TEXT, POST) and data is not None and not text.strip():
+            note_shape(name, data, rich_shape(data.get("richText") or {}))
         return text
 
     def _text(self, mt: int, name: str, data: Optional[dict], summary: str) -> str:
@@ -2123,9 +2129,137 @@ def shape_of(value, depth: int = 0) -> str:
     return type(value).__name__
 
 
-def note_shape(name: str, data: dict) -> None:
+# ---------------------------------------------------------------- rich text
+
+TEXT_TAGS = (1, 3, 7, 8, 9, 17, 23, 24, 25, 28, 29, 30, 31)  # text, p, b, i, u, link, h1-h3, li, quote, code: TextProperty
+AT_TAG_RICH = 5
+ANCHOR_TAG = 6  # A: a link, its address and words in the property
+PLACEHOLDERS = {2: "[图片]", 10: "[表情]", 18: "[视频]", 22: "[文档]"}
+URL_RE = re.compile(r"^https?://\S+$")
+WORDLESS_RE = re.compile(r"^[A-Za-z0-9_.:/#-]+$")  # a key, a target, an id: not the words a link shows
+
+
+def _varint(b: bytes, i: int) -> Tuple[int, int]:
+    out, shift = 0, 0
+    while True:
+        if i >= len(b) or shift > 63:
+            raise ValueError("a varint runs past the end")
+        c = b[i]
+        i += 1
+        out |= (c & 0x7F) << shift
+        if not c & 0x80:
+            return out, i
+        shift += 7
+
+
+def wire_strings(b: bytes) -> List[str]:
+    """The UTF-8 strings among a protobuf message's top-level fields, in order ([] when it does not read)."""
+    out: List[str] = []
+    i, n = 0, len(b or b"")
+    try:
+        while i < n:
+            key, i = _varint(b, i)
+            wt = key & 7
+            if wt == 0:
+                _, i = _varint(b, i)
+            elif wt == 2:
+                size, i = _varint(b, i)
+                if i + size > n:
+                    raise ValueError("a field runs past the end")
+                raw = b[i:i + size]
+                i += size
+                try:
+                    out.append(raw.decode("utf-8"))
+                except UnicodeDecodeError:
+                    pass
+            elif wt == 1:
+                i += 8
+            elif wt == 5:
+                i += 4
+            else:
+                raise ValueError("an unknown wire type")
+    except ValueError:
+        return []
+    return out
+
+
+def link_text(prop: bytes) -> str:
+    """An A element's words and address ("words address", or the address alone when the words are it)."""
+    strings = [s.strip() for s in wire_strings(prop) if s and s.strip()]
+    href = next((s for s in strings if URL_RE.match(s)), "")
+    words = next((s for s in strings if s != href and not s.startswith(("{", "[")) and not URL_RE.match(s)
+                  and len(s) <= 500 and s.isprintable() and not WORDLESS_RE.match(s)), "")
+    if href and words and words != href:
+        return "%s %s" % (words, href)
+    return href or words
+
+
+def rich_text(rich: dict, P) -> str:
+    """A rich text's words in order: text runs, @names, links (their words and address), placeholders."""
+    try:
+        dictionary = (rich.get("elements") or {}).get("dictionary") or {}
+    except AttributeError:
+        return ""
+    ids = [str(k) for k in rich.get("elementIds") or []]
+    order = [k for k in ids if k in dictionary] + [k for k in dictionary if k not in set(ids)]
+    out: List[str] = []
+    for k in order:
+        el = dictionary.get(k)
+        if not isinstance(el, dict):
+            continue
+        tag = el.get("tag", 1)
+        try:
+            tag = int(tag)
+        except (TypeError, ValueError):
+            tag = -1
+        prop = el.get("property") or b""
+        if tag in TEXT_TAGS and prop:
+            try:
+                tp = P.TextProperty()
+                tp.ParseFromString(prop)
+                out.append(tp.content + ("\n" if tag == 3 else ""))
+                continue
+            except Exception:
+                pass
+        if tag == AT_TAG_RICH and prop:
+            try:
+                ap = P.AtProperty()
+                ap.ParseFromString(prop)
+                if ap.content:
+                    out.append(ap.content)
+                    continue
+            except Exception:
+                pass
+        if tag == ANCHOR_TAG and prop:
+            words = link_text(prop)
+            if words:
+                out.append(words)
+                continue
+        if tag in PLACEHOLDERS:
+            out.append(PLACEHOLDERS[tag])
+            continue
+        if prop and tag not in TEXT_TAGS:  # another element that holds an address: the address at least
+            href = next((s.strip() for s in wire_strings(prop) if URL_RE.match(s.strip())), "")
+            if href:
+                out.append(href)
+    return "".join(out).strip()
+
+
+def rich_shape(rich: dict) -> str:
+    """The tags of a rich text's elements and their properties' field layout, never their content."""
+    parts = []
+    dictionary = ((rich or {}).get("elements") or {}).get("dictionary") or {}
+    for el in list(dictionary.values())[:12]:
+        if not isinstance(el, dict):
+            continue
+        prop = el.get("property") or b""
+        parts.append("%s:%d strings" % (el.get("tag"), len(wire_strings(prop)) if prop else 0))
+    return "elements=[%s] innerText=%s" % (",".join(parts), "yes" if (rich or {}).get("innerText") else "no")
+
+
+def note_shape(name: str, data: dict, extra: str = "") -> None:
     """A message read as nothing: its decoded shape in the log, once per shape (to learn where its text is)."""
-    shape = shape_of(data)
+    shape = shape_of(data) + ((" " + extra) if extra else "")
     key = name + shape
     if key in _SHAPES_SEEN or len(_SHAPES_SEEN) > 200:
         return

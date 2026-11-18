@@ -12,7 +12,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .backend import Chat, Message
 
@@ -298,6 +298,18 @@ class Store:
             "SELECT chat_id, MAX(at) AS last FROM messages WHERE type IN (%s) AND at >= ? GROUP BY chat_id "
             "ORDER BY last DESC LIMIT ?" % ",".join("?" * len(types)), types + [since, limit])
         return [r["chat_id"] for r in rows]
+
+    def empty_positions(self, types, since: float, limit: int) -> Dict[str, Tuple[int, int, int]]:
+        """{chat: (lowest, highest position, how many)} of the messages of these types stored with no text since then
+        (read as nothing by an older reading), the chats with the most recent first, at most limit chats."""
+        types = [str(t).upper() for t in types]
+        if not types:
+            return {}
+        rows = self._all(
+            "SELECT chat_id, MIN(position) AS lo, MAX(position) AS hi, COUNT(*) AS n, MAX(at) AS last FROM messages "
+            "WHERE type IN (%s) AND text = '' AND at >= ? GROUP BY chat_id ORDER BY last DESC LIMIT ?"
+            % ",".join("?" * len(types)), types + [since, limit])
+        return {r["chat_id"]: (int(r["lo"]), int(r["hi"]), int(r["n"])) for r in rows}
 
     def get_chat(self, chat_id: str) -> Optional[dict]:
         r = self._one("SELECT * FROM chats WHERE id = ?", (chat_id,))
