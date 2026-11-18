@@ -873,16 +873,21 @@ class LarkXBackend(Backend):
             _, now_me = self._session()
             if now_me is None or now_me.id != me.id:
                 return  # another account signed in meanwhile: these are not its groups
+            left: Set[str] = set()
             with self._groups_mu:  # published, then what was heard while it was out (newer), in order, at once
+                if whole and self._groups_owner == me.id and self._groups_at:
+                    # a whole read after a whole read: a group no longer listed was left (or dissolved meanwhile)
+                    left = {g.id for g in self._groups} - {g.id for g in groups}
                 self._groups, self._groups_join, self._groups_owner = groups, joined, me.id
                 if whole:
                     self._groups_at = time.monotonic()
                 else:
                     self._groups_soon = True
                 for infos, gone in self._groups_delta:
-                    self._apply_chats_locked(infos, gone, me)
+                    left |= self._apply_chats_locked(infos, gone, me)
                 self._groups_delta = []
                 self._groups_busy = False
+            self._report_gone(left)
             log.info("Feishu groups: %d%s", len(groups), "" if whole else " (not all of them: read again soon)")
         except BackendError as e:
             log.info("the groups could not be read: %s", e.kind)
@@ -982,11 +987,26 @@ class LarkXBackend(Backend):
         with self._groups_mu:
             if self._groups_busy:
                 self._groups_delta.append((infos, list(gone)))  # put on the read's result too, when it comes
-            self._apply_chats_locked(infos, gone, me)
+            left = self._apply_chats_locked(infos, gone, me)
+        self._report_gone(left)
 
-    def _apply_chats_locked(self, infos: Dict[str, dict], gone: List[str], me: Account) -> None:
-        if self._groups_owner != me.id:
+    def _report_gone(self, chat_ids) -> None:
+        """Tell the core the account left these chats (or they were dissolved): out of its lists, unmarked for
+        自动代答, until a newer message brings one back. Outside any lock of the adapter's."""
+        cb = self.on_chat_gone
+        if cb is None:
             return
+        for cid in sorted(set(chat_ids)):
+            try:
+                cb(cid)
+            except Exception as e:
+                log.warning("a chat gone was not taken (%s)", type(e).__name__)
+
+    def _apply_chats_locked(self, infos: Dict[str, dict], gone: List[str], me: Account) -> Set[str]:
+        """Put a push's chat changes on the list (the caller holds _groups_mu). The chats the account left or that
+        were dissolved, deleted, frozen or left only looked into: told to the core by the caller."""
+        if self._groups_owner != me.id:
+            return set()
         known = {g.id: g for g in self._groups}
         drop = {str(g) for g in gone}
         update: Dict[str, Chat] = {}
@@ -1015,6 +1035,7 @@ class LarkXBackend(Backend):
             self._groups_join.pop(cid, None)  # joined again later: a new time, on top
         if soon:
             self._groups_soon = True
+        return drop
 
     def _seen_group(self, chat_id: str, me: Account) -> None:
         """A message in a group the list lacks (a group just made or joined says so first): read every group again

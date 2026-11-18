@@ -720,6 +720,33 @@ class ReadTest(Base):
         self.b._apply_chats({"g8": {"id": "g8", "isDissolved": True}}, [], other)
         self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g8"], "another account's push changes nothing")
 
+    def test_groups_left_or_dissolved_are_told_to_the_core(self):
+        client, me = self.b._signed_in()
+        gone = []
+        self.b.on_chat_gone = gone.append
+        self.set_groups(me, [("g1", "群一", 3, False), ("g2", "群二", 3, False), ("g3", "群三", 3, False)])
+        self.b._apply_chats({"g1": {"id": "g1", "isDissolved": True}, "g2": {"id": "g2", "type": 2, "name": "群二新名"}},
+                            ["g9"], me)
+        self.assertEqual(sorted(gone), ["g1", "g9"], "dissolved, and one the push says is no longer valid")
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g2", "g3"])
+
+        def read_whole(ids, whole=True):
+            return lambda c: ([larkagentx.Chat(id=i, kind="group", name=i) for i in ids], {i: 1 for i in ids}, whole)
+
+        real = self.b._read_groups
+        self.addCleanup(setattr, self.b, "_read_groups", real)
+        del gone[:]
+        self.b._groups_at = 0.0
+        self.b._read_groups = read_whole(["g2"])
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [], "the first whole read compares with nothing")
+        self.b._read_groups = read_whole(["g2", "g4"], whole=False)
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [], "a part read says nothing about the others")
+        self.b._read_groups = read_whole(["g2"])
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, ["g4"], "a whole read after a whole read: the one no longer listed was left")
+
     def test_what_is_heard_during_a_read_is_put_on_its_result(self):
         client, me = self.b._signed_in()
         self.set_groups(me, [("g1", "要退的群", 3, False)])
