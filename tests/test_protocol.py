@@ -49,7 +49,7 @@ class HandshakeTest(unittest.TestCase):
     def test_unknown_and_undeclared(self):
         h = Harness(self)
         for method, code in (("nonexistent.method", "unknown_method"), ("connector.nonexistent_method", "unknown_method"),
-                             ("connector.history.chats", "no_capability"), ("connector.items.list", "no_capability"),
+                             ("connector.history.anchors", "no_capability"), ("connector.items.list", "no_capability"),
                              ("connector.recall.do", "no_capability")):
             with self.assertRaises(HubSideError) as e:
                 h.hub.request(method, {"contribution": CID})

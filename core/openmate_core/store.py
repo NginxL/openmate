@@ -98,6 +98,11 @@ _MESSAGE_COLUMNS = (
     "at_me, at_all, media, from_history, received"
 )
 
+# What archive.changes hands over (views.is_system / views.has_content) as SQL: not a system line, and some text that
+# is not only blanks, or some media.
+_ARCHIVABLE = ("type != 'SYSTEM' AND (trim(text, ' ' || char(9, 10, 11, 12, 13, 160, 12288)) != '' "
+               "OR media NOT IN ('', '[]'))")
+
 
 _INSERT_COLUMNS = ("chat_id, id, position, sender_id, sender_name, mine, type, text, at, root_id, thread_id, parent_id, "
                    "at_me, at_all, media, from_history, received")
@@ -489,13 +494,25 @@ class Store:
         )
         return [_message_row(r) for r in rows]
 
-    def has_before(self, chat_id: str, position: int) -> bool:
-        """A message of chat is stored before this position."""
-        return self._one("SELECT 1 FROM messages WHERE chat_id = ? AND position < ? LIMIT 1", (chat_id, int(position))) is not None
-
-    def has_after(self, chat_id: str, position: int) -> bool:
-        """A message of chat is stored after this position."""
-        return self._one("SELECT 1 FROM messages WHERE chat_id = ? AND position > ? LIMIT 1", (chat_id, int(position))) is not None
+    def history_rows(self, chat_id: str, *, older_than: Optional[tuple] = None, newer_than: Optional[tuple] = None,
+                     limit: int) -> List[dict]:
+        """Up to limit messages of chat that archive.changes would hand over (no system lines, something to read),
+        oldest first by (position, seq): the newest ones older than older_than (the newest of all when both bounds are
+        None), or the oldest ones newer than newer_than. A bound is a (position, seq) pair."""
+        cond, args = "chat_id = ? AND " + _ARCHIVABLE, [chat_id]
+        if newer_than is not None:
+            cond += " AND (position > ? OR (position = ? AND seq > ?))"
+            args += [int(newer_than[0]), int(newer_than[0]), int(newer_than[1])]
+            order = "position, seq"
+        else:
+            if older_than is not None:
+                cond += " AND (position < ? OR (position = ? AND seq < ?))"
+                args += [int(older_than[0]), int(older_than[0]), int(older_than[1])]
+            order = "position DESC, seq DESC"
+        rows = self._all("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE " + cond + " ORDER BY " + order + " LIMIT ?",
+                         args + [int(limit)])
+        out = [_message_row(r) for r in rows]
+        return out if newer_than is not None else out[::-1]
 
     def message_counts(self) -> Dict[str, int]:
         """How many messages (not system lines) each chat has stored."""

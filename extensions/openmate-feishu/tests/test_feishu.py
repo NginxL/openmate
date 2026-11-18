@@ -39,7 +39,7 @@ class ManifestTest(unittest.TestCase):
 
     def test_connector(self):
         self.assertEqual(CONN["id"], openmate_feishu.CONNECTOR_ID)
-        self.assertEqual(CONN["capabilities"], ["status", "tools", "actions", "events", "inbox", "archive", "login", "threads"])
+        self.assertEqual(CONN["capabilities"], ["status", "tools", "actions", "events", "inbox", "archive", "history", "login", "threads"])
         self.assertEqual(CONN["kinds"], ["dm", "mention", "group"])
         self.assertEqual(sorted(CONN["kind_descriptions"]), sorted(CONN["kinds"]))
         descs = list(CONN["kind_descriptions"].values())
