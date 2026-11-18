@@ -318,7 +318,8 @@ class ConnectorApp:
             except Exception:
                 pass
         if self.store is not None:
-            self.store.close()
+            with self._wipe_mu:  # after an ingest's last write, and none after it (it checks closing)
+                self.store.close()
         if held:
             self._done_mu.release()
 
@@ -585,10 +586,7 @@ class ConnectorApp:
             if not (ask or heard) or self.link != "up":
                 continue
             if ask:
-                try:
-                    self._read_blank_again(self._gen)
-                except Exception as e:
-                    log.info("reading again the messages stored empty failed (%s)", type(e).__name__)
+                self._read_blank_soon()  # beside the done round, never in its way
             try:
                 n = self._done_round(None if ask else heard)
                 if n:
@@ -761,6 +759,7 @@ class ConnectorApp:
             with self._done_mu:  # a done round of the account before must not write into this one's
                 with self._wipe_mu:  # nor an ingest that asked the service before the switch
                     self.store.wipe_account_data()  # another account: forget the previous one's chats
+                    self._names.clear()  # and the names it looked up
                     with self.lock:
                         self._account_epoch += 1
 
@@ -915,13 +914,43 @@ class ConnectorApp:
             if not self.closing.is_set():
                 log.exception("history catch-up failed")
 
-    def _read_blank_again(self, gen: int) -> None:
-        """Read again, each where it is, the newest BLANK_MOST messages of the last day stored with no text (held for
-        review, or a link only a newer read shows); one that cannot be read is passed over."""
-        empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
-        for chat_id, pos in self.store.blank_rows(empty, time.time() - 86400.0, BLANK_MOST) if empty else []:
-            if gen != self._gen or self.link != "up":
+    def _read_blank_soon(self) -> None:
+        with self.lock:
+            if getattr(self, "_blank_running", False):
                 return
+            self._blank_running = True
+            gen = self._gen
+
+        def run():
+            try:
+                self._read_blank_again(gen)
+            except Exception as e:
+                log.info("reading again the messages stored empty failed (%s)", type(e).__name__)
+            finally:
+                with self.lock:
+                    self._blank_running = False
+
+        threading.Thread(target=run, name="openmate-blank", daemon=True).start()
+
+    def _read_blank_again(self, gen: int) -> None:
+        """Read again, each where it is, BLANK_MOST messages of the last day stored with no text (held for review, or
+        a link only a newer read shows): the newest not tried in the last half hour, so every one has its turns; one
+        that cannot be read is passed over. The pages are told when one reads."""
+        empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
+        if not empty or self.store is None:
+            return
+        now = time.time()
+        tried = getattr(self, "_blank_tried", None)
+        if tried is None:
+            tried = self._blank_tried = {}
+        for k in [k for k, at in tried.items() if now - at > 86400.0]:
+            tried.pop(k, None)
+        rows = [r for r in self.store.blank_rows(empty, now - 86400.0, BLANK_MOST * 10) if now - tried.get(r, 0) > 1800.0]
+        filled = False
+        for chat_id, pos in rows[:BLANK_MOST]:
+            if gen != self._gen or self.link != "up" or self.closing.is_set():
+                break
+            tried[(chat_id, pos)] = now
             try:
                 got = self.backend.history(chat_id, pos + 1, 2)
             except CredentialsExpired:
@@ -930,8 +959,11 @@ class ConnectorApp:
                 log.info("reading again a message stored empty: it could not be read (%s)", e.kind)
                 continue
             if gen != self._gen:
-                return
+                break
             self.ingest(got, live=False)
+            filled = filled or any((m.text or "").strip() for m in got)
+        if filled:
+            self.mark_changed("inbox", "chats")
 
     def _caught_up_since(self) -> float:
         """Messages of a chat new to the store are kept from here: the last whole catch-up (less a margin), else the
@@ -1031,8 +1063,8 @@ class ConnectorApp:
                                 if same():
                                     self.store.put_name(m.sender_id, m.sender_name)
         with self._wipe_mu:
-            if not same():
-                log.info("%d message(s) read for an account signed out meanwhile: not stored", len(msgs))
+            if not same() or self.closing.is_set():
+                log.info("%d message(s) read for an account signed out meanwhile (or while closing): not stored", len(msgs))
                 return []
             new = self.store.add_messages(msgs, from_history=not live)
         if new:
@@ -1508,6 +1540,7 @@ class ConnectorApp:
         store picks by a slightly wider rule (other Unicode blanks), so a line it let through is passed over here.
         The store is read HISTORY_STEP lines at a time at least, so a long run of such lines costs few queries."""
         got: List[dict] = []  # newer_than: oldest first; else newest first (turned round at the end)
+        skip = set(getattr(self.backend, "unarchived_texts", ()) or ())  # as archive.changes
         while len(got) < want:
             step = max(want - len(got), HISTORY_STEP)
             rows = self.store.history_rows(chat_id, older_than=older_than, newer_than=newer_than, inclusive=inclusive,
@@ -1518,7 +1551,7 @@ class ConnectorApp:
                     newer_than = r["_key"]
                 else:
                     older_than = r["_key"]
-                if views.has_content(r):
+                if views.has_content(r) and (r.get("text") or "") not in skip:
                     got.append(r)
                     if len(got) >= want:
                         break

@@ -427,6 +427,8 @@ class Store:
             for m in msgs:
                 if not m.id or not m.chat_id:
                     continue
+                if m.text and not m.text.strip():
+                    m.text = ""  # spaces alone are no text: it stays one to read again
                 cur = db.execute(
                     "INSERT OR IGNORE INTO messages (" + _MESSAGE_COLUMNS.replace("seq, ", "") + ") "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
