@@ -673,31 +673,72 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
     let ids: Vec<String> = p
         .get("ids")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).take(40).collect())
+        .map(|a| a.iter().filter_map(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned).take(40).collect())
         .unwrap_or_default();
+    // a WeCom contact (…@openim) is read with its own request, one at a time; the rest two per request
+    let (openim, plain): (Vec<String>, Vec<String>) = ids.into_iter().partition(|i| i.ends_with("@openim"));
     let mut found = vec![];
-    for pair in ids.chunks(2) {
-        // the server takes one or two identities per request
-        let r = app.rt.block_on(async { tokio::time::timeout(Duration::from_secs(8), client.lookup_contacts(pair)).await });
-        match r {
-            Ok(Ok(lookup)) => {
-                for c in lookup.contacts {
-                    // field 24 of the contact is its verify flag: bit 8 marks a verified official / service account
-                    let flag = wechat_protocol::protobuf::decode(&c.raw)
-                        .ok()
-                        .and_then(|f| match wechat_protocol::protobuf::optional(&f, 24) {
-                            Ok(Some(wechat_protocol::protobuf::Value::Varint(v))) => Some(*v),
-                            _ => None,
-                        });
-                    found.push(json!({"id": c.username, "nickname": c.nickname, "remark": c.remark, "alias": c.alias,
-                                      "verify_flag": flag, "business": flag.is_some_and(|v| v & 8 != 0)}));
+    for pair in plain.chunks(2) {
+        match lookup_contacts(app, &client, pair) {
+            Ok(cs) => found.extend(cs),
+            Err(e) if pair.len() == 2 => {
+                // WeChat answers an id it can't show with an empty record, failing the pair: each on its own then
+                log(&format!("contact lookup failed: {e}; trying each on its own"));
+                for one in pair {
+                    match lookup_contacts(app, &client, std::slice::from_ref(one)) {
+                        Ok(cs) => found.extend(cs),
+                        Err(e) => log(&format!("contact lookup failed for one: {e}")),
+                    }
                 }
             }
-            Ok(Err(e)) => log(&format!("contact lookup failed: {e:#}")),
-            Err(_) => log("contact lookup timed out"),
+            Err(e) => log(&format!("contact lookup failed: {e}")),
+        }
+    }
+    for id in openim {
+        let (c, who) = (client.clone(), id.clone());
+        let r = app.rt.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                tokio::task::spawn_blocking(move || c.request_blocking(|r| r.lookup_openim_contact(&who, None, None))),
+            )
+            .await
+        });
+        match r {
+            Ok(Ok(Ok(c))) if c.username == id => {
+                found.push(json!({"id": c.username, "nickname": c.nickname, "remark": c.remark, "alias": null,
+                                  "verify_flag": null, "business": false}));
+            }
+            Ok(Ok(Ok(_))) => log("WeCom contact lookup answered another id"),
+            Ok(Ok(Err(e))) => log(&format!("WeCom contact lookup failed: {e:#}")),
+            Ok(Err(_)) => log("WeCom contact lookup stopped"),
+            Err(_) => log("WeCom contact lookup timed out"),
         }
     }
     Ok(json!({"contacts": found}))
+}
+
+/// One or two ordinary contacts: their records, or why not.
+fn lookup_contacts(app: &App, client: &NativeClient, ids: &[String]) -> std::result::Result<Vec<Value>, String> {
+    let r = app.rt.block_on(async { tokio::time::timeout(Duration::from_secs(8), client.lookup_contacts(ids)).await });
+    match r {
+        Ok(Ok(lookup)) => Ok(lookup
+            .contacts
+            .into_iter()
+            .map(|c| {
+                // field 24 of the contact is its verify flag: bit 8 marks a verified official / service account
+                let flag = wechat_protocol::protobuf::decode(&c.raw)
+                    .ok()
+                    .and_then(|f| match wechat_protocol::protobuf::optional(&f, 24) {
+                        Ok(Some(wechat_protocol::protobuf::Value::Varint(v))) => Some(*v),
+                        _ => None,
+                    });
+                json!({"id": c.username, "nickname": c.nickname, "remark": c.remark, "alias": c.alias,
+                       "verify_flag": flag, "business": flag.is_some_and(|v| v & 8 != 0)})
+            })
+            .collect()),
+        Ok(Err(e)) => Err(format!("{e:#}")),
+        Err(_) => Err("timed out".into()),
+    }
 }
 
 fn op_room(app: &App, p: &Value) -> Result<Value> {

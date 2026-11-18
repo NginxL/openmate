@@ -220,6 +220,7 @@ class ConnectorApp:
                 self.backend.on_credentials = self._credentials_rotated
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_history = self._history_from_backend
+                self.backend.on_people_kinds = self._people_kinds_from_backend
                 self.backend.on_doc_mention = self._doc_mention
                 self.backend.on_chats_done = self._chats_done
                 self.backend.on_reacted = self._reacted
@@ -409,6 +410,20 @@ class ConnectorApp:
         self.today_api = api
 
     # ------------------------------------------------------------------ the service's done mark (Feishu's 完成)
+
+    def _people_kinds_from_backend(self, kinds: Dict[str, str]) -> None:
+        """The backend learnt what someone is after it was asked (an official account found later): kept, and the
+        pages and the badge count them again."""
+        if self.store is None or self.closing.is_set():
+            return
+        try:
+            kinds = {str(i): k for i, k in (kinds or {}).items() if i and k in ("bot", "user")}
+            if kinds:
+                self.store.set_people_kinds(kinds)
+                self.mark_changed("inbox")
+        except Exception:
+            if not self.closing.is_set():
+                log.exception("kinds from the backend could not be kept")
 
     def _chats_done(self, done: Dict[str, float]) -> None:
         """The live link heard chats marked done in the service's own client: ask about them (off its thread). A push
@@ -717,7 +732,8 @@ class ConnectorApp:
             return []
         for chat_id in {m.chat_id for m in msgs}:
             known = self.store.get_chat(chat_id)
-            if known is None or not known.get("name"):
+            # no name, or only the id as a stand-in (kept by older versions): ask the backend again
+            if known is None or not known.get("name") or known.get("name") == chat_id:
                 try:
                     self.store.upsert_chat(self.backend.chat_info(chat_id))
                 except BackendError:

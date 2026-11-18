@@ -45,10 +45,13 @@ log = logging.getLogger("openmate.wechat")
 
 EXPIRED = "微信登录已失效，需要重新扫码登录"
 NAME_TTL = 6 * 3600.0
+NAME_RETRY = 600.0  # a chat WeChat gave no name for is asked about again after this long
 GROUPS_EVERY = 6 * 3600.0  # the contacts' group list is read again this often (and on every contact change)
 GROUPS_SPACING = 60.0
 GROUPS_CHECK_EVERY = 600.0
 GROUP_NAME_PAUSE = 0.3
+KINDS_LOOKUP_MOST = 20  # people_kinds asks WeChat about at most this many undescribed ids per call
+SURE_PEOPLE = ("@openim", "@qy_u")  # WeCom accounts: people's (WeChat gives them no verify flag)
 SEND_WAIT = 45.0
 # Accounts that are WeChat's own or a program, never a person (official accounts are gh_…, ClawBot bots …@im.bot)
 SERVICE_IDS = {"filehelper", "weixin", "weibo", "fmessage", "floatbottle", "medianote", "qmessage", "tmessage",
@@ -95,7 +98,7 @@ def kind_of(user_id: str) -> str:
         return "bot"
     if is_group(user_id):
         return ""
-    if user_id.endswith(("@openim", "@qy_u")):  # a WeCom member / account: a person's work account
+    if user_id.endswith(SURE_PEOPLE):  # a WeCom member / account: a person's work account
         return "user"
     return "user" if PERSON_ID.match(user_id) else ""
 
@@ -236,7 +239,8 @@ class Store:
         """Direct chats with no kind learnt yet (kept from before kinds were read): to look up in the background."""
         with self._mu:  # every direct chat (a person's account has some thousands at most): none is left behind
             rows = self._db.execute("SELECT id FROM chats WHERE NOT (" + GROUP_SQL + ") ORDER BY last_at DESC").fetchall()
-        return [r[0] for r in rows if r[0] not in known and kind_of(r[0]) == "user"][:limit]
+        return [r[0] for r in rows if r[0] not in known and kind_of(r[0]) == "user"
+                and not r[0].endswith(SURE_PEOPLE)][:limit]
 
     def last_incoming(self, chat: str) -> int:
         """When someone else last wrote in the chat (0: never, as far as kept here)."""
@@ -416,7 +420,10 @@ class WeChatBackend(Backend):
         n = self._link(restore=False)
         r = self._call(n, "restore", 20, state=st)
         self._mark_ready(n)
-        return self._adopt(r.get("account") or {})
+        account = self._adopt(r.get("account") or {})
+        # official accounts learnt before (perhaps after the core was told "user" for them)
+        self._tell_kinds({b: "bot" for b in BUSINESS})
+        return account
 
     def _adopt(self, account: dict) -> Account:
         me = str(account.get("id") or "")
@@ -565,13 +572,16 @@ class WeChatBackend(Backend):
 
     def chat_info(self, chat_id: str) -> Chat:
         row = self.store.chat(chat_id)
-        if row is None or not row[0] or time.time() - row[1] > NAME_TTL:
+        age = time.time() - row[1] if row is not None else 0.0
+        # no name yet: asked again after NAME_RETRY (not on every message); a name: renewed after NAME_TTL
+        if row is None or (not row[0] and age > NAME_RETRY) or age > NAME_TTL:
             self._read_chat_name(chat_id)
             row = self.store.chat(chat_id) or ("", 0.0, 0)
         name, _, members = row
         group = is_group(chat_id)
-        if not name:
-            name = "群聊" if group else (self._lookup_names([chat_id]).get(chat_id, ("", ""))[0] or chat_id)
+        if not name and group:
+            name = "群聊"
+        # a person WeChat would not name stays nameless (shown by id): the core asks again with the next message
         return Chat(id=chat_id, kind="group" if group else "dm", name=name, peer_id="" if group else chat_id,
                     members=members)
 
@@ -583,6 +593,8 @@ class WeChatBackend(Backend):
             members = self._roster(chat_id)[1]  # the full count, or 0 (unknown) when WeChat gave none
         if name or members:
             self.store.name_chat(chat_id, name, members)
+        else:
+            self.store.set_chat_name(chat_id, "")  # asked now: not again before NAME_RETRY
 
     def _lookup_names(self, ids: List[str]) -> Dict[str, Tuple[str, str]]:
         """id → (shown name: remark or nickname, mention name: nickname) from WeChat."""
@@ -594,6 +606,7 @@ class WeChatBackend(Backend):
         except BackendError:
             return {}
         out = {}
+        learnt: Dict[str, str] = {}
         for c in r.get("contacts") or []:
             cid = str(c.get("id") or "")
             nick = str(c.get("nickname") or "")
@@ -603,13 +616,27 @@ class WeChatBackend(Backend):
                 if c.get("verify_flag") is None:
                     pass  # WeChat said nothing about what it is: whatever was known stays
                 elif c.get("business"):
+                    if cid not in BUSINESS:
+                        learnt[cid] = "bot"
                     BUSINESS.add(cid)
                     PERSONS.discard(cid)
                     self.store.put("biz:" + cid, "1")
                 else:
                     PERSONS.add(cid)
                     self.store.put("person:" + cid, "1")
+        if learnt:
+            self._tell_kinds(learnt)
         return out
+
+    def _tell_kinds(self, kinds: Dict[str, str]) -> None:
+        """What someone turned out to be, for the core (it keeps an earlier answer for good otherwise)."""
+        cb = self.on_people_kinds
+        if cb is None or not kinds:
+            return
+        try:
+            cb(dict(kinds))
+        except Exception:
+            log.exception("kinds could not be handed to the core")
 
     def _roster(self, chat_id: str) -> Tuple[List[dict], int]:
         try:
@@ -659,6 +686,14 @@ class WeChatBackend(Backend):
         return (found[1] if found else "") or user_id
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        # a person-like id WeChat has not described yet may be an official account with an id of its own choosing
+        # (腾讯科技 is qqtech): ask WeChat first, a few at a time; the rest are told later through on_people_kinds
+        ask = [u for u in dict.fromkeys(user_ids) if u and kind_of(u) == "user" and u not in PERSONS
+               and u not in BUSINESS and not u.endswith(SURE_PEOPLE)][:KINDS_LOOKUP_MOST]
+        for i in range(0, len(ask), 2):
+            if self._closed:
+                break
+            self._lookup_names(ask[i:i + 2])
         out = {}
         for uid in user_ids:
             k = kind_of(uid)

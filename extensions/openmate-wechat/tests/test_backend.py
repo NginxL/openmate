@@ -395,6 +395,40 @@ class HistoryToCoreTest(Base):
             b.create_chat("9@qy_g")
 
 
+class KindsLaterTest(Base):
+    def test_people_kinds_asks_wechat_about_undescribed_ids_and_tells_the_core_later(self):
+        os.environ["FAKE_BUSINESS"] = "qqtech"
+        b = self.backend()
+        told = []
+        b.on_people_kinds = told.append
+        b.restore({"state": {"k": "v1"}})
+        oim = "25984984210915466@openim"
+        self.assertEqual(b.people_kinds(["qqtech", "wxid_bob", oim]), {"qqtech": "bot", "wxid_bob": "user", oim: "user"},
+                         "腾讯科技 has a person-like id: WeChat says it is an official account")
+        asked = [i for r in self.requests("contacts") for i in r.get("ids", [])]
+        self.assertNotIn(oim, asked, "a WeCom account is a person's: nothing to ask")
+        self.assertIn({"qqtech": "bot"}, told)
+        n = len(self.requests("contacts"))
+        b.people_kinds(["qqtech", "wxid_bob"])
+        self.assertEqual(len(self.requests("contacts")), n, "described once: not asked again")
+        b.close()
+        b2 = self.backend()
+        told2 = []
+        b2.on_people_kinds = told2.append
+        b2.restore({"state": {"k": "v1"}})
+        self.assertIn({"qqtech": "bot"}, told2, "what was learnt before is told again at start (the core may say user)")
+
+    def test_a_person_wechat_will_not_name_stays_nameless_and_is_not_asked_each_time(self):
+        os.environ["FAKE_UNKNOWN"] = "wxid_ghost"
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b.store.add_message(msg("g1", "wxid_ghost", "wxid_ghost", "你好"))
+        self.assertEqual(b.chat_info("wxid_ghost").name, "", "never the id as a name: the core asks again later")
+        n = len(self.requests("contacts"))
+        b.chat_info("wxid_ghost")
+        self.assertEqual(len(self.requests("contacts")), n, "not again before NAME_RETRY")
+
+
 class ReadTest(Base):
     def test_a_chat_read_on_the_phone_after_the_last_message_is_done(self):
         now = int(time.time())

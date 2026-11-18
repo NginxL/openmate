@@ -343,6 +343,26 @@ class ReviewElevenTest(unittest.TestCase):
         self.assertEqual([r for r in h.app.store.runs_in_chat("chat_example_dm_a", 50)], [], "history is never a request")
 
 
+class KindsAndNamesLaterTest(unittest.TestCase):
+    def test_a_kind_learnt_later_replaces_the_one_kept(self):
+        h = wechat(self)
+        self.assertEqual(h.app.backend.on_people_kinds, h.app._people_kinds_from_backend)
+        h.app.store.set_people_kinds({"qqtech": "user"})
+        h.app.backend.on_people_kinds({"qqtech": "bot", "": "bot", "x": "robot"})
+        self.assertEqual(h.app.store.people_kinds(["qqtech", "x"]), {"qqtech": "bot"})
+
+    def test_an_id_kept_as_a_name_is_asked_about_again(self):
+        from openmate_core.backend import Chat, Message
+
+        h = wechat(self)
+        cid = "chat_example_dm_a"
+        h.app.store.upsert_chat(Chat(id=cid, kind="dm", name=cid, peer_id=cid))
+        now = time.time()
+        h.app.ingest([Message(id="nm1", chat_id=cid, position=int(now * 1000), sender_id="user_example_a",
+                              text="在吗", at=now)], live=False)
+        self.assertNotEqual(h.app.store.get_chat(cid)["name"], cid)
+
+
 class GroupCandidatesTest(unittest.TestCase):
     def test_every_listed_group_can_be_switched_on(self):
         from openmate_core.backend import Chat

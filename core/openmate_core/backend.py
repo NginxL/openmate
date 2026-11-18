@@ -186,6 +186,10 @@ class Backend(abc.ABC):
     #: Set by the core: hand it messages to keep as history (from the listener's or a sender's thread): caught up
     #: after a reconnect, or the account's own sends the service never echoes back. Never acted on (/agent, 代答).
     on_history: Optional[Callable[[List["Message"]], None]] = None
+    #: Set by the core: call it with {user_id: "bot" | "user"} when the backend learns what someone is after it
+    #: answered people_kinds (WeChat finds an official account with a person-like id later): the core keeps what it
+    #: was told before for good, so this is how it changes (from any thread; it returns at once).
+    on_people_kinds: Optional[Callable[[Dict[str, str]], None]] = None
 
     #: Set by the core: call it with a DocMention when the live link hears the user was @-mentioned in a document's
     #: comment (from the listener's own thread; it returns at once).
