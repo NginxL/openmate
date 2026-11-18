@@ -611,8 +611,25 @@ class Fetcher:
     def prune(self, now: Optional[float] = None) -> List[str]:
         """Remove local copies older than MEDIA_KEEP_DAYS; the ids whose text changes."""
         cutoff = (now or time.time()) - MEDIA_KEEP_DAYS * 86400
+        gone: List[str] = []
         with self._clean_mu:
-            return self._drop(self._db("SELECT id, files FROM media WHERE state='done' AND at < ?", (cutoff,), True))
+            for mid, at in self._db("SELECT id, at FROM media WHERE state='done' AND at < ?", (cutoff,), True):
+                if self._remove_if_unchanged(mid, at) is not None:
+                    gone.append(mid)
+        return gone
+
+    def _remove_if_unchanged(self, mid: str, at: float) -> Optional[int]:
+        """Remove a message's copies if nothing touched it since it was listed (not being fetched or waiting to
+        be, still done, the same copy): the bytes freed, or None when left alone."""
+        with self._cv:
+            if mid in self._busy or any(q[0] == mid for q in self._queue):
+                return None
+            st = self.state(mid)
+            if not st or st["state"] != "done" or st["at"] != at:
+                return None
+            freed = self._remove(mid, st["files"])
+            self._set(mid, "gone", {}, "")
+            return freed
 
     def total(self) -> int:
         n = 0
@@ -639,15 +656,10 @@ class Fetcher:
             for mid, at in rows:
                 if over <= 0:
                     break
-                with self._cv:  # never one being fetched or waiting to be: its new copies are not old ones
-                    if mid in self._busy or any(q[0] == mid for q in self._queue):
-                        continue
-                    st = self.state(mid)  # read again: what the row says now, and the same copy as listed
-                    if not st or st["state"] != "done" or st["at"] != at:
-                        continue
-                    over -= self._remove(mid, st["files"])
-                    self._set(mid, "gone", {}, "")
-                gone.append(mid)
+                freed = self._remove_if_unchanged(mid, at)  # never one being fetched: its new copies are not old
+                if freed is not None:
+                    over -= freed
+                    gone.append(mid)
         if gone:
             log.info("WeChat media: %d old local copies removed to stay under %d MB", len(gone), most >> 20)
         return gone

@@ -293,6 +293,16 @@ class MediaTest(Base):
         self.assertEqual(sorted(f.make_room(most=1)), ["r1", "r2"])
 
 
+    def test_the_daily_clean_up_leaves_a_copy_fetched_again_alone(self):
+        b, _, _ = self.run_events([media_msg("a1", "IMAGE", image())],
+                                  lambda g, k: any("本地文件" in t for t in self.texts(k, "a1")))
+        f = b.fetcher
+        with f._cv:
+            f._busy.add("a1")  # being fetched again as the clean-up runs
+        self.assertEqual(f.prune(now=time.time() + (wm.MEDIA_KEEP_DAYS + 1) * 86400), [])
+        self.assertTrue(os.path.isfile(os.path.join(self.dir, "data", "media", "a1.jpg")))
+
+
 class RecordTextTest(unittest.TestCase):
     def test_long_records_are_cut(self):
         items = [{"type": "1", "who": "A", "text": "x" * 10} for _ in range(wm.RECORD_LINES + 5)]
