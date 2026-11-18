@@ -133,7 +133,11 @@ class LarkCLI:
             if "authorization" in kind or "scope" in kind or "login" in kind or "token" in kind:
                 raise CalendarError("还没授权回复文档评论：在这台电脑上运行 lark-cli%s auth login，按提示在飞书里确认" % (
                     " --profile " + self.profile if self.profile else ""), "auth")
-            raise CalendarError("lark-cli 回复评论失败（%s）" % (kind.strip() or "原因不明"), "failed")
+            if any(w in kind for w in ("validation", "invalid", "not_found", "permission", "forbidden")):
+                raise CalendarError("lark-cli 回复评论失败（%s）" % kind.strip(), "failed")  # refused: nothing went
+            # a network failure, a timeout or anything else: the reply may be in the document
+            raise CalendarError("lark-cli 回复评论时出错（%s）；回复可能已经发出，请到文档里看一下" % (kind.strip() or "原因不明"),
+                                "uncertain")
         data = d.get("data") if isinstance(d.get("data"), dict) else {}
         return str(data.get("reply_id") or data.get("id") or "")
 

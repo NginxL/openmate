@@ -235,6 +235,20 @@ class AgendaTest(unittest.TestCase):
             cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
         self.assertEqual(e.exception.kind, "auth", "a clear refusal: may be tried again once granted")
 
+    def test_a_network_failure_on_stderr_may_have_gone(self):
+        class Timing(Runner):
+            def __call__(self, args, **kw):
+                self.calls.append((args, kw))
+                err = json.dumps({"ok": False, "error": {"type": "network", "subtype": "timeout"}})
+                return subprocess.CompletedProcess(args, 1, "", err)
+
+        runner = Timing()
+        _, _, _, fake = pages(runner=runner)
+        cli = agenda.LarkCLI({"lark_cli": fake}, run=runner)
+        with self.assertRaises(agenda.CalendarError) as e:
+            cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
+        self.assertEqual(e.exception.kind, "uncertain", "Feishu may have taken it")
+
     def test_who_lark_cli_writes_as(self):
         runner = Runner({"identity": "user", "identities": {"user": {"available": True, "userName": "示例用户"},
                                                             "bot": {"available": True}}})

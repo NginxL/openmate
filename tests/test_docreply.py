@@ -87,6 +87,17 @@ class DocSafetyTest(unittest.TestCase):
         self.assertEqual(h.world.doc_replies, [])
 
 
+    def test_a_document_takes_no_progress(self):
+        h = make(self)
+        mention(h)
+        run = doc_run(h)
+        said = h.tool("agent_reply", request=run["id"], text="我在核对", progress=True)
+        self.assertIn("不发进度", said)
+        self.assertEqual(h.world.doc_replies, [])
+        h.tool("agent_reply", request=run["id"], text="核对完了：按自然周统计")
+        self.assertEqual([r[2] for r in h.world.doc_replies][0].startswith("核对完了"), True)
+
+
 class DocReplyTest(unittest.TestCase):
     def test_answered_in_the_comment_as_me(self):
         h = make(self)

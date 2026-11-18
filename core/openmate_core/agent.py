@@ -39,6 +39,9 @@ from .hub import HubError
 from .textutil import clip, local_stamp, strip_leading_mentions
 from .wire import RPCError
 
+START_REPLAY_MOST = 25 * 86400.0  # a start older than this is not asked again (the hub keeps receipts 30 days)
+CHECK = "请先在 Persona 里看看有没有新开的会话；没有的话再重新发送。"
+
 log = logging.getLogger("openmate.agent")
 
 DEFAULT_PREFIX = "/agent"
@@ -247,7 +250,8 @@ class AgentRunner:
             log.exception("the guest quota ledger could not be filled from the kept runs")
         self._prune(force=True)
         for run in self.store.runs_in_state(["starting"]):
-            if run.get("start_op") and self.enabled and self.hub.available:
+            fresh = time.time() - float(run.get("created") or 0) < START_REPLAY_MOST  # the hub keeps receipts 30 days
+            if run.get("start_op") and self.enabled and self.hub.available and fresh:
                 # a new conversation under an operation id: the same request again gets the hub's first answer
                 # (the conversation it started, if it did), never a second start
                 log.info("an /agent start cut off by a restart is asked again under its operation id")
@@ -259,10 +263,10 @@ class AgentRunner:
                 run["state"] = "failed"
                 run["error"] = "restart"
                 self.store.run_put(run)
+            if not self.enabled:
+                continue  # off here (the connector, or a member hub): nothing said in the user's name
             self._post_once(run, "agent-restart:" + run["id"],
-                            "扩展重启了，没法确认这个 /agent 请求有没有开始处理。请先在 Persona 里看看有没有新开的会话；"
-                            "没有的话再重新发送。" if run.get("start_op") else
-                            "扩展重启了，这个 /agent 请求没能开始处理，请重新发送。", reply_to=run["request_id"])
+                            "扩展重启了，没法确认这个 /agent 请求有没有开始处理。" + CHECK, reply_to=run["request_id"])
         resumed = len(self.store.runs_in_state(["running"]))
         if resumed:
             log.info("resuming %d running /agent request(s)", resumed)
@@ -672,6 +676,7 @@ class AgentRunner:
             # a restart too (the hub answers a repeat with the first answer), never a second start under a new ref
             run, op, prompt = self._start_op(run, prompt)
         tries = 1
+        maybe = False
         while True:
             if self._stop.is_set():  # shutting down: the next start tells the user to send it again
                 return
@@ -706,7 +711,7 @@ class AgentRunner:
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if op and e.code in ("unknown", "assistant_in_doubt"):
+                if op and e.code in ("unknown", "assistant_in_doubt", "op_id_reused"):
                     self._fail(run["id"], "Persona 不确定这个 /agent 有没有开始处理（网络中途断了）。请先在 Persona 里看看有没有"
                                           "新开的会话；没有的话再重新发送。")
                     return
@@ -720,9 +725,15 @@ class AgentRunner:
                 if not e.transient:
                     self._fail(run["id"], "没能启动 Agent：%s" % (e.message or "hub 拒绝了请求"))
                     return
+                if prev is None and not e.unsent:
+                    maybe = True  # this try may have reached the hub
                 if time.time() >= deadline:
-                    self._fail(run["id"], "没能启动 Agent：%s。等了 %s 还是不行，请稍后重新发送。"
-                               % (_hub_words(e), _span(t.agent_hub_wait)))
+                    if maybe:
+                        self._fail(run["id"], "没能确认 Agent 有没有启动：%s，等了 %s。%s"
+                                   % (_hub_words(e), _span(t.agent_hub_wait), CHECK))
+                    else:
+                        self._fail(run["id"], "没能启动 Agent：%s。等了 %s 还是不行，请稍后重新发送。"
+                                   % (_hub_words(e), _span(t.agent_hub_wait)))
                     return
                 if prev is None and not e.unsent:
                     # it may have reached the hub: the same operation again gets its first answer, never a second start
@@ -1309,6 +1320,12 @@ class AgentRunner:
             raise RPCError("这个 /agent 请求已经过期了")
         if not text.strip():
             raise RPCError("回复内容是空的")
+        if not self.enabled:
+            raise RPCError("这里已经不再以你的身份回复（连接器关了，或者由另一个 hub 负责）")
+        if run.get("kind") == "auto" and run.get("chat_id") not in set(self.store.autoreply_chats()):
+            raise RPCError("这个群的自动代答已经关了，不再回复")
+        if progress and run.get("kind") == "doc":
+            return "文档评论不发进度；做完后不带 progress 回复一次最终结果"
         if not progress and not self._clean_answer(text, run).strip():
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message

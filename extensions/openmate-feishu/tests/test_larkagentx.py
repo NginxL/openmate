@@ -629,6 +629,17 @@ class ReadTest(Base):
         S.api_answers["feed.PullFeedCardsRequest"] = {"cards": [], "chats": {}}
         self.assertEqual(self.b.recent_chats(5), [], "an answer that says none: none")
 
+    def test_history_lost_by_the_first_answer_is_a_failure(self):
+        S.history["500"] = {}  # LarkAgentX's read found nothing (a 503 then)…
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {"10": {"id": "110"}}}  # …now there is
+        with self.assertRaises(BackendError) as e:
+            self.b.history("500", None, 5)
+        self.assertEqual(e.exception.kind, "unreachable")
+
+    def test_an_empty_business_answer_is_none(self):
+        S.api_answers["chats.PullRecentChatsRequest"] = {"hasMore": False}  # protobuf leaves empty lists out
+        self.assertEqual(self.b.recent_chats(5), [])
+
     def test_done_cards_both_forms(self):
         f = larkagentx.done_cards
         # read back (protobuf_to_dict): numbers, each card's own feedType
@@ -764,9 +775,9 @@ class ReadTest(Base):
         self.assertEqual(sorted(gone), ["g1", "g9"], "dissolved, and one the push says is no longer valid")
         self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g2", "g3"])
 
-        def read_whole(ids, whole=True, listed=None):
+        def read_whole(ids, whole=True, listed=None, ended=None):
             return lambda c: ([larkagentx.Chat(id=i, kind="group", name=i) for i in ids], {i: 1 for i in ids}, whole,
-                              set(ids) | set(listed or ()))
+                              set(ids) | set(listed or ()), set(ended or ()))
 
         real = self.b._read_groups
         self.addCleanup(setattr, self.b, "_read_groups", real)
@@ -774,7 +785,11 @@ class ReadTest(Base):
         self.b._groups_at = 0.0
         self.b._read_groups = read_whole(["g2"])
         self.b._groups_work(client, me)
-        self.assertEqual(gone, [], "the first whole read compares with nothing")
+        self.assertEqual(gone, ["g3"], "known from before (a part read, or pushed): compared")
+        del gone[:]
+        self.b._groups, self.b._groups_whole_ids, self.b._groups_at = [], set(), 0.0
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [], "the first read of all compares with nothing")
         self.b._read_groups = read_whole(["g2", "g4"], whole=False)
         self.b._groups_work(client, me)
         self.assertEqual(gone, [], "a part read says nothing about the others")
@@ -794,6 +809,25 @@ class ReadTest(Base):
         self.b._read_groups = read_whole(["g2"])
         self.b._groups_work(client, me)
         self.assertEqual(gone, ["g5"], "listed by the last whole read, gone from this one")
+        # listed, but its details say it is over (dissolved, or only looked into now)
+        del gone[:]
+        self.b._read_groups = read_whole(["g2", "g6"])
+        self.b._groups_work(client, me)
+        self.b._read_groups = read_whole(["g2"], listed=["g6"], ended=["g6"])
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, ["g6"])
+        # a whole read of nothing beside a known list is not believed
+        del gone[:]
+        self.b._read_groups = read_whole([])
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [])
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g2"], "still shown")
+        # a part read keeps what it did not reach on the list (找群 still finds a quiet group)
+        self.b._read_groups = read_whole(["g2", "g7"])
+        self.b._groups_work(client, me)
+        self.b._read_groups = read_whole(["g7"], whole=False)
+        self.b._groups_work(client, me)
+        self.assertEqual(sorted(g.id for g in self.b.group_candidates(10)), ["g2", "g7"])
 
     def test_what_is_heard_during_a_read_is_put_on_its_result(self):
         client, me = self.b._signed_in()
@@ -804,7 +838,7 @@ class ReadTest(Base):
             self.b._apply_chats({}, ["g1"], me)  # left while the read was out
             self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二新名"}}, [], me)
             return [larkagentx.Chat(id="g1", kind="group", name="要退的群"), larkagentx.Chat(id="g2", kind="group", name="群二")], \
-                {"g1": 5, "g2": 4}, True, {"g1", "g2"}
+                {"g1": 5, "g2": 4}, True, {"g1", "g2"}, set()
 
         self.b._read_groups = read
         self.addCleanup(setattr, self.b, "_read_groups", real)
@@ -819,6 +853,40 @@ class ReadTest(Base):
         self.b._apply_chats({"g2": {"id": "g2", "type": 2, "name": "群二又改名"}}, [], me)
         self.assertEqual([g.name for g in self.b.group_candidates(10)], ["群二又改名"], "a later push stays")
         self.assertEqual(self.b._groups_delta, [])
+
+    def test_a_packet_without_the_list_is_no_read(self):
+        client, me = self.b._signed_in()
+        gone = []
+        self.b.on_chat_gone = gone.append
+        self.set_groups(me, [("g1", "群一", 3, False)])
+        self.b._groups_whole_ids = {"g1"}
+        self.b._groups_at = 1.0
+        orig = client.api
+        client.api = lambda kind, data=None, raw=None: {"status": 200, "cmd": 82}
+        self.addCleanup(setattr, client, "api", orig)
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, [], "a status 200 with no list is not 'in no group at all'")
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g1"])
+
+    def test_a_push_told_once_even_when_the_read_also_lacks_it(self):
+        client, me = self.b._signed_in()
+        gone = []
+        self.b.on_chat_gone = gone.append
+        self.set_groups(me, [("g1", "群一", 3, False), ("g2", "群二", 3, False)])
+        self.b._groups_whole_ids = {"g1", "g2"}
+        self.b._groups_at = 1.0
+        real = self.b._read_groups
+
+        def read(c):
+            self.b._apply_chats({}, ["g1"], me)  # left while the read was out
+            return [larkagentx.Chat(id="g2", kind="group", name="群二")], {"g2": 4}, True, {"g2"}, set()
+
+        self.b._read_groups = read
+        self.addCleanup(setattr, self.b, "_read_groups", real)
+        with self.b._groups_mu:
+            self.b._groups_busy = True
+        self.b._groups_work(client, me)
+        self.assertEqual(gone, ["g1"], "once")
 
     def test_a_status_packet_keeps_the_list(self):
         client, me = self.b._signed_in()

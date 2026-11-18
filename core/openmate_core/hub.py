@@ -103,12 +103,15 @@ class HubAPI:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             raw = b""
+            cut = False
             try:
                 raw = e.read()
             except Exception:
-                pass
+                cut = True  # the answer broke off: what it said is not known
             finally:
                 e.close()
+            if cut:
+                raise HubError(e.code, "和 Persona hub 的连接中途断了（HTTP %d）" % e.code, NETWORK)
             message, code, retryable, delivered = "", "", None, ""
             try:
                 doc = json.loads(raw or b"{}")

@@ -136,5 +136,59 @@ class CredentialsTest(unittest.TestCase):
         self.assertEqual(token(h), "r-retry")
 
 
+    def test_a_logout_while_the_account_is_bound_leaves_no_link(self):
+        from harness import HubSideError
+
+        h = Harness(self)
+        real = h.app._bind_account
+        binding = threading.Event()
+
+        def slow_bind(acct):
+            binding.set()
+            time.sleep(0.4)
+            return real(acct)
+
+        h.app._bind_account = slow_bind
+        p = h.c("login.step", step="", values={})
+        out = {}
+
+        def poll():
+            q = p
+            try:
+                for _ in range(5):
+                    q = h.c("login.step", step=q["step"])
+                    if q.get("done"):
+                        break
+                out["p"] = q
+            except HubSideError as e:
+                out["error"] = e.message
+
+        t = threading.Thread(target=poll)
+        t.start()
+        self.assertTrue(binding.wait(3))
+        h.c("logout")
+        t.join(5)
+        time.sleep(0.3)
+        self.assertIn("作废", out.get("error", ""), out)
+        self.assertEqual(h.app.link, "idle")
+        self.assertFalse(h.world.connected, "no link after the logout")
+        self.assertNotIn(h.cid, h.hub.secrets)
+
+    def test_a_stale_poll_after_a_logout_does_not_reopen(self):
+        from harness import HubSideError
+
+        h = Harness(self)
+        h.sign_in()
+        p = h.c("login.step", step="", values={})  # another sign-in started, then a logout
+        h.c("logout")
+        with self.assertRaises(HubSideError) as e:
+            h.c("login.step", step=p["step"])  # the page polls on
+        self.assertIn("退出登录", e.exception.message)
+        self.assertFalse(h.app._credentials_rotated_now(creds("late")))
+        self.assertNotIn(h.cid, h.hub.secrets)
+        h.sign_in()  # the user's own new QR does
+        self.assertIn(h.cid, h.hub.secrets)
+
+
 if __name__ == "__main__":
     unittest.main()

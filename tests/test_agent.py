@@ -952,6 +952,63 @@ class CutOffAnswerTest(unittest.TestCase):
         self.assertFalse(e.exception.unsent, "it may have run")
 
 
+    def test_an_error_answer_cut_off_midway_may_have_run(self):
+        import http.server
+        import threading
+
+        from openmate_core.hub import HubAPI, HubError
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(502)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.write(b'{"code":"assistant_in')
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        with self.assertRaises(HubError) as e:
+            HubAPI("http://127.0.0.1:%d" % srv.server_address[1], "t").request("POST", "/x", {"a": 1})
+        self.assertTrue(e.exception.transient)
+        self.assertFalse(e.exception.unsent)
+
+
+class OffHereTest(unittest.TestCase):
+    def test_the_reply_tool_sends_nothing_once_off_here(self):
+        h = agent(self)
+        m = ask(h, "/agent 关了以后")
+        run = running(h, m)
+        h.app.agent.enabled = False  # the connector off, or now a member hub
+        with self.assertRaises(HubSideError) as e:
+            h.tool("agent_reply", request=run["id"], text="答案")
+        self.assertIn("不再以你的身份回复", e.exception.message)
+        self.assertEqual(replies(h), [])
+
+    def test_a_start_too_old_to_replay_is_not_asked_again(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 很久以前的")
+        wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
+        h.app.agent._stop.set()
+        time.sleep(0.2)
+        run = run_of(h, m)
+        run["state"] = "starting"
+        h.app.store.run_put(run)
+        old = time.time() - 26 * 86400
+        h.app.store._tx(lambda db: db.execute("UPDATE runs SET created = ? WHERE id = ?", (old, run["id"])))
+        h.http.offline = 0
+        h2 = h.restart()
+        h2.wait_ok()
+        wait_until(lambda: [x for x in h2.sent() if "Persona 里看看" in x["text"]], what="the notice")
+        self.assertEqual(h2.http.starts(), [], "the hub may have forgotten its receipt: never sent blind")
+
+
 class SettingsAndFailuresTest(unittest.TestCase):
     def test_suffix_settings(self):
         from openmate_core.agent import parse_suffix
