@@ -37,7 +37,8 @@ THREAD_MOST = 50
 THREAD_MEDIA_MOST = 4 << 20
 ARCHIVE_MEDIA_MOST = 20 << 20
 ARCHIVE_ROWS_MOST = 2000
-ARCHIVE_HOLD_DAYS = 3  # messages of a chat the archive rule cannot decide on are held this long at most
+ARCHIVE_UNDECIDED_HOURS = 6  # a message of a chat the archive rule cannot decide on waits this long at most
+ARCHIVE_ASK_MOST = 3  # undecided chats the backend is asked about per archive read
 STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, backend, saved sign-in) waits this long
 SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
 
@@ -412,6 +413,16 @@ class ConnectorApp:
         self.today_api = api
 
     # ------------------------------------------------------------------ the service's done mark (Feishu's 完成)
+
+    def _ask_kind(self, chat_id: str) -> None:
+        """Ask the backend now what the account of a direct chat is (WeChat looks it up), for the archive rule."""
+        if self.backend is None or self.store is None or not self.signed_in:
+            return
+        chat = self.store.get_chat(chat_id) or {}
+        try:
+            self.backend.people_kinds([chat.get("peer_id") or chat_id])
+        except Exception as e:
+            log.info("an account could not be looked up for the archive (%s)", e.__class__.__name__)
 
     def _chat_gone(self, chat_id: str) -> None:
         """The account left or deleted a chat in the service: out of the lists until a newer message."""
@@ -1113,6 +1124,7 @@ class ConnectorApp:
         more = len(rows) == ARCHIVE_ROWS_MOST
         keep = getattr(self.platform, "archive_chat", None)
         kept: Dict[str, Optional[bool]] = {}
+        asked: set = set()
 
         def rule(cid: str) -> Optional[bool]:
             if cid not in kept:
@@ -1122,38 +1134,32 @@ class ConnectorApp:
                 except Exception:
                     log.exception("the archive rule failed: the chat is left out")
                     kept[cid] = False
+            if kept[cid] is None and cid not in asked and len(asked) < ARCHIVE_ASK_MOST:
+                asked.add(cid)  # undecided: ask the service about the account now, then the rule again
+                self._ask_kind(cid)
+                del kept[cid]
+                return rule(cid)
             return kept[cid]
 
-        if keep is not None:  # chats held before: sent once decided, dropped when refused or held too long
-            for cid, held_at in self.store.archive_held_chats().items():
-                decided = rule(cid)
-                if decided is None and time.time() - held_at < ARCHIVE_HOLD_DAYS * 86400:
-                    continue
-                if decided:
-                    batches[cid] = [r for r in self.store.archive_held_rows(cid)
-                                    if not views.is_system(r) and views.has_content(r)]
-                elif decided is None:
-                    log.info("a chat was never decided on for the archive: its held messages are dropped")
-                self.store.archive_release(cid)
-        hold: List[dict] = []
         for r in rows:
             if r["chat_id"] not in batches and len(batches) >= most_chats:
                 more = True
                 break
+            if not views.is_system(r) and views.has_content(r) and keep is not None:
+                # the platform's rule (WeChat: no groups unless turned on, no official accounts)
+                decided = rule(r["chat_id"])
+                if decided is None:
+                    if time.time() - float(r.get("received") or r.get("at") or 0) < ARCHIVE_UNDECIDED_HOURS * 3600:
+                        more = False  # the cursor stops before it: a later read goes on from this message
+                        break
+                    decided = False  # never decided on: left out (an official account's must not get in)
+                if not decided:
+                    scanned = r["seq"]
+                    continue
             scanned = r["seq"]
             if views.is_system(r) or not views.has_content(r):
                 continue
-            if keep is not None:  # the platform's rule (WeChat: no groups unless turned on, no official accounts)
-                decided = rule(r["chat_id"])
-                if decided is None:
-                    hold.append(r)  # not decided yet: held, asked about again with a later read
-                    continue
-                if not decided:
-                    continue
             batches.setdefault(r["chat_id"], []).append(r)
-        if hold:
-            self.store.archive_hold(hold)
-        batches = {cid: msgs for cid, msgs in batches.items() if msgs}
         me = self.me_name()
         out = []
         for chat_id, msgs in batches.items():

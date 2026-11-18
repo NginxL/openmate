@@ -304,32 +304,43 @@ class AlignedWithFeishuTest(unittest.TestCase):
         h2 = wechat(self, archive_groups=True)
         self.assertIn(TEAM, self.archived(h2))
 
-    def test_an_undecided_chat_is_held_then_sent_or_dropped(self):
-        from openmate_core import app as core_app
+    def test_an_undecided_chat_stops_the_archive_until_decided(self):
         from openmate_wechat import backend as wb
 
         h = wechat(self)
-        for cid in ("chat_example_dm_a", "chat_example_dm_b"):
-            self.assertIsNone(openmate_wechat.archive_chat(cid, None, {}), "asked about nothing yet")
-        got = self.archived(h)
-        self.assertNotIn("chat_example_dm_a", got, "held while WeChat has not said what it is")
-        held = h.app.store.archive_held_chats()
-        self.assertIn("chat_example_dm_a", held)
+        self.assertIsNone(openmate_wechat.archive_chat("chat_example_dm_a", None, {}), "WeChat has said nothing yet")
+        first = h.c("archive.changes", cursor="", limit=100)
+        got = {b["chat"]["id"] for b in first["batches"]}
+        self.assertNotIn("chat_example_dm_a", got, "never before it is decided")
+        again = h.c("archive.changes", cursor=first["next"], limit=100)
+        self.assertEqual(again["next"], first["next"], "the cursor waits before it: a retry reads the same")
         wb.PERSONS.add("chat_example_dm_a")  # a person, as WeChat then says
         self.addCleanup(wb.PERSONS.discard, "chat_example_dm_a")
         wb.BUSINESS.add("chat_example_dm_b")  # an official account
         self.addCleanup(wb.BUSINESS.discard, "chat_example_dm_b")
-        res = h.c("archive.changes", cursor=str(10 ** 9), limit=100)
-        sent = {b["chat"]["id"]: len(b["messages"]) for b in res["batches"]}
-        self.assertIn("chat_example_dm_a", sent, "sent once decided, even behind the cursor")
-        self.assertGreater(sent["chat_example_dm_a"], 0)
-        self.assertNotIn("chat_example_dm_b", sent, "an official account's never")
-        self.assertEqual(h.app.store.archive_held_chats(), {})
-        # one never decided on is dropped after ARCHIVE_HOLD_DAYS
-        h.app.store.archive_hold([{"seq": 1, "chat_id": "chat_example_never"}], now=time.time() - 4 * 86400)
-        h.c("archive.changes", cursor=str(10 ** 9), limit=100)
-        self.assertEqual(h.app.store.archive_held_chats(), {})
-        self.assertEqual(core_app.ARCHIVE_HOLD_DAYS, 3)
+        later = self.archived_from(h, first["next"])
+        self.assertIn("chat_example_dm_a", later, "read from where it stopped")
+        self.assertNotIn("chat_example_dm_b", later, "an official account's never")
+
+    def test_a_chat_never_decided_on_is_left_out_in_time(self):
+        from openmate_core import app as core_app
+
+        h = wechat(self)
+        hours, core_app.ARCHIVE_UNDECIDED_HOURS = core_app.ARCHIVE_UNDECIDED_HOURS, 0
+        self.addCleanup(setattr, core_app, "ARCHIVE_UNDECIDED_HOURS", hours)
+        got = self.archived(h)
+        self.assertNotIn("chat_example_dm_a", got, "undecided past the limit: left out, the archive goes on")
+        self.assertNotIn(TEAM, got)
+
+    def archived_from(self, h, cursor):
+        chats = set()
+        for _ in range(20):
+            res = h.c("archive.changes", cursor=cursor, limit=100)
+            chats |= {b["chat"]["id"] for b in res["batches"]}
+            cursor = res["next"]
+            if not res["more"]:
+                return chats
+        self.fail("archive.changes never ended")
 
     def test_sends_and_the_inbox_are_there(self):
         h = wechat(self)

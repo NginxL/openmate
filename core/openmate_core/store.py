@@ -85,8 +85,6 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS autoreply (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
     # groups the account left or deleted (Backend.on_chat_gone): out of every list until a newer message brings one back
     "CREATE TABLE IF NOT EXISTS gone (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
-    # messages of chats the platform's archive rule could not decide on yet (Platform.archive_chat answered None)
-    "CREATE TABLE IF NOT EXISTS archive_hold (seq INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, at REAL NOT NULL)",
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
@@ -411,27 +409,6 @@ class Store:
         rows = self._all("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE seq > ? ORDER BY seq LIMIT ?", (after_seq, limit))
         return [_message_row(r) for r in rows]
 
-    def archive_hold(self, rows: List[dict], now: Optional[float] = None) -> None:
-        """Hold these messages for the archive until their chat is decided on."""
-        at = now or time.time()
-        items = [(int(r["seq"]), str(r["chat_id"]), at) for r in rows]
-        if items:
-            self._tx(lambda db: db.executemany("INSERT OR IGNORE INTO archive_hold (seq, chat_id, at) VALUES (?, ?, ?)",
-                                               items))
-
-    def archive_held_chats(self) -> Dict[str, float]:
-        """{chat_id: when its oldest held message was held}."""
-        return {r["chat_id"]: float(r["at"]) for r in
-                self._all("SELECT chat_id, MIN(at) AS at FROM archive_hold GROUP BY chat_id")}
-
-    def archive_held_rows(self, chat_id: str) -> List[dict]:
-        rows = self._all("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE seq IN "
-                         "(SELECT seq FROM archive_hold WHERE chat_id = ?) ORDER BY seq", (chat_id,))
-        return [_message_row(r) for r in rows]
-
-    def archive_release(self, chat_id: str) -> None:
-        self._tx(lambda db: db.execute("DELETE FROM archive_hold WHERE chat_id = ?", (chat_id,)))
-
     def message_count(self) -> int:
         r = self._one("SELECT COUNT(*) AS n FROM messages")
         return int(r["n"]) if r else 0
@@ -651,8 +628,7 @@ class Store:
 
         def run(db):
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
-            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone",
-                          "archive_hold"):
+            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             db.execute("DELETE FROM meta WHERE key IN ('initial_history_done')")

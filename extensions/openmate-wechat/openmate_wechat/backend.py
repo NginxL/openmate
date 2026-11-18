@@ -91,7 +91,6 @@ def is_group(chat_id: str) -> bool:
 # One backend per program, so the platform's archive rule (openmate_wechat.archive_chat) reads them here.
 BUSINESS: set = set()
 PERSONS: set = set()
-ANSWERED: set = set()  # accounts WeChat answered about without saying what they are (no verify flag)
 
 
 def kind_of(user_id: str) -> str:
@@ -155,7 +154,6 @@ class Store:
                              "OR key LIKE 'gone:%' OR key LIKE 'member_at:%' OR key LIKE 'answered:%'")
         BUSINESS.clear()
         PERSONS.clear()
-        ANSWERED.clear()
 
     def seen(self, mid: str) -> Optional[Tuple[int, bool]]:
         """(position, delivered) of a kept message, None when new."""
@@ -313,7 +311,6 @@ class WeChatBackend(Backend):
         self._native: Optional[Native] = None
         BUSINESS.update(k[4:] for k in self.store.keys("biz:"))
         PERSONS.update(k[7:] for k in self.store.keys("person:"))
-        ANSWERED.update(k[9:] for k in self.store.keys("answered:"))
         self._mu = threading.RLock()
         self._state: Optional[dict] = None  # the sign-in, as last sealed (to restore a restarted program)
         # the computer this program signs in as, kept here (an id and a type, no key): a sign-in after a sign-out is
@@ -409,11 +406,15 @@ class WeChatBackend(Backend):
                 self._state = state
             return ok
 
-    def _begin_sign_in(self, n: Native) -> None:
-        """A sign-in starts (a QR, or saved credentials): renewals from now on are this sign-in's."""
+    def _begin_sign_in(self, n: Native, epoch: Optional[int] = None) -> bool:
+        """A sign-in starts (the user's QR, or saved credentials restored): renewals from now on are this sign-in's.
+        A restore passes the epoch it started in: after a sign-out meanwhile it opens nothing (False)."""
         with self._auth_mu:
+            if epoch is not None and epoch != self._auth_epoch:
+                return False
             self._signed_out = False
             n.epoch = self._auth_epoch
+            return True
 
     def _keep_device(self, device: Any) -> None:
         if isinstance(device, dict) and device:
@@ -469,11 +470,18 @@ class WeChatBackend(Backend):
         st = credentials.get("state") if isinstance(credentials, dict) else None
         if not isinstance(st, dict):
             raise CredentialsExpired(EXPIRED)
+        with self._auth_mu:
+            epoch = self._auth_epoch  # a sign-out while this waits ends it: it never opens sealing again
         self._state = st
         self._keep_device(st.get("device"))
         n = self._link(restore=False)
-        self._begin_sign_in(n)
+        if not self._begin_sign_in(n, epoch):
+            raise CredentialsExpired(EXPIRED)
         r = self._call(n, "restore", 20, state=st)
+        with self._auth_mu:
+            if self._auth_epoch != epoch:
+                self._state = None
+                raise CredentialsExpired(EXPIRED)
         self._mark_ready(n)
         account = self._adopt(r.get("account") or {})
         # official accounts learnt before (perhaps after the core was told "user" for them)
@@ -694,10 +702,7 @@ class WeChatBackend(Backend):
             if cid and not is_group(cid):
                 self.store.set_name(self._name_key(cid, ""), out[cid][0], nick)
                 if c.get("verify_flag") is None:
-                    # WeChat said nothing about what it is: whatever was known stays; asked, though
-                    if cid not in ANSWERED:
-                        ANSWERED.add(cid)
-                        self.store.put("answered:" + cid, "1")
+                    pass  # WeChat said nothing about what it is: whatever was known stays (still undecided)
                 elif c.get("business"):
                     if cid not in BUSINESS:
                         learnt[cid] = "bot"
@@ -930,8 +935,8 @@ class WeChatBackend(Backend):
                     if self._closed or self.me != me:
                         return
                     pair = todo[i:i + 2]
-                    if self._lookup_names(pair):  # WeChat answered: asked; a failed request is tried next round
-                        self._kind_tried.update(pair)
+                    # the ones WeChat answered for are asked; one it left out (or a failed request) next round
+                    self._kind_tried.update(c for c in self._lookup_names(pair) if c in pair)
                     time.sleep(GROUP_NAME_PAUSE)
             except BackendError as e:
                 log.info("WeChat groups were not read now: %s", e.message)

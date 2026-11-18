@@ -58,9 +58,9 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
 def archive_chat(chat_id: str, chat, config: Dict) -> Optional[bool]:
     """What goes to the knowledge base: direct chats and the user's own notes (文件传输助手); groups only with the setting
     群聊进知识库 (the others in them did not agree to be recorded); never official accounts or WeChat's own. A chat
-    with an account of its own choosing (腾讯科技 is qqtech) that WeChat has not been asked about yet: None, so the
-    core holds its messages until WeChat says (an official account's must never reach the archive first)."""
-    from .backend import ANSWERED, PERSONS, SURE_PEOPLE, is_group, kind_of
+    with an account of its own choosing (腾讯科技 is qqtech) that WeChat has not described yet: None, so the core
+    holds the archive back until WeChat says (an official account's must never reach the archive first)."""
+    from .backend import PERSONS, SURE_PEOPLE, is_group, kind_of
 
     if is_group(chat_id) or (chat or {}).get("kind") == "group":
         return bool(config.get("archive_groups"))
@@ -68,9 +68,9 @@ def archive_chat(chat_id: str, chat, config: Dict) -> Optional[bool]:
         return True
     if kind_of(chat_id) != "user":
         return False  # an official account (known as one), WeChat's own, or not a person's id at all
-    if chat_id.startswith("wxid_") or chat_id.endswith(SURE_PEOPLE) or chat_id in PERSONS or chat_id in ANSWERED:
-        return True  # wxid_… ids are given to people only; the others as WeChat described them
-    return None
+    if chat_id.startswith("wxid_") or chat_id.endswith(SURE_PEOPLE) or chat_id in PERSONS:
+        return True  # wxid_… ids are given to people only; the others once WeChat said so
+    return None  # WeChat has not said (or gave no flags): the core asks, and holds the archive back meanwhile
 
 
 def platform(manifest_path: str = "") -> Platform:

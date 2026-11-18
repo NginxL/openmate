@@ -448,7 +448,7 @@ class ArchiveRuleTest(Base):
         b._lookup_names(["lawliet321x"])
         self.assertFalse(rule("qqtech", None, {}), "an official account")
         self.assertTrue(rule("maol111", None, {}), "a person, as WeChat said")
-        self.assertTrue(rule("lawliet321x", None, {}), "asked, no flags: as its id looks")
+        self.assertIsNone(rule("lawliet321x", None, {}), "asked, but WeChat gave no flags: still undecided")
         self.assertFalse(rule("gh_abc", None, {}))
         self.assertFalse(rule("1@chatroom", None, {}))
 
@@ -502,6 +502,27 @@ class SmallFixesTest(Base):
 
 
 class SignOutTest(Base):
+    def test_a_restore_a_sign_out_overtook_opens_nothing(self):
+        from openmate_core.backend import CredentialsExpired
+
+        b = self.backend()
+        sealed = []
+        b.on_credentials_sync = lambda creds: sealed.append(creds) or True
+        real = b._link
+
+        def link_then_sign_out(*a, **kw):
+            n = real(*a, **kw)
+            b.logout()  # the user signs out while the restore waits for the program
+            return n
+
+        b._link = link_then_sign_out
+        with self.assertRaises(CredentialsExpired):
+            b.restore({"state": {"k": "v1"}})
+        b._link = real
+        self.assertTrue(b._signed_out)
+        self.assertFalse(b._persist({"k": "v2"}, b._native.epoch), "nothing sealed after the sign-out")
+        self.assertEqual(sealed, [])
+
     def test_a_renewal_from_before_a_sign_out_is_never_sealed_after_it(self):
         b = self.backend()
         sealed = []
@@ -650,7 +671,24 @@ class ReadTest(Base):
         self.assertEqual(b.chat_done_states(["wxid_bob"]), {"wxid_bob": None},
                          "read in the very second of the last message: can't tell which came first, still open")
 
+    def test_one_left_out_of_a_pair_is_asked_again(self):
+        spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", spacing)
+        os.environ["MATEWECHAT_FAKE_UNKNOWN"] = "wxid_gone"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        for cid in ("custom_one", "wxid_gone"):
+            b.store.add_message(msg("p-" + cid, cid, cid, "hi"))
+        b._groups_work(True)
+        b._groups_work(True)
+        asked = [i for r in self.requests("contacts") for i in r.get("ids", [])]
+        self.assertEqual(asked.count("custom_one"), 1, "answered: asked once")
+        self.assertGreaterEqual(asked.count("wxid_gone"), 2, "left out of the answer: asked again")
+
     def test_old_direct_chats_get_their_kind_in_the_background(self):
+        spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", spacing)
         os.environ["MATEWECHAT_FAKE_BUSINESS"] = "cmb4008205555"
         os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend()
