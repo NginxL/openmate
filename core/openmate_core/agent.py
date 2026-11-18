@@ -296,7 +296,7 @@ class AgentRunner:
         for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
             if s and t.endswith(s):
                 return True
-        return ai_marked(t, self._header_marks())
+        return ai_marked(self._mark_view(t), self._header_marks())
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
@@ -377,7 +377,7 @@ class AgentRunner:
         if row.get("at") and abs(now - row["at"]) > self.app.timing.agent_fresh:
             return
         text = row.get("text") or ""
-        if self.is_agent_text(text) or ai_marked(text, AI_MARKS):
+        if self.is_agent_text(text) or ai_marked(self._mark_view(text), AI_MARKS):
             return
         if not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
             return
@@ -1151,8 +1151,12 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur["state"] in ("stopped", "failed"):
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
+            # what took the one reply: a reply, a fallback being sent, or a fallback / timeout notice in the send
+            # journal (sent or uncertain; one that surely failed is released, a quiet run's is never posted)
+            posted = lambda what: self.store.send_get("agent:%s:%s" % (cur["id"], what)) is not None  # noqa: E731
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
-                or cur.get("fallback") in ("claimed", "sent", "failed") or cur["state"] == "timeout"  # any attempt
+                or (cur.get("fallback") == "claimed" and cur.get("kind") not in QUIET_KINDS) \
+                or posted("fallback") or posted("timeout")
             if not self._can_edit() and answered:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got
@@ -1191,6 +1195,12 @@ class AgentRunner:
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
         return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
+
+    def _mark_view(self, text: str) -> str:
+        """The text as the AI-mark check reads it: the platform's view (WeChat: without the "@name " a reply that @s
+        its asker starts with), else the text itself."""
+        view = getattr(self.app.platform, "mark_view", None)
+        return view(text) if view is not None else text
 
     def _can_edit(self) -> bool:
         return bool(getattr(self.app.platform, "can_edit", True))

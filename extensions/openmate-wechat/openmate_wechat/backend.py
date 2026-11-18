@@ -53,7 +53,6 @@ SERVICE_IDS = {"filehelper", "weixin", "weibo", "fmessage", "floatbottle", "medi
                "notification_messages", "wa_app_kefu_message", "wxzhifu", "voip", "voipapp"}  # agent-wechat's list
 SERVICE_SUFFIXES = ("@im.bot", "@stranger", "@kefu.openim", "@opencustomerservicemsg", "@placeholder_foldgroup",
                     "@weclaw", "@im.chatroom")
-AT_PREFIX = re.compile("^(?:\\s*@[^\u2005\\n]{1,1024}\u2005)+")  # WeChat's real @s: "@name" and U+2005
 PERSON_ID = re.compile(r"^(wxid_[A-Za-z0-9_-]{4,64}|[A-Za-z][A-Za-z0-9_-]{5,31})$")
 
 SCHEMA = (
@@ -216,6 +215,7 @@ class WeChatBackend(Backend):
         self.me = ""
         self.me_name = ""
         self._gen = 0
+        self._ready = False  # the running program has the sign-in (restored or just signed in)
 
     # ---------------------------------------------------------------- the program
 
@@ -229,6 +229,9 @@ class WeChatBackend(Backend):
         with self._mu:
             n = self._native
             if n is not None and n.alive():
+                if restore and not self._ready and self._state is not None:
+                    self._call(n, "restore", 20, state=self._state)  # started for a QR: give it the sign-in first
+                    self._ready = True
                 return n
             n = Native(self._path(wait), self._persist)
             try:
@@ -246,6 +249,7 @@ class WeChatBackend(Backend):
                     n.close()
                     raise
             self._native = n  # only now: a program that could not take the sign-in is never reused
+            self._ready = restore and self._state is not None
             return n
 
     def _call(self, n: Native, op: str, timeout: float, **params: Any) -> dict:
@@ -307,6 +311,7 @@ class WeChatBackend(Backend):
         if not isinstance(st, dict):
             raise BackendError("登录完成了，但没有拿到登录信息", "unknown")
         self._state = st
+        self._ready = True
         acct = self._adopt(r.get("account") or {})
         return LoginDone(credentials={"v": 1, "state": st}, account=acct)
 
@@ -317,6 +322,7 @@ class WeChatBackend(Backend):
         self._state = st
         n = self._link(restore=False)
         r = self._call(n, "restore", 20, state=st)
+        self._ready = True
         return self._adopt(r.get("account") or {})
 
     def _adopt(self, account: dict) -> Account:
@@ -404,15 +410,6 @@ class WeChatBackend(Backend):
         self.store.mark_delivered(mid)
         return True
 
-    @staticmethod
-    def _visible_text(text: str) -> str:
-        """A reply that @s its asker starts "@name\u2005" (a name may hold spaces): with an AI mark right after, the
-        mentions go, so the core sees the mark on the first line (another OpenMate's 自动代答 is never answered)."""
-        rest = AT_PREFIX.sub("", text, count=1)
-        if rest != text and rest.lstrip("> ").startswith("🤖"):
-            return rest
-        return text
-
     def _message(self, ev: dict, pos: int) -> Message:
         chat = str(ev.get("chat") or "")
         sender = str(ev.get("sender") or "")
@@ -423,8 +420,7 @@ class WeChatBackend(Backend):
             name = cached[0] if cached else ""
         return Message(
             id=str(ev.get("id")), chat_id=chat, position=pos, sender_id=sender, sender_name=name, mine=mine,
-            type=str(ev.get("type") or "TEXT"), text=self._visible_text(str(ev.get("text") or "")),
-            at=float(ev.get("at") or 0),
+            type=str(ev.get("type") or "TEXT"), text=str(ev.get("text") or ""), at=float(ev.get("at") or 0),
             parent_id=str(ev.get("parent") or ""), at_all=bool(ev.get("at_all")),
             at_me=bool(ev.get("at_me")) and not bool(ev.get("at_all")),  # @me among @everyone is a notice
         )

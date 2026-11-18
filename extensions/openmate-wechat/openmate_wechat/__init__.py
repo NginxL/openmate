@@ -9,6 +9,7 @@ SHA-256 (install.py). OPENMATE_BACKEND=fixture selects the core's deterministic 
 from __future__ import annotations
 
 import os
+import re
 from typing import Dict
 
 from openmate_core.backend import Backend, BackendError
@@ -20,6 +21,12 @@ EXTENSION_ID = "openmate-wechat"
 CONNECTOR_ID = "matewechat"
 CHATS_PAGE = "wechat-chats"
 CHATS_CARD = "wechat-chats-today"
+AT_PREFIX = re.compile("^(?:\\s*@[^\u2005\\n]{1,1024}\u2005)+")  # WeChat's real @s: "@name" ended by U+2005
+
+
+def mark_view(text: str) -> str:
+    """The text without the real @s it starts with: where a reply's AI mark is found (the message keeps them)."""
+    return AT_PREFIX.sub("", text or "", count=1)
 
 
 def make_backend(config: Dict, data_dir: str) -> Backend:
@@ -53,6 +60,7 @@ def platform(manifest_path: str = "") -> Platform:
         chats_page=CHATS_PAGE,
         chats_card=CHATS_CARD,
         can_edit=False,
+        mark_view=mark_view,
         # phase one is /agent and 自动代答 only: no generic sends, inbox, conversation pages or archive
         methods_off=("actions.list", "actions.describe", "actions.do", "inbox.collect", "inbox.reply",
                      "thread.page", "thread.media", "archive.changes", "archive.media"),

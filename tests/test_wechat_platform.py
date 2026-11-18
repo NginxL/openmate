@@ -94,6 +94,40 @@ class WeChatPlatformTest(unittest.TestCase):
         self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
 
 
+class OneReplyTest(unittest.TestCase):
+    def test_a_quiet_fallback_does_not_take_the_auto_reply(self):
+        h = wechat(self)
+        h.app.store.autoreply_set(TEAM, True)
+        msg = h.world.push(TEAM, "user_example_b", "@示例用户 什么时候好？", at_me=True)
+        run = running(h, msg)
+        cur = h.app.store.run_get(run["id"])
+        cur["fallback"] = "failed"  # the turn ended first: a quiet run posts nothing
+        h.app.store.run_put(cur)
+        n = len(h.sent())
+        h.tool("agent_reply", request=run["id"], text="周五。")
+        self.assertEqual(len(h.sent()), n + 1, "the late first reply still goes out")
+
+    def test_a_fallback_in_the_journal_takes_the_agent_reply(self):
+        h = wechat(self)
+        msg = ask(h, "/agent 总结")
+        run = running(h, msg)
+        self.assertTrue(h.app.store.send_claim("agent:%s:fallback" % run["id"], "agent"))
+        h.app.store.send_finish("agent:%s:fallback" % run["id"], "uncertain", {})
+        with self.assertRaises(Exception) as c:
+            h.tool("agent_reply", request=run["id"], text="结论")
+        self.assertIn("只回复一次", str(c.exception))
+
+    def test_a_custom_first_line_mark_after_a_real_at_is_seen(self):
+        h = wechat(self, auto_reply_header="> [智能代答] · {model}", agent_mark_position="top")
+        h.app.store.autoreply_set(TEAM, True)
+        h.world.push(TEAM, "user_example_b", "@示例用户\u2005> [智能代答] · 某模型\n已经好了", at_me=True)
+        h.world.push(TEAM, "user_example_b", "@示例用户\u2005> 🤖 AI 代答 · 某模型\n好了", at_me=True)
+        time.sleep(0.5)
+        self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
+        person = h.world.push(TEAM, "user_example_b", "@示例用户\u2005🤖 机器人项目下周上线吗？", at_me=True)
+        self.assertEqual(running(h, person)["kind"], "auto", "a person's question about robots is answered")
+
+
 class FeishuUnchangedTest(unittest.TestCase):
     """What the shared core keeps doing for Feishu (it can edit): progress, and more than one /agent reply."""
 

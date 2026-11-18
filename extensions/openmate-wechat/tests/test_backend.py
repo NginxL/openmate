@@ -304,12 +304,14 @@ class NamesTest(Base):
                          {"wxid_bob": "user", "gh_abc": "bot", "abc@im.bot": "bot", "filehelper": "bot",
                           "x@openim": "user", "masssendapp": "bot", "y@kefu.openim": "bot"})
 
-    def test_a_mention_before_an_ai_mark_is_dropped_for_the_core(self):
-        v = wb.WeChatBackend._visible_text
+    def test_the_mark_view_drops_real_mentions_only(self):
+        import openmate_wechat
+
+        v = openmate_wechat.mark_view
         self.assertEqual(v("@Bob Smith\u2005> 🤖 AI 代答 · m · h\n周五"), "> 🤖 AI 代答 · m · h\n周五")
-        self.assertEqual(v("@鲍勃\u2005@Ann\u2005🤖 AI 回复\nok"), "🤖 AI 回复\nok")
-        self.assertEqual(v("@鲍勃\u2005你好"), "@鲍勃\u2005你好", "a person's message keeps its @")
+        self.assertEqual(v("@鲍勃\u2005@Ann\u2005[智能代答] x"), "[智能代答] x")
         self.assertEqual(v("@" + "长" * 300 + "\u2005> 🤖 AI 代答"), "> 🤖 AI 代答")
+        self.assertEqual(v("@鲍勃 你好"), "@鲍勃 你好", "a typed @ is not a real one")
 
     def test_proxy_variables_never_reach_the_program(self):
         env = clean_env({"PATH": "/bin", "https_proxy": "http://127.0.0.1:7897", "ALL_PROXY": "socks5://x"})

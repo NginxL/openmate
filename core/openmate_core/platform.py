@@ -44,6 +44,9 @@ class Platform:
     #: connector methods this platform does not serve at all (a platform that offers less than the core can do):
     #: they are not in the method table, so the hub's call gets unknown_method whatever its manifest says
     methods_off: Tuple[str, ...] = ()
+    #: how the AI-mark check reads a message (None: as it is). WeChat drops the "@name " a reply starts with, so a
+    #: mark on the first line after it is seen, the built-in marks and the configured header alike
+    mark_view: Optional[Callable[[str], str]] = None
 
 
 @dataclass
