@@ -80,6 +80,8 @@ class FixtureWorld:
         self.send_delay = 0.0
         self.create_fail = False
         self.history_fail = False
+        self.history_fail_chats: set = set()  # history raises for these chats only
+        self.recent_fail = False  # recent_chats raises
         # what happened
         self.sent: List[dict] = []
         self.history_calls: List[Tuple[str, Optional[int], int]] = []
@@ -278,7 +280,7 @@ class FixtureBackend(Backend):
         w = self.world
         with w.lock:
             w.history_calls.append((chat_id, before_position, limit))
-            if w.history_fail:
+            if w.history_fail or chat_id in w.history_fail_chats:
                 raise BackendError("暂时连不上示例服务", "unreachable")
             msgs = list(w.history.get(chat_id, []))
         if before_position is not None:
@@ -288,6 +290,8 @@ class FixtureBackend(Backend):
     def recent_chats(self, limit: int) -> List[Chat]:
         w = self.world
         with w.lock:
+            if w.recent_fail:
+                raise BackendError("暂时连不上示例服务", "unreachable")
             def last(cid: str) -> float:
                 h = w.history.get(cid) or []
                 return h[-1].at if h else 0.0

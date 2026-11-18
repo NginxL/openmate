@@ -70,8 +70,11 @@ class Timing:
     login_wait: float = 10.0  # how long a finished sign-in waits for the link and the first catch-up
     inbox_window: float = 3 * 86400.0  # chats active this recently are collected
     inbox_most: int = 200
-    catchup_chats: int = 20  # chats read again after each reconnect
-    catchup_messages: int = 30
+    catchup_chats: int = 20  # after each reconnect: the service's most recent chats and as many known ones…
+    catchup_messages: int = 30  # …read this many at a time back to what is stored…
+    catchup_pages: int = 5  # …at most this many times per chat…
+    catchup_budget: int = 1500  # …and at most this many messages in all
+    catchup_margin: float = 600.0  # a chat new since the last catch-up keeps its messages from this long before it
     done_check: float = 300.0  # the chats that need the user are checked this often for the service's done mark
     initial_messages: int = 50
     rerender_window: float = 14 * 86400.0  # a newer reading renews the chats with such messages this recent…

@@ -243,8 +243,9 @@ class Backend(abc.ABC):
         """Run one live connection: call on_link("up", "") once it is really up (connected and receiving, not merely
         dialling), on_message for every new message (the account's own included), and return when the connection
         ends or stop is set. on_message raises when the core could not take the message (it is not stored): do not
-        count it delivered (no ack that loses it, no cursor past it); deliver it again, or let a history read bring it. Raise CredentialsExpired when the service says the sign-in is gone, BackendError("…",
-        "proxy") when the proxy cannot work, BackendError("…", "unreachable") for a connection that failed."""
+        count it delivered (no ack that loses it, no cursor past it); deliver it again, or let a history read bring
+        it. Raise CredentialsExpired when the service says the sign-in is gone, BackendError("…", "proxy") when the
+        proxy cannot work, BackendError("…", "unreachable") for a connection that failed."""
 
     # reads
 
@@ -254,7 +255,8 @@ class Backend(abc.ABC):
 
     @abc.abstractmethod
     def recent_chats(self, limit: int) -> List[Chat]:
-        """The account's most recently active conversations, newest first (the one-time initial history)."""
+        """The account's most recently active conversations, newest first (the initial history; the catch-up after
+        each reconnect). BackendError when the service could not say: an empty list means there are none."""
 
     @abc.abstractmethod
     def search(self, query: str, limit: int = 20) -> List[Person]:

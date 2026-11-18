@@ -765,29 +765,57 @@ class ConnectorApp:
             self._catch_up(gen)
 
     def _catch_up(self, gen: int) -> None:
-        """After the link is really up: the one-time initial history, then recent chats again (what came while down)."""
+        """After the link is really up: what came while it was down. The service's most recent chats (the first time:
+        history_chats of them, their initial history) and the known recent ones, each read back to what is stored.
+        A chat that cannot be read is skipped; the first time counts as done only once every read worked."""
         try:
             t = self.timing
+            started = time.time()
             done_now = set()
             first = self.store.meta_get("initial_history_done") != "1"
-            if first:
-                n = _int(self.config.get("history_chats"), 20, 0, 50)
-                if n > 0:
-                    chats = self.backend.recent_chats(n)
-                    for c in chats[:n]:
-                        if gen != self._gen or self.link != "up":
-                            return
+            whole = True
+            n = _int(self.config.get("history_chats"), 20, 0, 50) if first else t.catchup_chats
+            plan: List[str] = []
+            if n > 0:
+                try:
+                    for c in self.backend.recent_chats(n)[:n]:
                         self.store.upsert_chat(c)
-                        self.ingest(self.backend.history(c.id, None, t.initial_messages), live=False)
-                        done_now.add(c.id)
-                self.store.meta_set("initial_history_done", "1")
+                        plan.append(c.id)
+                except CredentialsExpired:
+                    raise
+                except BackendError as e:
+                    whole = False
+                    log.warning("the recent chats could not be read (%s): only the known ones are read", e.kind)
             for c in self.store.chats_since(time.time() - t.inbox_window, t.catchup_chats):
+                if c["id"] not in plan:
+                    plan.append(c["id"])
+            since = None if first else self._caught_up_since()
+            budget = [t.catchup_budget]
+            failed = 0
+            for chat_id in plan:
                 if gen != self._gen or self.link != "up":
                     return
-                if c["id"] in done_now:
+                if budget[0] <= 0:
+                    whole = False
+                    log.info("catch-up: the message budget is spent, %d chat(s) left", len(plan) - len(done_now))
+                    break
+                try:
+                    self._catch_up_chat(chat_id, first, since, budget)
+                    failed = 0
+                except CredentialsExpired:
+                    raise
+                except BackendError as e:
+                    whole, failed = False, failed + 1
+                    log.warning("catch-up: a chat could not be read (%s)", e.kind)
+                    if failed >= 3:
+                        log.warning("catch-up stopped after %d failed chats in a row", failed)
+                        break
                     continue
-                self.ingest(self.backend.history(c["id"], None, t.catchup_messages), live=False)
-                done_now.add(c["id"])
+                done_now.add(chat_id)
+            if whole:
+                if first:
+                    self.store.meta_set("initial_history_done", "1")
+                self.store.meta_set("caught_up_at", "%.3f" % started)
             # a newer backend reads some messages better: their recent chats once more, so the stored text is renewed
             version = str(getattr(self.backend, "render_version", "") or "")
             kinds = tuple(getattr(self.backend, "rerender_types", ()) or ())
@@ -807,6 +835,41 @@ class ConnectorApp:
         except Exception:
             if not self.closing.is_set():
                 log.exception("history catch-up failed")
+
+    def _caught_up_since(self) -> float:
+        """Messages of a chat new to the store are kept from here: the last whole catch-up (less a margin), else the
+        inbox window."""
+        t = self.timing
+        try:
+            return float(self.store.meta_get("caught_up_at") or "") - t.catchup_margin
+        except ValueError:
+            return time.time() - t.inbox_window
+
+    def _catch_up_chat(self, chat_id: str, first: bool, since: Optional[float], budget: List[int]) -> None:
+        """Read chat back to its newest stored message (catchup_messages at a time, catchup_pages times at most). One
+        with nothing stored: the first time one page of initial history; later, what came since the last catch-up."""
+        t = self.timing
+        known = self.store.newest_position(chat_id)
+        initial = known is None and (first or since is None)
+        before: Optional[int] = None
+        for _ in range(1 if initial else max(1, t.catchup_pages)):
+            limit = min(t.initial_messages if initial else t.catchup_messages, budget[0])
+            if limit <= 0:
+                return
+            got = self.backend.history(chat_id, before, limit)
+            budget[0] -= len(got)
+            if known is None and not initial:
+                self.ingest([m for m in got if m.at >= since], live=False)
+            else:
+                self.ingest(got, live=False)
+            if len(got) < limit:
+                return  # the chat's start
+            oldest = min(got, key=lambda m: m.position)
+            if known is not None and oldest.position <= known:
+                return  # back to what is stored
+            if known is None and not initial and oldest.at < since:
+                return
+            before = oldest.position
 
     # ------------------------------------------------------------------ storing messages
 

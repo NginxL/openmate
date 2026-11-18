@@ -303,6 +303,12 @@ class Store:
         r = self._one("SELECT * FROM chats WHERE id = ?", (chat_id,))
         return _chat_row(r) if r else None
 
+    def newest_position(self, chat_id: str) -> Optional[int]:
+        """The position of the newest message stored of chat, None when none is."""
+        rows = self._all("SELECT MAX(position) AS p FROM messages WHERE chat_id = ?", (chat_id,))
+        p = rows[0]["p"] if rows else None
+        return None if p is None else int(p)
+
     def chats_since(self, since: float, limit: int) -> List[dict]:
         rows = self._all("SELECT * FROM chats WHERE last_at >= ? AND id NOT IN (SELECT chat_id FROM gone) "
                          "ORDER BY last_at DESC, id LIMIT ?", (since, limit))

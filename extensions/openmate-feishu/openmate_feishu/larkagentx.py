@@ -1429,6 +1429,9 @@ class LarkXBackend(Backend):
             raise self._net(e, "读取会话信息")
         if not info:
             raise BackendError("没有这个%s会话" % self.region.label, "not_found")
+        if isinstance(info, dict) and set(info) <= {"status", "message", "code"}:
+            # only a status: the service did not answer (a chat's own status comes with the chat)
+            raise BackendError("飞书暂时没有回答（读取会话信息时）", "unreachable")
         chat = self._chat_of(chat_id, info)
         with self._lock:
             self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
@@ -1505,7 +1508,7 @@ class LarkXBackend(Backend):
         return chats[:limit]
 
     def _recent_from_chats(self, client, limit: int) -> List[Chat]:
-        resp = client.api("chats.PullRecentChatsRequest", {"count": int(limit)}) or {}
+        resp = self._answer(client.api("chats.PullRecentChatsRequest", {"count": int(limit)}) or {}, "读取最近的会话")
         raw = resp.get("chats") or {}
         order = [str(x) for x in resp.get("orderedChatIds") or [] if str(x) in raw]
         if not order:
@@ -1513,7 +1516,9 @@ class LarkXBackend(Backend):
         return [self._chat_of(cid, raw[cid]) for cid in order if raw.get(cid)]
 
     def _recent_from_feed(self, client, limit: int) -> List[Chat]:
-        resp = client.api("feed.PullFeedCardsRequest", {"type": 1, "pullType": 1, "count": int(limit), "pullFeedType": 1}) or {}
+        resp = self._answer(client.api("feed.PullFeedCardsRequest",
+                                       {"type": 1, "pullType": 1, "count": int(limit), "pullFeedType": 1}) or {},
+                            "读取最近的会话")
         raw = resp.get("chats") or {}
         out, seen = [], set()
         for card in resp.get("cards") or []:

@@ -595,6 +595,23 @@ class ReadTest(Base):
         with self.assertRaises(BackendError):
             self.b.recent_chats(5)
 
+    def test_recent_chats_a_status_is_a_failure_not_none(self):
+        # the service answered only a status: the catch-up must not count the initial history read
+        S.api_answers["chats.PullRecentChatsRequest"] = {"status": 503}
+        S.api_answers["feed.PullFeedCardsRequest"] = {"status": 503}
+        with self.assertRaises(BackendError) as e:
+            self.b.recent_chats(5)
+        self.assertEqual(e.exception.kind, "unreachable")
+        # one form answering is enough
+        S.api_answers["feed.PullFeedCardsRequest"] = {"cards": [{"id": "500"}], "chats": {"500": S.chats["500"]}}
+        self.assertEqual([c.id for c in self.b.recent_chats(5)], ["500"])
+
+    def test_history_of_a_chat_whose_info_is_only_a_status(self):
+        S.chats["503"] = {"status": 503}
+        with self.assertRaises(BackendError) as e:
+            self.b.history("503", None, 5)
+        self.assertEqual(e.exception.kind, "unreachable")
+
     def test_done_cards_both_forms(self):
         f = larkagentx.done_cards
         # read back (protobuf_to_dict): numbers, each card's own feedType

@@ -180,12 +180,16 @@ class CatchUpTest(unittest.TestCase):
         wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
         chats = {c for c, _, _ in h.world.history_calls}
         self.assertEqual(len(chats), 2)
-        # a restart does not read the initial history again; the catch-up reads only known chats
+        stored = lambda app: {r["chat_id"] for r in app.store._all("SELECT DISTINCT chat_id FROM messages", ())}
+        self.assertEqual(stored(h.app), chats)
+        # a restart does not read the initial history again: the other chats the service lists keep only what came
+        # since the last catch-up (nothing here)
         h.world.history_calls.clear()
         h2 = h.restart()
         h2.wait_ok()
         wait_until(lambda: h2.app.last_sync, what="catch-up")
-        self.assertEqual({c for c, _, _ in h.world.history_calls}, chats)
+        self.assertNotIn(h2.app.timing.initial_messages, {n for _, _, n in h.world.history_calls})
+        self.assertEqual(stored(h2.app), chats)
 
     def test_no_initial_history_when_zero(self):
         h = Harness(self, config={"history_chats": 0})
