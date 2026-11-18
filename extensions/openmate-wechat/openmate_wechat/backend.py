@@ -963,8 +963,10 @@ class WeChatBackend(Backend):
                 if full:
                     self._groups_full_at = time.time()
                     # the catalog goes on from where its last read stopped (not before the pause the server asked)
-                    params = {}
-                    if time.time() >= float(self.store.get("catalog_after") or 0):
+                    # while the server's pause is not over the catalog is left out (its stopping point kept)
+                    paused = time.time() < float(self.store.get("catalog_after") or 0)
+                    params: Dict[str, Any] = {"catalog": not paused}
+                    if not paused:
                         params["catalog_cursor"] = self.store.get("catalog_cursor")
                     r = self._call(self._link(), "groups", 180, **params)
                     ids = [str(g) for g in r.get("groups") or [] if is_group(str(g))]
@@ -976,9 +978,10 @@ class WeChatBackend(Backend):
                     for gid, name in names.items():
                         if is_group(str(gid)) and isinstance(name, str) and name.strip():
                             self.store.set_chat_name(str(gid), name.strip()[:200])
-                    self.store.put("catalog_cursor", str(r.get("catalog_cursor") or ""))
-                    self.store.put("catalog_after", str(time.time() + float(r.get("catalog_wait") or 0)))
-                    if r.get("complete") and r.get("catalog_complete", True):
+                    if not paused and r.get("catalog_read", True) and self.me == me:
+                        self.store.put("catalog_cursor", str(r.get("catalog_cursor") or ""))
+                        self.store.put("catalog_after", str(time.time() + float(r.get("catalog_wait") or 0)))
+                    if r.get("complete") and r.get("catalog_complete", True) and not paused:
                         self.store.put("groups_at", str(time.time()))  # both read to the end: good for GROUPS_EVERY
                     log.info("WeChat groups: %d in all (%s in the group catalog%s; contacts %s, %s), %d new here",
                              len(ids), r.get("catalog", "?"), "" if r.get("catalog_complete") else ", not all yet",

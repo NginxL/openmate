@@ -885,7 +885,10 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
         .filter(|c| !c.is_empty() && c.len() <= 65536)
         .unwrap_or_else(|| vec![0]);
     let mut catalog_wait = 0u32;
-    for _ in 0..100 {
+    let resumed = cursor != vec![0u8];
+    // the backend leaves the catalog out while the server's pause is not over
+    let read_catalog = p.get("catalog").and_then(Value::as_bool).unwrap_or(true);
+    for _ in 0..(if read_catalog { 100 } else { 0 }) {
         if Instant::now() >= deadline {
             break;
         }
@@ -897,6 +900,9 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
                 log(&format!("group catalog read failed: {e:#}"));
+                if resumed {
+                    cursor = vec![0]; // a stopping point the server would not take: the next read starts over
+                }
                 break;
             }
             Err(_) => {
@@ -937,7 +943,7 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
     Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total,
               "catalog": catalog, "catalog_complete": catalog_complete, "names": names,
               "catalog_cursor": if catalog_complete { String::new() } else { B64.encode(&cursor) },
-              "catalog_wait": catalog_wait}))
+              "catalog_wait": catalog_wait, "catalog_read": read_catalog}))
 }
 
 // ---------------------------------------------------------------- media

@@ -611,6 +611,22 @@ class GroupCatalogTest(Base):
         b._groups_work(True)
         self.assertEqual(self.requests("groups")[-1].get("catalog_cursor"), "Y3Vyc29y", "goes on from where it stopped")
 
+    def test_the_catalog_waits_out_the_pause_the_server_asked_for(self):
+        os.environ["MATEWECHAT_FAKE_CATALOG_PART"] = "cGFnZTI="
+        os.environ["MATEWECHAT_FAKE_CATALOG_WAIT"] = "900"
+        spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", spacing)
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b._groups_work(True)
+        after = b.store.get("catalog_after")
+        b._groups_work(True)
+        last = self.requests("groups")[-1]
+        self.assertFalse(last.get("catalog"), "within the pause: the catalog is left out")
+        self.assertNotIn("catalog_cursor", last)
+        self.assertEqual((b.store.get("catalog_cursor"), b.store.get("catalog_after")), ("cGFnZTI=", after),
+                         "its stopping point and pause kept")
+
 
 class GroupGoneTest(Base):
     def setUp(self):
