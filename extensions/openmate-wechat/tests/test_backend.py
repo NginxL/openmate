@@ -40,15 +40,15 @@ class Base(unittest.TestCase):
         self.log = os.path.join(self.dir, "requests.jsonl")
         self.env_saved = dict(os.environ)
         self.addCleanup(self._restore_env)
-        os.environ["FAKE_LOG"] = self.log
-        os.environ["FAKE_EVENTS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_LOG"] = self.log
+        os.environ["MATEWECHAT_FAKE_EVENTS"] = "[]"
 
     def _restore_env(self):
         os.environ.clear()
         os.environ.update(self.env_saved)
 
     def backend(self, events=None):
-        os.environ["FAKE_EVENTS"] = json.dumps(events or [])
+        os.environ["MATEWECHAT_FAKE_EVENTS"] = json.dumps(events or [])
         b = wb.WeChatBackend(lambda wait=0: FAKE, os.path.join(self.dir, "data"))
         self.addCleanup(b.close)
         return b
@@ -171,7 +171,7 @@ class ListenTest(Base):
         self.assertEqual(b.store.get("cursor"), "T0xE", "the cursor waits for the message")
         self.assertEqual(b.store.seen("f1")[1], False)
         # after a restart the same message comes back as caught-up: the core gets it now
-        os.environ["FAKE_EVENTS"] = json.dumps([msg("f1", "1@chatroom", "wxid_bob", "hi", origin="catchup")])
+        os.environ["MATEWECHAT_FAKE_EVENTS"] = json.dumps([msg("f1", "1@chatroom", "wxid_bob", "hi", origin="catchup")])
         b._native.close()
         got, _, _ = self.listen(b, lambda g, l, e: len(g) >= 1)
         self.assertEqual([m.id for m in got], ["f1"])
@@ -210,7 +210,7 @@ class ListenTest(Base):
         self.assertIsInstance(err[0], BackendError)
         self.assertEqual(err[0].kind, "unreachable")
         # the next listen starts the program again and gives it the sign-in
-        os.environ["FAKE_EVENTS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_EVENTS"] = "[]"
         self.listen(b, lambda g, l, e: len(self.requests("restore")) >= 2, timeout=3)
         self.assertGreaterEqual(len(self.requests("restore")), 2)
 
@@ -238,7 +238,7 @@ class ReadyTest(Base):
 
 class ProtocolTest(Base):
     def test_a_program_of_another_protocol_is_not_used(self):
-        os.environ["FAKE_PROTOCOL"] = "1"
+        os.environ["MATEWECHAT_FAKE_PROTOCOL"] = "1"
         b = self.backend()
         with self.assertRaises(BackendError) as c:
             b.restore({"state": {"k": "v1"}})
@@ -343,6 +343,8 @@ class AckTest(Base):
         self.assertEqual((r["chat"], r["text"], r["quote"]["server_id"]), ("1@chatroom", "🤖 贾维斯处理中...", "a1"))
         self.assertNotIn("mentions", r, "the answer @s them, the ack does not")
         self.assertEqual(r["quote"]["display_name"], "群里的鲍勃", "the quote shows the group nickname")
+        kept = [m for m, _ in b.store.messages("1@chatroom", None, 10) if m.get("origin") == "local_send"]
+        self.assertEqual([m["type"] for m in kept], ["SYSTEM"], "a notice in the chat, never an answer")
         n = len(self.requests("send"))
         self.assertIsNone(b.react("1@chatroom", "a1", "🤖 贾维斯处理中..."), "once per request")
         b.react("1@chatroom", "a1", "DONE")  # a Feishu code: not a WeChat message
@@ -375,8 +377,8 @@ class HistoryToCoreTest(Base):
         self.assertEqual((own.id, own.mine, own.text, own.parent_id), (mid, True, "@群里的鲍勃\u2005答", "q5"))
 
     def test_kinds_learnt_from_wechat(self):
-        os.environ["FAKE_BUSINESS"] = "cmb4008205555"
-        os.environ["FAKE_NO_KIND"] = "wxid_carl,wxid_dan"  # the fake reads its environment when it starts
+        os.environ["MATEWECHAT_FAKE_BUSINESS"] = "cmb4008205555"
+        os.environ["MATEWECHAT_FAKE_NO_KIND"] = "wxid_carl,wxid_dan"  # the fake reads its environment when it starts
         b = self.backend()
         b.restore({"state": {"k": "v1"}})
         b._lookup_names(["cmb4008205555", "wxid_bob"])
@@ -397,7 +399,7 @@ class HistoryToCoreTest(Base):
 
 class KindsLaterTest(Base):
     def test_people_kinds_asks_wechat_about_undescribed_ids_and_tells_the_core_later(self):
-        os.environ["FAKE_BUSINESS"] = "qqtech"
+        os.environ["MATEWECHAT_FAKE_BUSINESS"] = "qqtech"
         b = self.backend()
         told = []
         b.on_people_kinds = told.append
@@ -419,7 +421,7 @@ class KindsLaterTest(Base):
         self.assertIn({"qqtech": "bot"}, told2, "what was learnt before is told again at start (the core may say user)")
 
     def test_a_person_wechat_will_not_name_stays_nameless_and_is_not_asked_each_time(self):
-        os.environ["FAKE_UNKNOWN"] = "wxid_ghost"
+        os.environ["MATEWECHAT_FAKE_UNKNOWN"] = "wxid_ghost"
         b = self.backend()
         b.restore({"state": {"k": "v1"}})
         b.store.add_message(msg("g1", "wxid_ghost", "wxid_ghost", "你好"))
@@ -433,8 +435,8 @@ class ArchiveRuleTest(Base):
     def test_a_custom_id_waits_for_wechat_and_wxid_never_does(self):
         import openmate_wechat
 
-        os.environ["FAKE_BUSINESS"] = "qqtech"
-        os.environ["FAKE_NO_KIND"] = "lawliet321x"
+        os.environ["MATEWECHAT_FAKE_BUSINESS"] = "qqtech"
+        os.environ["MATEWECHAT_FAKE_NO_KIND"] = "lawliet321x"
         b = self.backend()
         b.restore({"state": {"k": "v1"}})
         rule = openmate_wechat.archive_chat
@@ -449,6 +451,54 @@ class ArchiveRuleTest(Base):
         self.assertTrue(rule("lawliet321x", None, {}), "asked, no flags: as its id looks")
         self.assertFalse(rule("gh_abc", None, {}))
         self.assertFalse(rule("1@chatroom", None, {}))
+
+
+class SmallFixesTest(Base):
+    def test_a_group_read_covers_the_at_me_even_with_lines_after(self):
+        now = int(time.time())
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b.store.add_message(msg("g1", "1@chatroom", "wxid_bob", "@我 看下", at_me=True, at=now - 60))
+        b._on_read("1@chatroom", now - 30)
+        b.store.add_message(msg("g2", "1@chatroom", "wxid_ann", "大家好", at=now))
+        self.assertEqual(b.chat_done_states(["1@chatroom"]), {"1@chatroom": float(now - 30)},
+                         "the read came after the @me: that is what needed the user")
+        b.store.add_message(msg("g3", "1@chatroom", "wxid_bob", "@我 还有", at_me=True, at=now + 5))
+        self.assertEqual(b.chat_done_states(["1@chatroom"]), {"1@chatroom": None}, "a new @me after the read")
+
+    def test_search_finds_an_exact_id_and_takes_underscores_as_text(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        for cid in ("wxid_example", "wxidXexample", "maol111"):
+            b.store.add_message(msg("s-" + cid, cid, cid, "hi"))
+        self.assertEqual([p.id for p in b.search("wxid_example")], ["wxid_example"], "_ is text, not any character")
+        self.assertEqual([p.id for p in b.search("maol111")][0], "maol111")
+        self.assertEqual(b.search("100%"), [])
+
+    def test_a_failed_sign_in_says_why(self):
+        b = self.backend()
+        b.login_start()
+        b._native.call("login_poll", timeout=5)  # the fake: pending
+        import openmate_wechat.native as nat
+
+        real = b._native.call
+
+        def fail(op, timeout=10, **kw):
+            if op == "login_poll":
+                raise nat.NativeError("login", "微信要求手机和这台电脑在同一个局域网里确认登录")
+            return real(op, timeout=timeout, **kw)
+
+        b._native.call = fail
+        with self.assertRaises(BackendError) as c:
+            b.login_poll("qr")
+        self.assertEqual(c.exception.kind, "login")
+        self.assertIn("局域网", c.exception.message)
+
+    def test_a_wecom_group_roster_is_not_asked(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        self.assertEqual(b._roster("9@im.chatroom"), ([], 0))
+        self.assertEqual(self.requests("room"), [])
 
 
 class SignOutTest(Base):
@@ -507,8 +557,8 @@ class GroupGoneTest(Base):
         self.assertIn("5@chatroom", [g.id for g in b.group_candidates(50)], "a newer message: joined again")
 
     def test_a_group_whose_full_member_list_lacks_the_account_is_gone(self):
-        os.environ["FAKE_LEFT"] = "7@chatroom"
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_LEFT"] = "7@chatroom"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend()
         gone = []
         b.on_chat_gone = gone.append
@@ -528,7 +578,7 @@ class GroupGoneTest(Base):
         self.assertEqual(told, ["7@chatroom"], "told again at start (the core may not have heard)")
 
     def test_a_removal_caught_up_after_a_gap_waits_for_the_member_list(self):
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend([msg("r1", "6@chatroom", "wxid_bob", "早"), {"event": "removed", "id": "6@chatroom",
                                                                      "origin": "catchup"}])
         gone = []
@@ -542,7 +592,7 @@ class GroupGoneTest(Base):
         self.assertIn("6@chatroom", [r["room_id"] for r in self.requests("room")])
 
     def test_a_wecom_group_removal_caught_up_is_taken_as_it_comes(self):
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend([msg("w1", "9@im.chatroom", "wxid_bob", "早"), {"event": "removed", "id": "9@im.chatroom",
                                                                         "origin": "catchup"}])
         gone = []
@@ -552,7 +602,7 @@ class GroupGoneTest(Base):
         self.assertEqual(gone, ["9@im.chatroom"], "no member list to wait for")
 
     def test_every_group_gets_its_member_list_read_in_turn(self):
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend()
         b.restore({"state": {"k": "v1"}})
         now = int(time.time())
@@ -568,9 +618,9 @@ class GroupGoneTest(Base):
         self.assertEqual(sorted(set(asked)), ["%d@chatroom" % (100 + i) for i in range(5)], "none left out")
 
     def test_a_partial_member_list_proves_nothing(self):
-        os.environ["FAKE_LEFT"] = "7@chatroom"
-        os.environ["FAKE_ROOM_PARTIAL"] = "1"
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_LEFT"] = "7@chatroom"
+        os.environ["MATEWECHAT_FAKE_ROOM_PARTIAL"] = "1"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend()
         gone = []
         b.on_chat_gone = gone.append
@@ -601,8 +651,8 @@ class ReadTest(Base):
                          "read in the very second of the last message: can't tell which came first, still open")
 
     def test_old_direct_chats_get_their_kind_in_the_background(self):
-        os.environ["FAKE_BUSINESS"] = "cmb4008205555"
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_BUSINESS"] = "cmb4008205555"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend()
         b.restore({"state": {"k": "v1"}})
         for cid in ("wxid_old1", "cmb4008205555", "wxid_old2"):
@@ -637,21 +687,21 @@ class GroupsTest(Base):
         self.assertTrue(all(c.kind == "group" for c in b.group_candidates(50)))
 
     def test_a_contact_change_reads_the_groups_again(self):
-        os.environ["FAKE_GROUPS"] = '["g1@chatroom"]'
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = '["g1@chatroom"]'
         b = self.backend([{"event": "link", "up": True}, {"sleep": 0.6}, {"event": "contacts"}, {"sleep": 1.5}])
         b.restore({"state": {"k": "v1"}})
         stop = threading.Event()
         t = threading.Thread(target=lambda: b.listen(lambda m: None, lambda s, r: None, stop), daemon=True)
         t.start()
         self.wait(lambda: len(self.requests("groups")) >= 1)
-        os.environ["FAKE_GROUPS"] = '["g1@chatroom", "g9@chatroom"]'  # read by the next program call only via env:
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = '["g1@chatroom", "g9@chatroom"]'  # read by the next program call only via env:
         self.wait(lambda: len(self.requests("groups")) >= 2, 4)
         stop.set()
         t.join(5)
         self.assertGreaterEqual(len(self.requests("groups")), 2, "the contact change made it read the list again")
 
     def test_a_group_first_seen_in_a_message_is_listed_and_named(self):
-        os.environ["FAKE_GROUPS"] = "[]"
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = "[]"
         b = self.backend([{"event": "link", "up": True}, msg("n1", "new7@chatroom", "wxid_bob", "大家好")])
         b.restore({"state": {"k": "v1"}})
         self.listen(b, lambda g, l, e: g)
@@ -667,7 +717,7 @@ class GroupsTest(Base):
         self.assertEqual(b.group_candidates(50), [])
 
     def test_an_incomplete_scan_is_not_counted(self):
-        os.environ["FAKE_GROUPS_COMPLETE"] = "0"
+        os.environ["MATEWECHAT_FAKE_GROUPS_COMPLETE"] = "0"
         b = self.backend([{"event": "link", "up": True}, {"sleep": 1.0}])
         b.restore({"state": {"k": "v1"}})
         self.listen(b, lambda g, l, e: l)
@@ -728,6 +778,12 @@ class NamesTest(Base):
     def test_proxy_variables_never_reach_the_program(self):
         env = clean_env({"PATH": "/bin", "https_proxy": "http://127.0.0.1:7897", "ALL_PROXY": "socks5://x"})
         self.assertEqual(env, {"PATH": "/bin"})
+
+    def test_only_what_the_program_needs_reaches_it(self):
+        env = clean_env({"PATH": "/bin", "HOME": "/h", "PERSONA_HUB_TOKEN": "secret", "OPENAI_API_KEY": "k",
+                         "MATEWECHAT_FAKE_LOG": "/tmp/x", "LANG": "zh_CN.UTF-8"})
+        self.assertEqual(env, {"PATH": "/bin", "HOME": "/h", "MATEWECHAT_FAKE_LOG": "/tmp/x", "LANG": "zh_CN.UTF-8"},
+                         "the hub's token and other secrets stay with the extension")
 
 
 if __name__ == "__main__":

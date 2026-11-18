@@ -42,12 +42,16 @@ class NativeGone(NativeError):
         super().__init__("gone", message)
 
 
+ENV_KEEP = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TZ", "SSL_CERT_FILE",
+            "SSL_CERT_DIR", "RUST_BACKTRACE")
+ENV_PREFIX = "MATEWECHAT_"  # the program's own settings (and its test double's)
+
+
 def clean_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """The environment for the program: WeChat is reached directly, never through a proxy someone set for other things."""
-    env = dict(os.environ if base is None else base)
-    for k in PROXY_VARS:
-        env.pop(k, None)
-    return env
+    """The environment for the program: only what it needs (an allow list: the hub's token and the extension's other
+    secrets never reach it), and no proxy: WeChat is reached directly, never through one set for other things."""
+    src = os.environ if base is None else base
+    return {k: v for k, v in src.items() if (k in ENV_KEEP or k.startswith(ENV_PREFIX)) and k not in PROXY_VARS}
 
 
 class Native:

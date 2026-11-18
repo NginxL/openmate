@@ -70,6 +70,7 @@ SCHEMA = (
         id TEXT PRIMARY KEY, chat TEXT NOT NULL, position INTEGER NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL,
         delivered INTEGER NOT NULL DEFAULT 1)""",
     "CREATE INDEX IF NOT EXISTS messages_chat ON messages (chat, position)",
+    "CREATE INDEX IF NOT EXISTS messages_chat_at ON messages (chat, at)",  # position_for counts a second's messages
     """CREATE TABLE IF NOT EXISTS chats (
         id TEXT PRIMARY KEY, last_at INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '', named_at REAL NOT NULL DEFAULT 0,
         members INTEGER NOT NULL DEFAULT 0)""",
@@ -252,14 +253,15 @@ class Store:
         return [r[0] for r in rows if r[0] not in known and kind_of(r[0]) == "user"
                 and not r[0].endswith(SURE_PEOPLE)][:limit]
 
-    def last_incoming(self, chat: str) -> int:
-        """When someone else last wrote in the chat (0: never, as far as kept here)."""
+    def last_incoming(self, chat: str, at_me: bool = False) -> int:
+        """When someone else last wrote in the chat (with at_me: last @-mentioned the account); 0: never, as far as
+        kept here (the last 500 messages)."""
         with self._mu:
-            rows = self._db.execute("SELECT body FROM messages WHERE chat=? ORDER BY position DESC LIMIT 200",
+            rows = self._db.execute("SELECT body FROM messages WHERE chat=? ORDER BY position DESC LIMIT 500",
                                     (chat,)).fetchall()
         for (body,) in rows:
             ev = json.loads(body)
-            if not ev.get("mine") and ev.get("type") != "SYSTEM":
+            if not ev.get("mine") and ev.get("type") != "SYSTEM" and (ev.get("at_me") or not at_me):
                 return int(ev.get("at") or 0)
         return 0
 
@@ -279,10 +281,19 @@ class Store:
                              (key, name, mention, time.time()))
 
     def search(self, query: str, limit: int) -> List[Tuple[str, str]]:
-        like = "%" + query.replace("%", "").replace("_", "") + "%"
+        """Chats by name or id: an exact id first, then the rest matched literally (% and _ are text here)."""
+        like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         with self._mu:
-            return self._db.execute("SELECT id, name FROM chats WHERE name LIKE ? OR id LIKE ? ORDER BY last_at DESC "
-                                    "LIMIT ?", (like, like, limit)).fetchall()
+            return self._db.execute("SELECT id, name FROM chats WHERE id = ? OR name LIKE ? ESCAPE '\\' "
+                                    "OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC, last_at DESC LIMIT ?",
+                                    (query, like, like, query, limit)).fetchall()
+
+    def stale_named_groups(self, older_than: float, limit: int) -> List[str]:
+        """Named groups whose name was read before then (a group renamed shows its new name in time)."""
+        with self._mu:
+            return [r[0] for r in self._db.execute(
+                "SELECT id FROM chats WHERE " + GROUP_SQL + " AND " + HERE_SQL + " AND name != '' AND named_at < ? "
+                "ORDER BY named_at LIMIT ?", (older_than, limit)).fetchall()]
 
 
 class WeChatBackend(Backend):
@@ -433,9 +444,11 @@ class WeChatBackend(Backend):
         except NativeGone as e:
             raise BackendError(e.message, "unreachable")
         except NativeError as e:
-            if e.kind in ("login", "input"):  # this QR attempt ended, or the program lost it (restarted): a new one
-                log.warning("WeChat sign-in attempt ended: %s", e.message)
+            if e.kind == "input":  # the program lost this attempt (restarted): a new QR
                 return "expired"
+            if e.kind == "login":  # this attempt failed for a reason the user can act on (the same LAN): say it
+                log.warning("WeChat sign-in attempt failed: %s", e.message)
+                raise BackendError(e.message, "login")
             raise BackendError(e.message, "unknown")
         s = str(r.get("status") or "pending")
         return {"pending": "waiting", "cancelled": "expired", "rejected": "expired"}.get(s, s)
@@ -750,6 +763,8 @@ class WeChatBackend(Backend):
             time.sleep(GROUP_NAME_PAUSE)
 
     def _roster(self, chat_id: str) -> Tuple[List[dict], int]:
+        if not chat_id.endswith("@chatroom"):
+            return [], 0  # a WeCom group: WeChat gives no member list for it (not asked)
         try:
             r = self._call(self._link(), "room", 20, room_id=chat_id)
         except BackendError:
@@ -841,7 +856,9 @@ class WeChatBackend(Backend):
                 read = 0
             if not read:
                 continue
-            last = self.store.last_incoming(cid)
+            # what needs the user: in a group the last @me (a later plain line does not undo a read that covered it),
+            # in a direct chat the last message from them
+            last = self.store.last_incoming(cid, at_me=is_group(cid))
             if not last:
                 continue
             # the same second cannot tell which came first: then it still needs the user
@@ -895,7 +912,9 @@ class WeChatBackend(Backend):
                         self.store.put("groups_at", str(time.time()))
                     log.info("WeChat groups: %d in the contacts of %s (%s), %d new here", len(ids),
                              r.get("contacts", "?"), "all" if r.get("complete") else "not all yet", new)
+                # unnamed groups, then named ones read long ago (a group renamed shows its new name in time)
                 pending = self.store.unnamed_groups(time.time() - NAME_TTL, 400)
+                pending += self.store.stale_named_groups(time.time() - NAME_TTL, 100)
                 for i in range(0, len(pending), 2):  # two per request, as WeChat takes them
                     if self._closed or self.me != me:
                         return
@@ -941,13 +960,13 @@ class WeChatBackend(Backend):
         if self.store.get(key):
             return None
         self.store.put(key, "1")
-        return self.send(chat_id, self.ack_text, reply_to=message_id, mention=False)
+        return self.send(chat_id, self.ack_text, reply_to=message_id, mention=False, notice=True)
 
     def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
         """Nothing to take back: the ack line stays (a recall works only for 2 minutes and leaves a notice)."""
 
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             mention: bool = True) -> str:
+             mention: bool = True, notice: bool = False) -> str:
         """Text as the account into chat_id (root names no other chat on WeChat). reply_to is quoted; in a group, its
         sender is @-ed too when it is someone else (unless mention is False). Only a send that surely did not go out
         raises SendRejected."""
@@ -983,7 +1002,7 @@ class WeChatBackend(Backend):
         if status == "sent":
             mid = str(r.get("message_id") or "")
             try:
-                self._keep_own_send(chat_id, mid, text, params, int(r.get("created_at") or 0))
+                self._keep_own_send(chat_id, mid, text, params, int(r.get("created_at") or 0), notice)
             except Exception:
                 log.exception("a sent WeChat message could not be kept here (it went out)")
             return mid
@@ -991,7 +1010,8 @@ class WeChatBackend(Backend):
             raise SendRejected(str(r.get("message") or "微信没有接受这条消息"))
         raise BackendError("发送结果不确定：%s；不会自动重发" % (r.get("message") or "微信没有确认"), "unknown")
 
-    def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any], sent_at: int = 0) -> None:
+    def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any], sent_at: int = 0,
+                       notice: bool = False) -> None:
         """WeChat does not echo this device's sends back: keep the sent message, and give it to the core as history
         (the inbox sees the reply, the conversation page and the knowledge base have it). Never acted on."""
         if not mid:
@@ -999,7 +1019,10 @@ class WeChatBackend(Backend):
         names = [m.get("name") for m in params.get("mentions") or [] if m.get("name")]
         shown = "".join("@%s\u2005" % n for n in names) + text
         ev = {"event": "message", "origin": "local_send", "id": mid, "chat": chat_id, "group": is_group(chat_id),
-              "sender": self.me, "mine": True, "type": "TEXT", "text": shown, "at": sent_at or int(time.time()),
+              # the ack line ("处理中") is a notice: shown in the chat, never an answer (the 需要我 it was for stays
+              # until a real one) and never archived
+              "sender": self.me, "mine": True, "type": "SYSTEM" if notice else "TEXT", "text": shown,
+              "at": sent_at or int(time.time()),
               "parent": str((params.get("quote") or {}).get("server_id") or ""),
               # plain text can be quoted as such; a quote reply went out as WeChat's quote message, not as text
               "quotable": not params.get("quote"), "content": shown, "msgsource": ""}

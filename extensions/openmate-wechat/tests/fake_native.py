@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A stand-in for matewechat-native in tests: the same JSON lines, scripted by environment variables.
 
-FAKE_LOG     every request is appended here as a JSON line (and every persist ack)
-FAKE_EVENTS  a JSON list of events sent after "listen" ({"sleep": s} waits; {"event":"persist",…} waits for its ack)
+MATEWECHAT_FAKE_LOG     every request is appended here as a JSON line (and every persist ack)
+MATEWECHAT_FAKE_EVENTS  a JSON list of events sent after "listen" ({"sleep": s} waits; {"event":"persist",…} waits for its ack)
 """
 import json
 import os
@@ -10,8 +10,8 @@ import sys
 import threading
 import time
 
-LOG = os.environ.get("FAKE_LOG", "")
-EVENTS = json.loads(os.environ.get("FAKE_EVENTS", "[]"))
+LOG = os.environ.get("MATEWECHAT_FAKE_LOG", "")
+EVENTS = json.loads(os.environ.get("MATEWECHAT_FAKE_EVENTS", "[]"))
 out_mu = threading.Lock()
 acks = {}
 ack_cv = threading.Condition()
@@ -87,9 +87,9 @@ def answer(req):
     if op == "contacts":
         if any(not i for i in req.get("ids", [])):
             return fail("input", "Empty contact identity")
-        biz = set(os.environ.get("FAKE_BUSINESS", "").split(","))
-        silent = set(os.environ.get("FAKE_NO_KIND", "").split(","))  # WeChat gave no flags for these
-        unknown = set(os.environ.get("FAKE_UNKNOWN", "").split(","))  # WeChat shows nothing for these
+        biz = set(os.environ.get("MATEWECHAT_FAKE_BUSINESS", "").split(","))
+        silent = set(os.environ.get("MATEWECHAT_FAKE_NO_KIND", "").split(","))  # WeChat gave no flags for these
+        unknown = set(os.environ.get("MATEWECHAT_FAKE_UNKNOWN", "").split(","))  # WeChat shows nothing for these
         return ok(contacts=[{"id": i, "nickname": ("群" + i.split("@")[0]) if i.endswith("@chatroom") else "昵称" + i[-1],
                              "remark": ("备注" + i[-1]) if i == "wxid_bob" else None,
                              "verify_flag": None if i in silent else (8 if i in biz else 0), "business": i in biz}
@@ -97,16 +97,16 @@ def answer(req):
     if op == "room":
         if not isinstance(req.get("room_id"), str):
             return fail("input", "缺少 room_id")
-        left = set(os.environ.get("FAKE_LEFT", "").split(","))  # groups the account is no longer in
-        unknown = os.environ.get("FAKE_ROOM_PARTIAL", "") == "1"  # WeChat gave no full id list
+        left = set(os.environ.get("MATEWECHAT_FAKE_LEFT", "").split(","))  # groups the account is no longer in
+        unknown = os.environ.get("MATEWECHAT_FAKE_ROOM_PARTIAL", "") == "1"  # WeChat gave no full id list
         return ok(room_id=req.get("room_id"), member_count=3, me_in=None if unknown else req.get("room_id") not in left,
                   members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
     if op == "groups":
-        return ok(groups=json.loads(os.environ.get("FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')),
-                  complete=os.environ.get("FAKE_GROUPS_COMPLETE", "1") == "1")
+        return ok(groups=json.loads(os.environ.get("MATEWECHAT_FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')),
+                  complete=os.environ.get("MATEWECHAT_FAKE_GROUPS_COMPLETE", "1") == "1")
     if op == "hello":
-        return ok(protocol=int(os.environ.get("FAKE_PROTOCOL", "2")), version="fake")
+        return ok(protocol=int(os.environ.get("MATEWECHAT_FAKE_PROTOCOL", "2")), version="fake")
     if op in ("stop", "logout"):
         return ok()
     return fail("unsupported", op)

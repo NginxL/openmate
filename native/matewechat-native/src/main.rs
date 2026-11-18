@@ -109,6 +109,7 @@ struct App {
     rt: tokio::runtime::Runtime,
     persist: Arc<Persist>,
     login: Mutex<Option<Arc<Login>>>,
+    login_seq: AtomicU64, // each login_start's number: only the newest one's attempt is kept
     client: Mutex<Option<NativeClient>>,
     own: Mutex<String>,
     gen: AtomicU64,
@@ -224,6 +225,7 @@ fn op_login_start(app: &App, p: &Value) -> Result<Value> {
         Some(v) if !v.is_null() => serde_json::from_value::<DeviceProfile>(v.clone()).context("保存的设备信息读不出来")?,
         _ => DeviceProfile::generate(DEVICE_TYPE.into())?,
     };
+    let mine = app.login_seq.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(old) = app.login.lock().map_err(|_| anyhow!("lock"))?.take() {
         old.cancel.store(true, Ordering::SeqCst);
     }
@@ -236,7 +238,17 @@ fn op_login_start(app: &App, p: &Value) -> Result<Value> {
         state: Mutex::new(None),
         cancel: Arc::new(AtomicBool::new(false)),
     });
-    *app.login.lock().map_err(|_| anyhow!("lock"))? = Some(login.clone());
+    {
+        // a slower earlier start must not replace the attempt of a newer one (whose QR is the one shown)
+        let mut slot = app.login.lock().map_err(|_| anyhow!("lock"))?;
+        if app.login_seq.load(Ordering::SeqCst) != mine {
+            login.cancel.store(true, Ordering::SeqCst);
+            return Err(err("input", "这次取的二维码已经被更新的一次取代"));
+        }
+        if let Some(old) = slot.replace(login.clone()) {
+            old.cancel.store(true, Ordering::SeqCst);
+        }
+    }
     // The worker owns the attempt until it ends: a LAN confirmation the phone makes late still finds its listener.
     std::thread::Builder::new().name("login".into()).spawn(move || {
         let set = |s: &str, m: &str| {
@@ -483,10 +495,18 @@ fn drain(
 ) -> Result<()> {
     let own = app.own();
     let mut origin = origin;
-    for _ in 0..16 {
+    // normal pages that move the cursor go on as long as the server has more (they stay live); only resets in a
+    // row, or pages that do not move the cursor, end it with an error (the link reconnects)
+    let (mut resets, mut stuck) = (0u32, 0u32);
+    for _ in 0..100_000 {
         let had_cursor = !cursor.is_empty();
+        let before = cursor.clone();
         let batch = conn.sync(cursor, scene)?;
         let reset = batch.code == -2006 || (had_cursor && batch.cursor.is_empty());
+        resets = if reset { resets + 1 } else { 0 };
+        if resets > 16 {
+            bail!("too many sync resets in a row");
+        }
         if reset {
             origin = "catchup"; // the server reset the cursor: what it sends again is history, never a request
         }
@@ -551,8 +571,12 @@ fn drain(
         if !batch.continuation && !reset {
             return Ok(()); // a normal last page: the next drain is live again
         }
+        stuck = if !reset && *cursor == before { stuck + 1 } else { 0 };
+        if stuck >= 3 {
+            bail!("the sync cursor does not move");
+        }
     }
-    bail!("too many sync pages or resets in a row")
+    bail!("too many sync pages")
 }
 
 // ---------------------------------------------------------------- sends
@@ -767,6 +791,9 @@ fn op_room(app: &App, p: &Value) -> Result<Value> {
     if !message::is_group(&room) {
         return Err(err("input", "不是群"));
     }
+    if !room.ends_with("@chatroom") {
+        return Err(err("unsupported", "企业微信的群读不到成员名单"));
+    }
     let r = app.rt.block_on(async { tokio::time::timeout(Duration::from_secs(8), client.lookup_room(&room, 0)).await });
     let roster = match r {
         Ok(Ok(r)) => r,
@@ -884,6 +911,7 @@ fn main() -> Result<()> {
         rt,
         persist,
         login: Mutex::new(None),
+        login_seq: AtomicU64::new(0),
         client: Mutex::new(None),
         own: Mutex::new(String::new()),
         gen: AtomicU64::new(0),

@@ -390,6 +390,26 @@ class KindsAndNamesLaterTest(unittest.TestCase):
         self.assertNotEqual(h.app.store.get_chat(cid)["name"], cid)
 
 
+class SignInReasonTest(unittest.TestCase):
+    def test_a_failed_attempt_shows_why_with_a_new_qr(self):
+        from openmate_core.backend import BackendError, LoginQR
+
+        h = wechat(self)
+        b = h.app.backend
+        urls = iter(["https://example.com/qr1", "https://example.com/qr2"])
+        b.login_start = lambda: LoginQR(url=next(urls), state="qr")
+
+        def poll(state):
+            raise BackendError("微信要求手机和这台电脑在同一个局域网里确认登录", "login")
+
+        b.login_poll = poll
+        first = h.c("login.step", step="")
+        self.assertEqual(first["url"], "https://example.com/qr1")
+        again = h.c("login.step", step="qr")
+        self.assertEqual(again["url"], "https://example.com/qr2", "a new QR, not the failed one")
+        self.assertIn("局域网", again.get("error", ""), "and why the last one failed")
+
+
 class ChatGoneTest(unittest.TestCase):
     def test_a_gone_group_leaves_every_list_and_its_mark_until_a_newer_message(self):
         from openmate_core.backend import Message

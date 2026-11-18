@@ -865,7 +865,16 @@ class ConnectorApp:
             try:
                 status = self.backend.login_poll(flow["state"])
             except BackendError as e:
-                return self._qr_prompt(flow["url"], p.login_hint, "暂时查不到扫码结果：%s" % e.message)
+                if e.kind != "login":
+                    return self._qr_prompt(flow["url"], p.login_hint, "暂时查不到扫码结果：%s" % e.message)
+                # this attempt failed for a reason the user can act on (WeChat: confirm on the same LAN): a new QR
+                # with the reason, not "expired"
+                try:
+                    qr = self.backend.login_start()
+                except BackendError as e2:
+                    raise RPCError("扫码没成功（%s），换新二维码时出错：%s" % (e.message, e2.message))
+                self._login = {"state": qr.state, "url": qr.url}
+                return self._qr_prompt(qr.url, p.login_hint, "上次扫码没成功：%s。请按提示再扫一次" % e.message)
             if status == "scanned":
                 return self._qr_prompt(flow["url"], p.login_hint_scanned)
             if status == "expired":
