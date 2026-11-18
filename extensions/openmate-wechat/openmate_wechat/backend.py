@@ -966,9 +966,15 @@ class WeChatBackend(Backend):
                     if self.me != me or self._closed:
                         return  # another account signed in meanwhile: these groups are not its
                     new = self.store.add_groups(ids)
+                    # the group catalog names its groups: kept at once (no lookup needed for those)
+                    names = r.get("names") if isinstance(r.get("names"), dict) else {}
+                    for gid, name in names.items():
+                        if is_group(str(gid)) and isinstance(name, str) and name.strip():
+                            self.store.set_chat_name(str(gid), name.strip()[:200])
                     if r.get("complete"):
                         self.store.put("groups_at", str(time.time()))
-                    log.info("WeChat groups: %d in the contacts of %s (%s), %d new here", len(ids),
+                    log.info("WeChat groups: %d in all (%s in the group catalog%s; contacts %s, %s), %d new here",
+                             len(ids), r.get("catalog", "?"), "" if r.get("catalog_complete") else ", not all yet",
                              r.get("contacts", "?"), "all" if r.get("complete") else "not all yet", new)
                 # unnamed groups, then named ones read long ago (a group renamed shows its new name in time)
                 pending = self.store.unnamed_groups(time.time() - NAME_TTL, 400)

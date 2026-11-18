@@ -586,6 +586,21 @@ class SignOutTest(Base):
                          "kept across a restart too (the last one WeChat gave)")
 
 
+class GroupCatalogTest(Base):
+    def test_groups_from_the_catalog_come_with_their_names(self):
+        os.environ["MATEWECHAT_FAKE_GROUPS"] = '["c1@chatroom", "c2@chatroom"]'
+        os.environ["MATEWECHAT_FAKE_GROUP_NAMES"] = '{"c1@chatroom": "没存通讯录的群", "x": "not a group"}'
+        spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", spacing)
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b._groups_work(True)
+        listed = {g.id: g.name for g in b.group_candidates(50)}
+        self.assertEqual(listed.get("c1@chatroom"), "没存通讯录的群", "named by the catalog, no lookup")
+        self.assertIn("c2@chatroom", listed)
+        self.assertNotIn("x", listed)
+
+
 class GroupGoneTest(Base):
     def setUp(self):
         super().setUp()

@@ -871,7 +871,59 @@ fn op_groups(app: &App) -> Result<Value> {
             break;
         }
     }
-    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total}))
+    // the account's group catalog (the official client's own list, syncsimplechatroomdata): the groups never saved to
+    // the contacts too, with their names. From the start ([0]) each time; the server may ask to wait between pages.
+    let mut names = serde_json::Map::new();
+    let mut catalog = 0usize;
+    let mut catalog_complete = false;
+    let mut cursor: Vec<u8> = vec![0];
+    for _ in 0..100 {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let c = cursor.clone();
+        let page = match app
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(20), client.group_inventory(&c)).await })
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                log(&format!("group catalog read failed: {e:#}"));
+                break;
+            }
+            Err(_) => {
+                log("group catalog read timed out");
+                break;
+            }
+        };
+        for record in &page.contacts {
+            if message::is_group(&record.username) {
+                catalog += 1;
+                if let Some(n) = record.nickname.as_deref().filter(|n| !n.is_empty()) {
+                    names.insert(record.username.clone(), json!(n));
+                }
+                groups.insert(record.username.clone());
+            }
+        }
+        if !page.more {
+            catalog_complete = true;
+            break;
+        }
+        match page.next_cursor {
+            Some(next) if next != cursor => cursor = next,
+            _ => break,
+        }
+        if page.wait_seconds > 10 {
+            break; // the server asks for a long pause: the next full read goes on
+        }
+        let pause = Instant::now() + Duration::from_secs(u64::from(page.wait_seconds));
+        if pause >= deadline {
+            break;
+        }
+        std::thread::sleep(pause.saturating_duration_since(Instant::now()));
+    }
+    Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total,
+              "catalog": catalog, "catalog_complete": catalog_complete, "names": names}))
 }
 
 // ---------------------------------------------------------------- media

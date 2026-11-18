@@ -104,7 +104,8 @@ def answer(req):
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
     if op == "groups":
         return ok(groups=json.loads(os.environ.get("MATEWECHAT_FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')),
-                  complete=os.environ.get("MATEWECHAT_FAKE_GROUPS_COMPLETE", "1") == "1")
+                  complete=os.environ.get("MATEWECHAT_FAKE_GROUPS_COMPLETE", "1") == "1",
+                  names=json.loads(os.environ.get("MATEWECHAT_FAKE_GROUP_NAMES", "{}")), catalog=0)
     if op == "media":  # file_id says what the CDN gives: EXPIRED fails, WXGF is WeChat's own format, else by quality
         if os.environ.get("MATEWECHAT_FAKE_NO_MEDIA"):
             return fail("unsupported", "不认识的操作 media")
