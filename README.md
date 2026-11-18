@@ -2,7 +2,7 @@
 
 OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认；只有你自己发起的 `/agent` 请求，回复不再确认，但每一条都会记进 Persona 的“以你身份发出的消息”记录。
 
-第一个扩展是**飞书**（`openmate-feishu`）。微信、钉钉以后再做。
+第一个扩展是**飞书**（`openmate-feishu`）。第二个是**微信**（`openmate-wechat`，一期只做 `/agent` 和群里自动代答，见下文）。钉钉以后再做。
 
 > **现状**：一期的平台无关核心（协议、存储、收件箱、会话页、知识库归档、扫码登录流程、写操作、`/agent`）和连接飞书的 LarkAgentX 后端（一期 1b）都已经完成，有完整的自动测试（后端用假的 LarkAgentX 测，另有不联网、不登录的真实 LarkAgentX 冒烟测试）。用真实账号扫码登录、收发消息的端到端验证还在进行。
 
@@ -83,11 +83,21 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
    - 在“收件箱分拣规则”里用自己的话写分拣规则；
    - 文档搜索需要管理端开启 lark-cli 只读集成（管理端配置里的 `lark.cli.extensions: true`）。
 
+## 微信扩展（一期）
+
+`openmate-wechat`（连接器 `matewechat`）只做两件事，和飞书的同名功能一致：
+
+- **`/agent`**：你自己在微信任意会话里（手机或任何设备）发 `/agent …`，Agent 用你的全部权限处理，以你的身份把结果回复到原会话。要先在设置里打开“启用 /agent”。微信不能编辑消息，所以只回复一次最终结果，没有中途进度和表情回应。
+- **群里自动代答**：在 Persona 的“微信”页里勾选的群，有人真正 @ 你（不是手打名字）时，AI 用访客会话以你的身份引用并 @ 对方回复一次；只 @所有人、私聊、公众号不代答；每群每小时、每天有上限。
+
+连接微信的是本仓库 `native/matewechat-native`（Rust）编译出的小程序，它用 [thisnick/agent-wechat](https://github.com/thisnick/agent-wechat)（MIT）的协议库 `wechat-protocol`（crates.io 2.7.0，只用公开接口）。扩展首次启动时从本仓库的 GitHub release 下载它，并按扩展里钉死的 SHA-256 校验；第三方许可全文见 `native/THIRD-PARTY-NOTICES.md`。只支持 Apple 芯片的 Mac，请在手机旁边的 Mac 上用，不要放在服务器上。
+
 ## 风险，请先读
 
 - **LarkAgentX 不是官方接口。** 它用的是逆向出来的飞书网页协议，随时可能失效，也可能触发账号风控（例如被要求重新登录或被限制使用）。如果用的是公司账号，请先自己判断是否合适。
 - **与飞书 / Lark 官方无关。** OpenMate 是独立的开源项目，不是飞书或 Lark 的产品，也没有得到它们的认可；图标是本项目自己画的。
 - **不分发 LarkAgentX。** 本仓库和发布包里都不包含 LarkAgentX，需要你自己安装并遵守它的条款。
+- **微信扩展用的也是非官方协议。** 它以一台新电脑的身份登录你的微信：你已登录的电脑版微信可能会下线；账号被限制的可能无法排除，请自己判断。与腾讯官方无关，“微信”是腾讯的商标。
 - 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。`/agent` 只响应你自己发的消息，它的回复不再确认，但每一条都记进 Persona 的“以你身份发出的消息”记录。
 
 ## 开发
@@ -95,6 +105,8 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 ```text
 core/openmate_core/            各平台共用：JSON 行协议、SQLite 存储、收件箱 / 会话页 / 归档、写操作日志、/agent、hub API 客户端、测试用 FixtureBackend
 extensions/openmate-feishu/    飞书扩展：清单、启动脚本（按 larkx_python 重新启动）、LarkAgentX 后端、LarkAgentX 版本检查、助手说明、图标
+extensions/openmate-wechat/    微信扩展：清单、启动脚本、matewechat-native 后端（JSON 行）、下载与 SHA-256 校验、助手说明、图标
+native/matewechat-native/      连接微信的 Rust 程序：扫码登录、在线收消息、发文字（真实 @ 和引用）、查名字
 scripts/package.py             打包、算 sha256、生成 persona-extensions.json（--check 检查是否最新）
 scripts/test.sh                跑全部测试
 tests/                         用假的平台后端和假的 hub 驱动完整的 JSON 行协议
@@ -113,7 +125,10 @@ into Persona: direct and group messages flow into the Inbox and knowledge base, 
 answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first; only the
 replies to your own `/agent` requests go out unconfirmed, and each of them is recorded in Persona's sent-as-user ledger
 (the connector declares `sends_as_user`). The first extension is Feishu / Lark (`openmate-feishu`, connector
-`matefeishu`); WeChat and DingTalk come later. The repository is itself a Persona extension market: add
+`matefeishu`); the second is WeChat (`openmate-wechat`, connector `matewechat`: phase one is `/agent` and answering
+real @-mentions in the groups you mark, over this repository's `native/matewechat-native`, built on thisnick/agent-wechat's
+MIT `wechat-protocol` library, downloaded from this repository's release and pinned by SHA-256; unofficial protocol,
+Apple-silicon Macs only); DingTalk comes later. The repository is itself a Persona extension market: add
 `github:NginxL/openmate` in Persona. The Feishu link goes through LarkAgentX, an unofficial reverse-engineered web
 protocol that you install yourself, at commit 97ad48e69e34bd8c78ee30f795b7c3759dd81659 (checked at start; install it
 with `pip install -e <checkout>`, plus python-socks when the system proxy is SOCKS), in a Python you name in the

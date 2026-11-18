@@ -125,6 +125,8 @@ class ConnectorApp:
             "login.step": self.m_login_step,
             "logout": self.m_logout,
         }
+        for m in getattr(platform, "methods_off", ()) or ():
+            self._methods.pop(m, None)
         self.ui: Optional[UI] = None
 
     # ------------------------------------------------------------------ the protocol

@@ -213,6 +213,34 @@ class ListenTest(Base):
         self.assertGreaterEqual(len(self.requests("restore")), 2)
 
 
+class ProtocolTest(Base):
+    def test_a_program_of_another_protocol_is_not_used(self):
+        os.environ["FAKE_PROTOCOL"] = "1"
+        b = self.backend()
+        with self.assertRaises(BackendError) as c:
+            b.restore({"state": {"k": "v1"}})
+        self.assertIn("版本不对", c.exception.message)
+
+    def test_a_live_message_is_quotable_while_the_core_handles_it(self):
+        b = self.backend([msg("r1", "1@chatroom", "wxid_bob", "@我 快答", at_me=True)])
+        b.restore({"state": {"k": "v1"}})
+        seen_inside = []
+
+        def core(m):  # what /agent or 自动代答 would do at once: answer it
+            seen_inside.append((b.store.message(m.id) is not None, [x.id for x in b.history(m.chat_id)]))
+
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: b.listen(core, lambda s, r: None, stop), daemon=True)
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not seen_inside:
+            time.sleep(0.02)
+        stop.set()
+        t.join(5)
+        self.assertEqual(seen_inside, [(True, [])], "kept for the quote, not yet in history")
+        self.assertEqual([x.id for x in b.history("1@chatroom")], ["r1"])
+
+
 class SendTest(Base):
     def setUp(self):
         super().setUp()
@@ -261,7 +289,7 @@ class NamesTest(Base):
         self.assertEqual(b.user_name("wxid_bob", "1@chatroom"), "群里的鲍勃")
         self.assertEqual(b.user_name("wxid_bob"), "备注b")
         self.assertEqual(b.chat_info("wxid_bob").name, "备注b")
-        self.assertEqual(b.chat_info("1@chatroom").members, 2)
+        self.assertEqual(b.chat_info("1@chatroom").members, 3, "the full member count, not the roster page")
         self.assertEqual(b.people_kinds(["wxid_bob", "gh_abc", "abc@im.bot", "filehelper", "x@openim", "1@chatroom",
                                          "masssendapp", "y@kefu.openim"]),
                          {"wxid_bob": "user", "gh_abc": "bot", "abc@im.bot": "bot", "filehelper": "bot",

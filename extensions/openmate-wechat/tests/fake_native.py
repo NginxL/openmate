@@ -65,7 +65,7 @@ def answer(req):
             return fail("expired", "expired")
         return ok(account={"id": req.get("state", {}).get("who", "wxid_me"), "name": "我"})
     if op == "listen":
-        gen[0] += 1
+        gen[0] = req.get("gen") or gen[0] + 1
         ok(gen=gen[0])
         threading.Thread(target=play, args=(gen[0],), daemon=True).start()
         return None
@@ -86,9 +86,11 @@ def answer(req):
     if op == "room":
         if not isinstance(req.get("room_id"), str):
             return fail("input", "缺少 room_id")
-        return ok(room_id=req.get("room_id"), members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
+        return ok(room_id=req.get("room_id"), member_count=3, members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
-    if op in ("stop", "logout", "hello"):
+    if op == "hello":
+        return ok(protocol=int(os.environ.get("FAKE_PROTOCOL", "2")), version="fake")
+    if op in ("stop", "logout"):
         return ok()
     return fail("unsupported", op)
 

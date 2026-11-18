@@ -68,5 +68,5 @@ OpenMate 是一组 Persona 扩展，把聊天软件接进 [Persona](https://gith
 
 ## 之后
 
-- **微信：** 暂缓。
+- **微信：** 一期（`/agent` 和勾选群里的自动代答）已在 `openmate-wechat` 里做了；收件箱、知识库、图片和文件以后再说。
 - **钉钉：** 官方 Stream 模式机器人。

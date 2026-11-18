@@ -59,13 +59,18 @@ PROGRESS_MARK = "⏳ 进行中（这条会原地更新）"
 MARK_POSITIONS = ("end", "top")  # where the AI mark line goes: after the answer (so a folded thread shows the answer) or on top
 
 
+_WECHAT_MENTIONS = re.compile("^(?:\\s*@[^\u2005\\n]{1,64}\u2005)+")
+
+
 def mark_lines(text: str) -> tuple:
     """The first and the last non-empty line of a message, without a leading quote mark: where an AI mark sits."""
     lines = [l.lstrip("> ").strip() for l in (text or "").split("\n") if l.strip()]
     if not lines:
         return ("", "")
-    # a reply that @s its asker starts with the @ (WeChat puts it before the text): the mark comes right after it
-    first = strip_leading_mentions(lines[0]).lstrip("> ").strip() or lines[0]
+    # a reply that @s its asker starts with the @ (WeChat puts "@name\u2005" before the text, and a name may hold
+    # spaces): the mark comes right after it
+    head = _WECHAT_MENTIONS.sub("", lines[0], count=1)
+    first = strip_leading_mentions(head).lstrip("> ").strip() or lines[0]
     return (first, lines[-1])
 
 
@@ -234,6 +239,10 @@ class AgentRunner:
             return lk
 
     def start(self) -> None:
+        try:
+            self.store.quota_backfill()
+        except Exception:
+            log.exception("the guest quota ledger could not be filled from the kept runs")
         self._prune(force=True)
         for run in self.store.runs_in_state(["starting"]):
             # Cut off by a restart before the conversation was surely started: starting it again could start two.
@@ -1151,7 +1160,9 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur["state"] in ("stopped", "failed"):
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
-            if not self._can_edit() and int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0:
+            answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
+                or cur.get("fallback") in ("claimed", "sent") or cur["state"] == "timeout"
+            if not self._can_edit() and answered:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got
                     ref = (done.get("result") or {}).get("message_ref") or "未知"

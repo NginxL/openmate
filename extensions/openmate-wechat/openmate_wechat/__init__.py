@@ -53,6 +53,9 @@ def platform(manifest_path: str = "") -> Platform:
         chats_page=CHATS_PAGE,
         chats_card=CHATS_CARD,
         can_edit=False,
+        # phase one is /agent and 自动代答 only: no generic sends, inbox, conversation pages or archive
+        methods_off=("actions.list", "actions.describe", "actions.do", "inbox.collect", "inbox.reply",
+                     "thread.page", "thread.media", "archive.changes", "archive.media"),
     )
 
 

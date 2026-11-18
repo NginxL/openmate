@@ -509,6 +509,24 @@ class Store:
 
     # ---- another account ----
 
+    def quota_backfill(self) -> None:
+        """Once: the guest runs still kept count in the new ledger (so an upgrade never resets a group's quota)."""
+        def run(db):
+            if db.execute("SELECT 1 FROM meta WHERE key = 'guest_quota_backfilled'").fetchone():
+                return
+            since = time.time() - 3 * 86400
+            for r in db.execute("SELECT chat_id, created, data FROM runs WHERE created >= ?", (since,)).fetchall():
+                try:
+                    kind = json.loads(r["data"] or "{}").get("kind")
+                except ValueError:
+                    kind = None
+                if kind in ("auto", "doc"):
+                    db.execute("INSERT INTO guest_quota (chat_id, kind, at) VALUES (?, ?, ?)",
+                               (r["chat_id"], kind, r["created"]))
+            db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('guest_quota_backfilled', '1')")
+
+        self._tx(run)
+
     def quota_add(self, chat_id: str, kind: str, at: float) -> None:
         def run(db):
             db.execute("INSERT INTO guest_quota (chat_id, kind, at) VALUES (?, ?, ?)", (chat_id, kind, at))

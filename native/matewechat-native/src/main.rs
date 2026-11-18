@@ -30,7 +30,7 @@ use wechat_protocol::{
     TextSendOptions,
 };
 
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2; // the backend checks it in hello: a program of another protocol is never used
 const DEVICE_TYPE: &str = "UnifiedPCLinux x86_64";
 const COMPUTER_NAME: &str = "OpenMate";
 const PERSIST_WAIT: Duration = Duration::from_secs(30);
@@ -63,7 +63,7 @@ struct Persist {
     out: Arc<Out>,
     seq: AtomicU64,
     waiting: Mutex<HashMap<u64, mpsc::Sender<bool>>>,
-    latest: Mutex<Option<Value>>, // the last sealed state (login_finish answers with it)
+    latest: Mutex<Option<(String, Value)>>, // (account, the last state it sealed): login_finish answers with it
 }
 
 impl Persist {
@@ -89,7 +89,7 @@ impl AccountPersistence for Persist {
             bail!("the renewed sign-in was not stored")
         }
         if let Ok(mut l) = self.latest.lock() {
-            *l = Some(state);
+            *l = Some((accepted.own_username.clone(), state));
         }
         Ok(())
     }
@@ -129,6 +129,14 @@ impl App {
             let now = Instant::now();
             q.retain(|(at, _, _)| now.duration_since(*at) < INTENT_KEEP);
             q.push_back((now, chat.to_owned(), text.to_owned()));
+        }
+    }
+    /// A send that surely did not go out leaves no echo to wait for (its latest intent in the chat).
+    fn forget_intent(&self, chat: &str) {
+        if let Ok(mut q) = self.intents.lock() {
+            if let Some(i) = q.iter().rposition(|(_, c, _)| c == chat) {
+                q.remove(i);
+            }
         }
     }
     /// Is this outgoing message the echo of a send made here? (Each intent matches once.)
@@ -253,7 +261,7 @@ fn op_login_start(app: &App, p: &Value) -> Result<Value> {
                             }
                             set("confirmed", "");
                         }
-                        Err(e) => set("failed", &format!("{e:#}")),
+                        Err(e) => set("failed", &format!("登录没有完成：{e:#}")),
                     }
                     return;
                 }
@@ -305,13 +313,21 @@ fn op_login_finish(app: &App) -> Result<Value> {
     let login = app.login.lock().map_err(|_| anyhow!("lock"))?.take().ok_or_else(|| err("input", "没有进行中的扫码登录"))?;
     let state = login.state.lock().map_err(|_| anyhow!("lock"))?.take().ok_or_else(|| err("input", "还没有在手机上确认"))?;
     let first = serde_json::to_value(&state)?;
-    if let Ok(mut l) = app.persist.latest.lock() {
-        *l = None;
-    }
     let own = app.adopt(state)?;
+    if let Ok(mut l) = app.persist.latest.lock() {
+        *l = None; // after the old account stopped: whatever it sealed late is not this sign-in's
+    }
     let name = account_name(app, &app.client()?, &own);
     // a renewal during the name lookup was sealed already: answer with that, never the older first state
-    let latest = app.persist.latest.lock().ok().and_then(|l| l.clone()).unwrap_or(first);
+    let latest = app
+        .persist
+        .latest
+        .lock()
+        .ok()
+        .and_then(|l| l.clone())
+        .filter(|(who, _)| *who == own)
+        .map(|(_, v)| v)
+        .unwrap_or(first);
     Ok(json!({"state": latest, "account": {"id": own, "name": name}}))
 }
 
@@ -324,6 +340,9 @@ fn op_restore(app: &App, p: &Value) -> Result<Value> {
 }
 
 fn op_logout(app: &App) -> Result<Value> {
+    if let Some(l) = app.login.lock().ok().and_then(|mut l| l.take()) {
+        l.cancel.store(true, Ordering::SeqCst);
+    }
     app.stop_listening(None);
     let client = app.client.lock().map_err(|_| anyhow!("lock"))?.take();
     if let Some(c) = client {
@@ -342,7 +361,10 @@ fn op_listen(app: Arc<App>, p: &Value) -> Result<Value> {
         _ => vec![],
     };
     app.stop_listening(None);
-    let gen = app.gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let gen = match p.get("gen").and_then(Value::as_u64) {
+        Some(g) if g > 0 => g, // the backend numbers its listens (each has its own queue there)
+        _ => app.gen.fetch_add(1, Ordering::SeqCst) + 1,
+    };
     let stop = Arc::new(AtomicBool::new(false));
     *app.listening.lock().map_err(|_| anyhow!("lock"))? = Some((gen, stop.clone()));
     std::thread::Builder::new().name("listen".into()).spawn(move || listen_loop(app, client, cursor, stop, gen))?;
@@ -355,6 +377,10 @@ fn listen_loop(app: Arc<App>, client: NativeClient, mut cursor: Vec<u8>, stop: A
     while !stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         let result = session(&app, &client, &mut cursor, &stop, gen);
+        if started.elapsed() > Duration::from_secs(60) {
+            renewed = false; // a link that stayed up: the next rejection may be renewed again
+            backoff = Duration::from_secs(1);
+        }
         app.out.line(&json!({"event": "link", "gen": gen, "up": false}));
         let e = match result {
             Ok(()) => return,
@@ -377,22 +403,30 @@ fn listen_loop(app: Arc<App>, client: NativeClient, mut cursor: Vec<u8>, stop: A
                         log("session renewed");
                         continue;
                     }
-                    Err(r) => log(&format!("renewal failed: {r:#}")),
+                    Err(r) if is_session_rejected(&r) => log(&format!("renewal rejected: {r:#}")),
+                    Err(r) => {
+                        // the network, or the renewed sign-in could not be sealed: try again later, not a new QR
+                        log(&format!("renewal failed for now: {r:#}"));
+                        renewed = false;
+                        sleep_unless(&stop, backoff);
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                        continue;
+                    }
                 }
             }
             app.out.line(&json!({"event": "auth_lost", "gen": gen, "message": "微信登录已失效，需要重新扫码"}));
             return;
         }
         log(&format!("link down: {e:#}"));
-        if started.elapsed() > Duration::from_secs(60) {
-            backoff = Duration::from_secs(1);
-            renewed = false;
-        }
-        let until = Instant::now() + backoff;
-        while Instant::now() < until && !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        sleep_unless(&stop, backoff);
         backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
+fn sleep_unless(stop: &AtomicBool, d: Duration) {
+    let until = Instant::now() + d;
+    while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -436,8 +470,13 @@ fn drain(
     stop: &AtomicBool,
 ) -> Result<()> {
     let own = app.own();
+    let mut origin = origin;
     for _ in 0..8 {
+        let had_cursor = !cursor.is_empty();
         let batch = conn.sync(cursor, scene)?;
+        if had_cursor && batch.cursor.is_empty() {
+            origin = "catchup"; // the server reset the cursor: what it sends again is history, never a request
+        }
         if stop.load(Ordering::SeqCst) {
             return Ok(()); // a stopped listener says nothing more
         }
@@ -562,7 +601,8 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
         let created_at = wire::unix_time()?;
         if let Some(q) = &quote {
             let reference = quote_reference(q, &chat, &own)?;
-            let xml = wechat_protocol::quote_send::quote_xml(&own, &rendered, &reference)?;
+            let xml = wechat_protocol::quote_send::quote_xml(&own, &rendered, &reference)
+                .map_err(|e| err("input", &format!("引用消息组不出来：{e}")))?;
             app.intend(&chat, &rendered);
             let r = app.rt.block_on(client.send_quote(&chat, &client_id.to_string(), created_at, &xml, source.as_deref()))?;
             return match r.status {
@@ -581,6 +621,10 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
             &rendered,
             TextSendOptions { created_at, client_message_id: client_id, source },
         ))?;
+        if !r.accepted && r.outer_code != 0 {
+            // the whole request was refused (no item came back to match): nothing went out
+            return Err(err("rejected", &format!("微信拒绝了这条消息（{}）", r.outer_code)));
+        }
         let matches = r.returned_destination_matches && r.returned_client_id_matches;
         if !matches {
             return Ok(("uncertain".into(), None)); // a receipt that is not this send's says nothing about it
@@ -595,6 +639,9 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
         Ok((status, id)) => Ok(json!({"status": status, "message_id": id.unwrap_or_default(), "quoted": quote.is_some()})),
         Err(e) => {
             let (status, why) = send_outcome(&e);
+            if status != "uncertain" {
+                app.forget_intent(&chat); // nothing will echo
+            }
             log(&format!("send {status}: {why}"));
             Ok(json!({"status": status, "message": why}))
         }
@@ -644,7 +691,8 @@ fn op_room(app: &App, p: &Value) -> Result<Value> {
         .iter()
         .map(|m| json!({"id": m.username, "nickname": m.nickname, "display": m.room_display_name}))
         .collect();
-    Ok(json!({"room_id": roster.room_id, "members": members, "owner": roster.owner}))
+    let count = roster.full_member_ids.as_ref().map(|ids| ids.len()).unwrap_or(0);
+    Ok(json!({"room_id": roster.room_id, "members": members, "member_count": count, "owner": roster.owner}))
 }
 
 // ---------------------------------------------------------------- main

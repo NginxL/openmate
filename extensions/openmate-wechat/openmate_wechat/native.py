@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, Optional
 
 log = logging.getLogger("openmate.wechat.native")
 
+PROTOCOL = 2  # matewechat-native's: hello must say it, or the program is not used
 PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 
 
@@ -63,6 +64,7 @@ class Native:
         self._persist_q: "queue.Queue[Optional[dict]]" = queue.Queue()
         self._stderr_tail: "collections.deque[str]" = collections.deque(maxlen=20)
         self._gone = True
+        self._subs: Dict[int, "queue.Queue[Optional[dict]]"] = {}  # a listen's own events, by its generation
 
     # ---------------------------------------------------------------- life
 
@@ -86,6 +88,15 @@ class Native:
         threading.Thread(target=self._read_err, args=(proc,), name="matewechat-stderr", daemon=True).start()
         threading.Thread(target=self._persist_worker, args=(self._persist_q, proc), name="matewechat-persist",
                          daemon=True).start()
+        try:
+            hello = self.call("hello", timeout=10)
+        except NativeError as e:
+            self.close()
+            raise NativeGone("微信组件没有回应：%s" % e.message)
+        if hello.get("protocol") != PROTOCOL:
+            self.close()
+            raise NativeError("config", "微信组件的版本不对（协议 %s，需要 %d），请更新扩展或检查 native_path"
+                              % (hello.get("protocol"), PROTOCOL))
 
     def close(self) -> None:
         with self._mu:
@@ -101,6 +112,19 @@ class Native:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+    def subscribe(self, gen: int) -> "queue.Queue[Optional[dict]]":
+        """The queue of one listen's events (made before the listen starts, so none is missed)."""
+        q: "queue.Queue[Optional[dict]]" = queue.Queue()
+        with self._mu:
+            self._subs[gen] = q
+            if self._gone:
+                q.put(None)
+        return q
+
+    def unsubscribe(self, gen: int) -> None:
+        with self._mu:
+            self._subs.pop(gen, None)
 
     # ---------------------------------------------------------------- requests
 
@@ -165,7 +189,12 @@ class Native:
                 if msg.get("event") == "persist":
                     self._persist_q.put(msg)
                     continue
-                self.events.put(msg)
+                with self._mu:
+                    q = self._subs.get(msg.get("gen")) if isinstance(msg.get("gen"), int) else None
+                if q is not None:
+                    q.put(msg)  # only the listen it belongs to sees it
+                else:
+                    self.events.put(msg)
         except (OSError, ValueError):
             pass
         finally:
@@ -177,6 +206,7 @@ class Native:
                 return
             self._gone = True
             pending = list(self._pending.values())
+            subs = list(self._subs.values())
         for box in pending:
             try:
                 box.put_nowait({"gone": True})
@@ -184,6 +214,8 @@ class Native:
                 pass
         self._persist_q.put(None)
         self.events.put(None)
+        for q in subs:
+            q.put(None)
         try:
             code = proc.wait(timeout=2)
         except subprocess.TimeoutExpired:

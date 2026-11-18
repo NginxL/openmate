@@ -29,6 +29,7 @@ pub struct Mentions {
 }
 
 /// What a later quote of this message needs (agent-wechat's QuoteReference fields, see quote_reference in main.rs).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Quotable {
     pub message_type: i32,

@@ -99,6 +99,9 @@ class Store:
             pass
         for s in SCHEMA:
             self._db.execute(s)
+        cols = [r[1] for r in self._db.execute("PRAGMA table_info(messages)").fetchall()]
+        if "delivered" not in cols:  # a database from before the column: everything in it was handled
+            self._db.execute("ALTER TABLE messages ADD COLUMN delivered INTEGER NOT NULL DEFAULT 1")
 
     def close(self) -> None:
         with self._mu:
@@ -156,7 +159,7 @@ class Store:
         return (json.loads(row[0]), row[1]) if row else None
 
     def messages(self, chat: str, before: Optional[int], limit: int) -> List[Tuple[dict, int]]:
-        q = "SELECT body, position FROM messages WHERE chat=?"
+        q = "SELECT body, position FROM messages WHERE chat=? AND delivered=1"  # a live one only once the core has it
         args: List[Any] = [chat]
         if before is not None:
             q += " AND position < ?"
@@ -179,7 +182,7 @@ class Store:
         with self._mu:
             self._db.execute("INSERT INTO chats (id, last_at, name, named_at, members) VALUES (?, 0, ?, ?, ?) "
                              "ON CONFLICT(id) DO UPDATE SET name=excluded.name, named_at=excluded.named_at, "
-                             "members=MAX(members, excluded.members)", (chat_id, name, time.time(), members))
+                             "members=excluded.members", (chat_id, name, time.time(), members))
 
     def name(self, key: str) -> Optional[Tuple[str, str, float]]:
         with self._mu:
@@ -211,6 +214,8 @@ class WeChatBackend(Backend):
         self._device: Optional[dict] = None  # the device of the sign-in in progress (memory only)
         self.me = ""
         self.me_name = ""
+        self._gen = 0
+        self._member_count = 0
 
     # ---------------------------------------------------------------- the program
 
@@ -226,7 +231,14 @@ class WeChatBackend(Backend):
             if n is not None and n.alive():
                 return n
             n = Native(self._path(wait), self._persist)
-            n.start()
+            try:
+                n.start()
+            except NativeGone as e:
+                raise BackendError(e.message, "unreachable")
+            except NativeError as e:
+                raise BackendError(e.message, "config")
+            except OSError as e:
+                raise BackendError("微信组件启动不了：%s" % e, "config")
             if restore and self._state is not None:  # a restarted program knows nothing: give it the sign-in again
                 try:
                     self._call(n, "restore", 20, state=self._state)
@@ -281,7 +293,10 @@ class WeChatBackend(Backend):
         except NativeGone as e:
             raise BackendError(e.message, "unreachable")
         except NativeError as e:
-            raise BackendError(e.message, "login" if e.kind == "login" else "unknown")
+            if e.kind == "login":  # this QR attempt ended (refused, failed): a new one
+                log.warning("WeChat sign-in attempt ended: %s", e.message)
+                return "expired"
+            raise BackendError(e.message, "unknown")
         s = str(r.get("status") or "pending")
         return {"pending": "waiting", "cancelled": "expired", "rejected": "expired"}.get(s, s)
 
@@ -327,8 +342,15 @@ class WeChatBackend(Backend):
 
     def listen(self, on_message: OnMessage, on_link: OnLink, stop: threading.Event) -> None:
         n = self._link()
-        gen = self._call(n, "listen", 10, cursor=self.store.get("cursor")).get("gen")
-        events = n.events
+        with self._mu:
+            self._gen += 1
+            gen = self._gen
+        events = n.subscribe(gen)  # this listen's own queue: an older listen never takes its events
+        try:
+            self._call(n, "listen", 10, cursor=self.store.get("cursor"), gen=gen)
+        except BackendError:
+            n.unsubscribe(gen)
+            raise
         held = False  # a live message the core did not take: the cursor stays where it was, so it comes again
         try:
             while not stop.is_set():
@@ -352,6 +374,7 @@ class WeChatBackend(Backend):
                 elif kind == "auth_lost":
                     raise CredentialsExpired(EXPIRED)
         finally:
+            n.unsubscribe(gen)
             if n.alive():
                 try:
                     n.call("stop", timeout=5, gen=gen)
@@ -371,18 +394,15 @@ class WeChatBackend(Backend):
             self.store.add_message(ev)  # caught up after a reconnect, or our own send's echo: history only
             return True
         # live now, or live once and the core did not take it then (the core's freshness rule still applies)
-        pos = seen[0] if seen else self.store.position_for(chat, int(ev.get("at") or 0))
+        # kept first (not yet handed over: history() leaves it out), so a reply right away finds what it quotes
+        pos = seen[0] if seen else self.store.add_message(ev, delivered=False)[1]
         try:
             on_message(self._message(ev, pos))
-            ok = True
         except Exception:
             log.exception("a WeChat message could not be handled; it will come again")
-            ok = False
-        if seen is None:
-            self.store.add_message(ev, pos=pos, delivered=ok)
-        elif ok:
-            self.store.mark_delivered(mid)
-        return ok
+            return False
+        self.store.mark_delivered(mid)
+        return True
 
     def _message(self, ev: dict, pos: int) -> Message:
         chat = str(ev.get("chat") or "")
@@ -434,7 +454,9 @@ class WeChatBackend(Backend):
         name = names.get(chat_id, ("", ""))[0]
         members = 0
         if is_group(chat_id):
-            members = len(self._roster(chat_id))
+            self._member_count = 0
+            self._roster(chat_id)
+            members = self._member_count
         if name or members:
             self.store.name_chat(chat_id, name, members)
 
@@ -459,6 +481,7 @@ class WeChatBackend(Backend):
         except BackendError:
             return []
         members = r.get("members") or []
+        self._member_count = int(r.get("member_count") or 0) or len(members)
         for m in members:
             uid = str(m.get("id") or "")
             if not uid:
