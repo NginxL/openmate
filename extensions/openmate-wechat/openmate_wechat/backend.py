@@ -503,7 +503,8 @@ class WeChatBackend(Backend):
                     self._refresh_groups(full=True)
                 elif kind == "removed":  # a contact or group gone from the account (a group quit on the phone)
                     rid = str(ev.get("id") or "")
-                    if is_group(rid) and ev.get("origin") == "live":
+                    if is_group(rid) and (ev.get("origin") == "live" or not rid.endswith("@chatroom")):
+                        # live, or a WeCom group whose member list WeChat does not give: taken as it comes
                         self._group_gone(rid, "removed in WeChat")
                     elif is_group(rid):
                         # caught up after a gap: it may have been joined again since; its member list says now

@@ -488,6 +488,16 @@ class GroupGoneTest(Base):
         self.assertEqual(gone, [], "joined again meanwhile: its member list has the account")
         self.assertIn("6@chatroom", [r["room_id"] for r in self.requests("room")])
 
+    def test_a_wecom_group_removal_caught_up_is_taken_as_it_comes(self):
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend([msg("w1", "9@im.chatroom", "wxid_bob", "早"), {"event": "removed", "id": "9@im.chatroom",
+                                                                        "origin": "catchup"}])
+        gone = []
+        b.on_chat_gone = gone.append
+        b.restore({"state": {"k": "v1"}})
+        self.listen(b, lambda g, l, e: gone)
+        self.assertEqual(gone, ["9@im.chatroom"], "no member list to wait for")
+
     def test_every_group_gets_its_member_list_read_in_turn(self):
         os.environ["FAKE_GROUPS"] = "[]"
         b = self.backend()
