@@ -60,6 +60,7 @@ class Timing:
     inbox_most: int = 200
     catchup_chats: int = 20  # chats read again after each reconnect
     catchup_messages: int = 30
+    done_check: float = 300.0  # the chats that need the user are checked this often for the service's done mark
     initial_messages: int = 50
     rerender_window: float = 14 * 86400.0  # a newer reading renews the chats with such messages this recent…
     rerender_chats: int = 30  # …at most this many of them…

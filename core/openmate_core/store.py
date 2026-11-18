@@ -237,6 +237,33 @@ class Store:
     def undismiss(self, key: str) -> None:
         self._tx(lambda db: db.execute("DELETE FROM dismissed WHERE key = ?", (key,)))
 
+    def dismiss_if(self, key: str, version: str, expected: Optional[str], now: Optional[float] = None) -> bool:
+        """dismiss, only while the key's mark is still expected (None: no mark): a background writer read it before a
+        slow step, and the user may have changed it meanwhile. Whether it wrote."""
+        now = now or time.time()
+        out = [False]
+
+        def run(db):
+            row = db.execute("SELECT version FROM dismissed WHERE key = ?", (key,)).fetchone()
+            if (row[0] if row is not None else None) != expected:
+                return
+            db.execute("INSERT INTO dismissed (key, version, at) VALUES (?, ?, ?) "
+                       "ON CONFLICT(key) DO UPDATE SET version = excluded.version, at = excluded.at", (key, version, now))
+            out[0] = True
+
+        self._tx(run)
+        return out[0]
+
+    def undismiss_if(self, key: str, expected: str) -> bool:
+        """undismiss, only while the key's mark is still expected. Whether it deleted."""
+        out = [False]
+
+        def run(db):
+            out[0] = db.execute("DELETE FROM dismissed WHERE key = ? AND version = ?", (key, expected)).rowcount > 0
+
+        self._tx(run)
+        return out[0]
+
     def count_since(self, since: float) -> dict:
         """Other people's messages since then (not system lines), and in how many chats."""
         r = self._one("SELECT COUNT(*) AS n, COUNT(DISTINCT chat_id) AS c FROM messages "
@@ -547,6 +574,7 @@ class Store:
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
             for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota"):
                 db.execute("DELETE FROM " + table)
+            db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             db.execute("DELETE FROM meta WHERE key IN ('initial_history_done')")
 
         self._tx(run)

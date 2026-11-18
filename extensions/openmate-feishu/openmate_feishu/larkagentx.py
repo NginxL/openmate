@@ -74,6 +74,11 @@ CHAT_P2P = 1
 AT_TAG = 5
 PUSH_CMD = 6
 PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
+PUSH_FEED_CARDS_CMD = 1002  # feed.PushFeedCardsRequest: feed cards changed, among them chats moved to 完成 (done)
+FEED_DONE = (2, "DONE")  # entities.FeedType of a card in 完成, as a number (protobuf_to_dict) or a name (MessageToDict)
+FEED_CHAT = (1, "CHAT")  # entities.FeedCard.Type of a chat's card
+FEED_GONE = (2, 3, "PENDING_DELETE", "DELETED")  # entities.FeedCard.Status of a card on its way out
+DONE_ASK_MOST = 50  # chats asked about in one feed.PullFeedCardsByIdsRequest
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
 
 FIRST_POSITION = 1  # LarkAgentX reads history from position 1 up
@@ -209,6 +214,35 @@ def _int(v, default: int = 0) -> int:
         return default
 
 
+def pushed_done(payload: bytes) -> Dict[str, float]:
+    """The chats a feed.PushFeedCardsRequest moved to 完成 (done_cards)."""
+    from google.protobuf.json_format import MessageToDict
+    from larkx.proto import lark_all_pb2
+
+    req = lark_all_pb2.feed.PushFeedCardsRequest()
+    req.ParseFromString(payload)
+    d = MessageToDict(req)
+    return done_cards(d.get("cards"), d.get("type"))
+
+
+def done_cards(cards, box=None, only: Optional[Set[str]] = None) -> Dict[str, float]:
+    """{chat id: when it last changed (seconds, 0 when unknown)} of the chats' feed cards in 完成: by each card's
+    feedType, else the push's own (box). Other cards (a thread's, a document's), cards on their way out and, with
+    only, chats not asked about are left out."""
+    out: Dict[str, float] = {}
+    for c in cards or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "")
+        if not cid or (only is not None and cid not in only) or c.get("type") not in FEED_CHAT:
+            continue
+        if c.get("feedType", box) not in FEED_DONE or c.get("status") in FEED_GONE:
+            continue
+        ms = _int(c.get("updateTimeMs"))
+        out[cid] = ms / 1000.0 if ms > 0 else _seconds(c.get("updateTime"))
+    return out
+
+
 def _seconds(v) -> float:
     t = float(_int(v))
     return t / 1000.0 if t > 1e12 else t  # LarkAgentX gives seconds; a millisecond time is taken as well
@@ -339,6 +373,7 @@ class LarkXBackend(Backend):
 
     render_version = RENDER_VERSION
     rerender_types = RERENDER_TYPES
+    done_marks = True  # a chat's 完成
 
     # timings (tests shorten them)
     poll_timeout = 0.2  # one QrLogin.wait round: a single poll (interval ≥ timeout), then back to the caller
@@ -365,6 +400,7 @@ class LarkXBackend(Backend):
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
+        self._done_heard = False
 
     # ------------------------------------------------------------ the session
 
@@ -687,6 +723,9 @@ class LarkXBackend(Backend):
         if cmd == PUSH_DOC_FEED_CMD and packet.get("payload"):
             inbox.put({"doc_feed": packet["payload"]})  # read off the loop
             return
+        if cmd == PUSH_FEED_CARDS_CMD and packet.get("payload"):
+            inbox.put({"feed_cards": packet["payload"]})
+            return
         if cmd != PUSH_CMD:
             return
         try:
@@ -708,6 +747,9 @@ class LarkXBackend(Backend):
             if "doc_feed" in item:
                 self._doc_feed(item["doc_feed"], me, client)
                 continue
+            if "feed_cards" in item:
+                self._feed_cards(item["feed_cards"])
+                continue
             try:
                 msg = self._message(item, me.id, client)
             except Exception as e:
@@ -719,6 +761,50 @@ class LarkXBackend(Backend):
                 on_message(msg)
             except Exception as e:
                 log.warning("a pushed message was not taken (%s)", type(e).__name__)
+
+    # ------------------------------------------------------------ 完成 (a chat's done mark)
+
+    def _feed_cards(self, payload: bytes) -> None:
+        """Feed cards that changed: the chats the user moved to 完成 go to the core (on_chats_done)."""
+        try:
+            done = pushed_done(payload)
+        except Exception as e:
+            log.info("a feed card change could not be decoded (%s)", type(e).__name__)
+            return
+        if not done:
+            return
+        if not self._done_heard:
+            self._done_heard = True
+            log.info("chats marked 完成 are heard on the live link")
+        cb = self.on_chats_done
+        if cb is not None:
+            try:
+                cb(done)
+            except Exception as e:
+                log.warning("a 完成 mark was not taken (%s)", type(e).__name__)
+
+    def chat_done_states(self, chat_ids: List[str]) -> Dict[str, Optional[float]]:
+        client, _ = self._signed_in()
+        ids = list(dict.fromkeys(str(c) for c in chat_ids if c))
+        out: Dict[str, Optional[float]] = {}
+        failed: Optional[BackendError] = None
+        for i in range(0, len(ids), DONE_ASK_MOST):
+            part = ids[i:i + DONE_ASK_MOST]
+            try:
+                resp = client.api("feed.PullFeedCardsByIdsRequest",
+                                  {"feedCardIdentities": [{"id": c, "type": FEED_CHAT[0]} for c in part]}) or {}
+            except Exception as e:  # this batch only: the others' answers still count
+                failed = failed or self._net(e, "读取会话的完成状态")
+                continue
+            cards = resp.get("cards") or {}
+            if isinstance(cards, dict):  # a card keyed by its id may leave the id out of itself
+                cards = [dict(c, id=c.get("id") or k) for k, c in cards.items() if isinstance(c, dict)]
+            done = done_cards(cards, None, set(part))
+            for c in part:
+                out[c] = done.get(c)  # answered: done (when) or not (None)
+        if failed is not None and not out:
+            raise failed
+        return out
 
     # ------------------------------------------------------------ documents
 

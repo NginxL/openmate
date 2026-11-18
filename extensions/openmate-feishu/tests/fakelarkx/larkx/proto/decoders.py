@@ -26,6 +26,8 @@ def parse_ws_frame(raw):
     packet = {"cmd": d.get("cmd")}
     if d.get("sid") is not None:
         packet["sid"] = d["sid"]
+    if d.get("payload") is not None:
+        packet["payload"] = d["payload"].encode("latin-1")
     return {}, packet
 
 

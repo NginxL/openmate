@@ -595,6 +595,60 @@ class ReadTest(Base):
         with self.assertRaises(BackendError):
             self.b.recent_chats(5)
 
+    def test_done_cards_both_forms(self):
+        f = larkagentx.done_cards
+        # read back (protobuf_to_dict): numbers, each card's own feedType
+        self.assertEqual(f([{"id": "500", "type": 1, "feedType": 2, "updateTime": 1763000000, "updateTimeMs": 1763000000500},
+                            {"id": "501", "type": 1, "feedType": 1, "updateTime": 1},  # in the inbox
+                            {"id": "doc-1", "type": 3, "feedType": 2},  # a document's card
+                            {"id": "502", "type": 1, "feedType": 2, "status": 3},  # deleted
+                            {"id": "503", "type": 1, "feedType": 2, "updateTime": 1763000001},
+                            "junk", {"type": 1, "feedType": 2}]),
+                         {"500": 1763000000.5, "503": 1763000001.0})
+        # a push (MessageToDict): names, int64 as strings, the push's box for its cards
+        self.assertEqual(f([{"id": "500", "type": "CHAT", "updateTime": "1763000002"}, {"id": "9", "type": "THREAD"}], "DONE"),
+                         {"500": 1763000002.0})
+        self.assertEqual(f([{"id": "500", "type": "CHAT"}], "INBOX"), {})
+        self.assertEqual(f([{"id": "500", "type": "CHAT", "feedType": "INBOX"}], "DONE"), {}, "a card's own feedType first")
+        self.assertEqual(f([{"id": "500", "type": 1, "feedType": 2}], None, {"501"}), {}, "only the chats asked about")
+        self.assertEqual(f([{"id": "500", "type": 1, "feedType": 2}]), {"500": 0.0}, "when unknown")
+
+    def test_chat_done_states_by_ids(self):
+        self.assertTrue(self.b.done_marks)
+        S.api_answers["feed.PullFeedCardsByIdsRequest"] = {"cards": {
+            "500": {"id": "500", "type": 1, "feedType": 2, "updateTimeMs": 1763000000500},
+            "501": {"id": "501", "type": 1, "feedType": 1},
+            "502": {"type": 1, "feedType": 2, "updateTime": 1763000002}}}  # keyed by its id, without it inside
+        self.assertEqual(self.b.chat_done_states(["500", "501", "502", "503", "500", ""]),
+                         {"500": 1763000000.5, "501": None, "502": 1763000002.0, "503": None},
+                         "answered: done (when) or not (None), a chat without a card is not done")
+        self.assertEqual(S.api_calls[-1], ("feed.PullFeedCardsByIdsRequest", {"feedCardIdentities": [
+            {"id": "500", "type": 1}, {"id": "501", "type": 1}, {"id": "502", "type": 1}, {"id": "503", "type": 1}]}))
+        n = len(S.api_calls)
+        self.b.chat_done_states([str(i) for i in range(120)])
+        self.assertEqual(len(S.api_calls) - n, 3, "at most DONE_ASK_MOST a request")
+
+    def test_chat_done_states_a_failed_batch_leaves_only_its_chats_out(self):
+        calls = []
+
+        def answer(type_or_cmd, data=None, raw=None):
+            calls.append(data)
+            if len(calls) == 2:
+                raise R.ConnectionError("down")
+            return {"cards": {c["id"]: {"id": c["id"], "type": 1, "feedType": 2} for c in data["feedCardIdentities"]}}
+
+        client, _ = self.b._signed_in()
+        orig = client.api
+        client.api = answer
+        self.addCleanup(setattr, client, "api", orig)
+        out = self.b.chat_done_states([str(i) for i in range(110)])
+        self.assertEqual(sorted(out, key=int), [str(i) for i in range(50)] + [str(i) for i in range(100, 110)])
+        self.assertTrue(all(v == 0.0 for v in out.values()))
+        client.api = lambda *a, **k: (_ for _ in ()).throw(R.ConnectionError("down"))
+        with self.assertRaises(BackendError) as e:
+            self.b.chat_done_states(["500"])
+        self.assertEqual(e.exception.kind, "unreachable", "none answered: an error")
+
     def test_chat_info_topic_and_cache(self):
         S.chats["502"] = {"id": "502", "type": 2, "chatMode": 3, "name": "", "i18nNames": {"zh_cn": "话题群"}}
         c = self.b.chat_info("502")
@@ -814,6 +868,28 @@ class ListenTest(Base):
         self.assertFalse(t.is_alive())
         self.assertEqual(self.error, [])
         self.assertEqual(self.links, ["up"])
+
+    def test_chats_moved_to_done_reach_the_core(self):
+        from larkx._fake import frame, text_data
+
+        heard = []
+        self.b.on_chats_done = heard.append
+        real = larkagentx.pushed_done
+        larkagentx.pushed_done = lambda p: json.loads(p.decode("utf-8"))  # the real decoding: test_smoke_larkx
+        self.addCleanup(setattr, larkagentx, "pushed_done", real)
+        t = self.start()
+        cmd = larkagentx.PUSH_FEED_CARDS_CMD
+        S.frames.put(frame(sid="s3", cmd=cmd, payload=json.dumps({"500": 1763000000.5}).encode("utf-8")))
+        S.frames.put(frame(sid="s4", cmd=cmd, payload=b"{}"))  # cards back in the inbox: nothing to tell
+        S.frames.put(frame(sid="s5", cmd=cmd, payload=b"not json"))  # undecodable: logged, the link goes on
+        S.frames.put(frame(messages=[frame_msg("205", "500", 24, text_data("之后的消息"))]))
+        wait_until(lambda: len(self.got) == 1, what="the message after them")
+        self.assertEqual(heard, [{"500": 1763000000.5}])
+        self.assertIn(("ack", "s3"), S.ws_sent)
+        self.assertIn(("ack", "s5"), S.ws_sent)
+        self.stop.set()
+        t.join(5)
+        self.assertEqual(self.error, [])
 
     def test_up_without_frames_after_the_grace(self):
         t = self.start()

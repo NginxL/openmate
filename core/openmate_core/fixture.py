@@ -50,6 +50,11 @@ class FixtureWorld:
         self.doc_reply_fail = False
         self.doc_texts: Dict[str, str] = {}  # doc url → its text, for doc_text
         self.doc_listener: Optional[Callable] = None
+        self.done: Dict[str, float] = {}  # chats in the service's 完成 → when they went there (a new message reopens)
+        self.done_listener: Optional[Callable] = None
+        self.done_asks: List[List[str]] = []  # chat_done_states calls
+        self.done_fail = False  # chat_done_states raises
+        self.done_hook: Optional[Callable[[], None]] = None  # run by chat_done_states after it read its answer
         self.react_fail = False
         self.edits: List[Tuple[str, str, str]] = []  # (chat, message, new text) by edit
         self.edit_fail = False
@@ -107,6 +112,7 @@ class FixtureWorld:
             m = Message(id=kw.pop("id", None) or self.next_id(), chat_id=chat_id, position=pos, sender_id=sid,
                         sender_name=name, mine=mine, text=text, at=at, **kw)
             hist.append(m)
+            self.done.pop(chat_id, None)  # a new message takes the chat out of 完成
             return m
 
     def _seed(self) -> None:
@@ -149,6 +155,20 @@ class FixtureWorld:
         if listener is not None:
             listener(mention)
 
+    def mark_done(self, chat_id: str, when: Optional[float] = None, push: bool = True) -> None:
+        """The user marks a chat 完成 in the service's own client: told to the live listener (push), if connected."""
+        with self.lock:
+            at = time.time() if when is None else when
+            self.done[chat_id] = at
+            listener = self.done_listener if push else None
+        if listener is not None:
+            listener({chat_id: at})
+
+    def mark_inbox(self, chat_id: str) -> None:
+        """The user moves a chat back from 完成 in the service's own client (no new message)."""
+        with self.lock:
+            self.done.pop(chat_id, None)
+
     def drop(self) -> None:
         """End the current live connection (listen returns)."""
         self.drop_event.set()
@@ -160,6 +180,8 @@ class FixtureWorld:
 
 
 class FixtureBackend(Backend):
+    done_marks = True
+
     def __init__(self, world: Optional[FixtureWorld] = None):
         self.world = world or FixtureWorld()
         self.signed_in: Optional[Account] = None
@@ -218,6 +240,7 @@ class FixtureBackend(Backend):
         with w.lock:
             w.listener = on_message
             w.doc_listener = lambda m: self.on_doc_mention(m) if self.on_doc_mention is not None else None
+            w.done_listener = lambda d: self.on_chats_done(d) if self.on_chats_done is not None else None
         w.up_event.set()
         on_link("up", "")
         try:
@@ -230,6 +253,7 @@ class FixtureBackend(Backend):
             with w.lock:
                 w.listener = None
                 w.doc_listener = None
+                w.done_listener = None
             w.up_event.clear()
 
     # reads
@@ -274,6 +298,18 @@ class FixtureBackend(Backend):
         if c is None:
             raise BackendError("没有这个会话", "not_found")
         return c
+
+    def chat_done_states(self, chat_ids: List[str]) -> Dict[str, Optional[float]]:
+        w = self.world
+        with w.lock:
+            w.done_asks.append(list(chat_ids))
+            hook = w.done_hook
+            if w.done_fail:
+                raise BackendError("连不上（读取会话的完成状态时）", "unreachable")
+            answer = {c: w.done.get(c) for c in chat_ids}
+        if hook is not None:
+            hook()  # what happens while the answer is on its way back
+        return answer
 
     def doc_text(self, doc_url: str, most: int) -> str:
         with self.world.lock:

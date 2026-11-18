@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 from . import tools as toolmod
 from . import views
 from .agent import AgentRunner
-from .ui import UI
+from .ui import UI, ChatsToday
 from .backend import Account, BackendError, Chat, CredentialsExpired, Message, SendRejected
 from .events import Changed
 from .hub import HubAPI
@@ -102,6 +102,12 @@ class ConnectorApp:
         self._catchup_running = False
         self._catchup_done = threading.Event()
         self._link_up = threading.Event()
+        self._done_heard: set = set()  # chats the live link heard marked done in the service's client: ask about them
+        self._done_ask = False  # ask the service about every chat that needs the user (after a catch-up)
+        self._done_wake = threading.Event()
+        self._done_mu = threading.Lock()  # a round's store reads and writes; shutdown and an account switch wait for it
+        self._account_epoch = 0  # bumped when another account's sign-in wiped the store
+        self.done_rounds = 0  # finished rounds (tests wait on it)
         self.ready = threading.Event()
         self.closing = threading.Event()
         self._inflight: set = set()
@@ -212,6 +218,7 @@ class ConnectorApp:
                 self.backend.on_credentials = self._credentials_rotated
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_doc_mention = self._doc_mention
+                self.backend.on_chats_done = self._chats_done
             except BackendError as e:
                 self.setup_error = e.message
                 self.setup_kind = e.kind
@@ -228,6 +235,8 @@ class ConnectorApp:
                 if self.backend is not None:
                     self._start_link(restore=True)
             self.agent.start()
+            if self.backend is not None and getattr(self.backend, "done_marks", False):
+                threading.Thread(target=self._done_loop, name="openmate-done", daemon=True).start()
             self._ui().update_badge()  # the hub forgets an extension's badges when it restarts
             if self.timing.warm_pages:
                 self._ui().warm()
@@ -240,6 +249,8 @@ class ConnectorApp:
 
     def shutdown(self) -> None:
         self.closing.set()
+        self._done_wake.set()
+        held = self._done_mu.acquire(timeout=5.0)  # a round touching the store finishes first
         with self.lock:
             self._gen += 1
             self._link_stop.set()
@@ -254,6 +265,8 @@ class ConnectorApp:
                 pass
         if self.store is not None:
             self.store.close()
+        if held:
+            self._done_mu.release()
 
     # ------------------------------------------------------------------ calls to the hub over stdio
 
@@ -362,6 +375,80 @@ class ConnectorApp:
                 self.agent.on_doc_mention(mention)
             except Exception:
                 log.exception("a document mention was not taken")
+
+    # ------------------------------------------------------------------ the service's done mark (Feishu's 完成)
+
+    def _chats_done(self, done: Dict[str, float]) -> None:
+        """The live link heard chats marked done in the service's own client: ask about them (off its thread). A push
+        says neither which message it covers nor whether one came after, so only the answer to a question counts."""
+        self.ask_done(list(done or {}))
+
+    def ask_done(self, chat_ids: List[str]) -> None:
+        """Ask the service soon whether these chats are done there (a backend with done_marks; others: nothing)."""
+        if self.backend is None or not getattr(self.backend, "done_marks", False):
+            return
+        with self.lock:
+            self._done_heard.update(str(c) for c in chat_ids if c)
+        self._done_wake.set()
+
+    def _ask_done(self) -> None:
+        with self.lock:
+            self._done_ask = True
+        self._done_wake.set()
+
+    def _done_loop(self) -> None:
+        """The service's done mark as 处理完: the chats the live link heard about, at once; every chat that needs the
+        user after each catch-up and every done_check (marks made while the link was down, or never pushed). While
+        the link is not up nothing is asked: the catch-up after it comes back asks."""
+        t = self.timing
+        next_check = time.monotonic() + t.done_check
+        while not self.closing.is_set():
+            self._done_wake.wait(max(0.0, next_check - time.monotonic()))
+            self._done_wake.clear()
+            if self.closing.is_set():
+                return
+            with self.lock:
+                heard, self._done_heard = self._done_heard, set()
+                ask, self._done_ask = self._done_ask, False
+            if time.monotonic() >= next_check:
+                ask = True
+            if ask:
+                next_check = time.monotonic() + t.done_check
+            if not (ask or heard) or self.link != "up":
+                continue
+            try:
+                n = self._done_round(None if ask else heard)
+                if n:
+                    log.info("%d need(s) marked done in the service's client: 处理完", n)
+            except CredentialsExpired:
+                log.info("could not ask which chats are done: the sign-in is gone")
+            except BackendError as e:
+                log.info("could not ask which chats are done: %s", e.kind)
+            except Exception:
+                if not self.closing.is_set():
+                    log.exception("the done marks could not be applied")
+            finally:
+                self.done_rounds += 1
+
+    def _done_round(self, only: Optional[set]) -> int:
+        """One question to the service about the needs (those of only, or all) as they stand now; the answer is put
+        on exactly those, unless the link, the account or the extension changed while it was out."""
+        with self.lock:
+            gen, epoch = self._gen, self._account_epoch
+        with self._done_mu:
+            if self.closing.is_set() or self.store is None:
+                return 0
+            today = ChatsToday(self)
+            needs, marked = today.done_snapshot(only)
+        if not needs:
+            return 0
+        states = self.backend.chat_done_states([t["_chat"]["id"] for t in needs])
+        with self._done_mu:
+            with self.lock:
+                same = gen == self._gen and epoch == self._account_epoch
+            if not same or self.closing.is_set():
+                return 0
+            return today.service_done(needs, marked, states)
 
     def _ui(self) -> "UI":
         with self.lock:
@@ -540,6 +627,7 @@ class ConnectorApp:
                 self.store.meta_set("render_version", version)
             self.last_sync = time.time()
             self.mark_changed("inbox", "chats")
+            self._ask_done()
         except BackendError as e:
             log.warning("history catch-up stopped: %s", e.kind)
         except Exception:
@@ -692,7 +780,10 @@ class ConnectorApp:
             acct = done.account
             prev = self.store.meta_get("account_id")
             if prev and acct.id and prev != acct.id:
-                self.store.wipe_account_data()  # another account: forget the previous one's chats
+                with self._done_mu:  # a done round of the account before must not write into this one's
+                    self.store.wipe_account_data()  # another account: forget the previous one's chats
+                    with self.lock:
+                        self._account_epoch += 1
             self._credentials = done.credentials
             self.creds = "present"
             self._remember_account(acct)

@@ -4,7 +4,7 @@ same, and comes back with a newer message (a direct chat) or a newer @me (a grou
 import time
 import unittest
 
-from harness import Harness, wait_until
+from harness import Harness, fast, wait_until
 
 
 def signed_in(test):
@@ -78,6 +78,176 @@ class DoneTest(unittest.TestCase):
         h = signed_in(self)
         view = h.hub.request("ui.render", {"contribution": "chats", "state": "", "ui_version": 5})
         self.assertFalse(any("actions" in it for s in view["sections"] for it in s["items"]))
+
+
+
+class ServiceDoneTest(unittest.TestCase):
+    """The service's own done mark (Feishu's 完成) counts as 处理完 here, until a newer message."""
+
+    page = DoneTest.page
+    act = DoneTest.act
+    needs = DoneTest.needs
+
+    def done_rows(self, view):
+        sec = [s for s in view["sections"] if s.get("title") == "已标记处理完"]
+        return [r["title"] for r in sec[0]["items"]] if sec else []
+
+    def ready(self, timing=None):
+        """Signed in, the catch-up done and the first question about the needs answered (it hides nothing yet)."""
+        h = Harness(self, timing=timing) if timing is not None else Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        wait_until(lambda: h.app.done_rounds >= 1, what="the first question about the needs")
+        return h
+
+    def rounds_after(self, h, n, what):
+        wait_until(lambda: h.app.done_rounds > n, what=what)
+
+    def test_a_done_mark_heard_live(self):
+        h = self.ready()
+        self.assertIn("示例同事甲", self.needs(self.page(h)))
+        asks = len(h.world.done_asks)
+        h.world.mark_done("chat_example_dm_a")
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="完成 in Feishu: 处理完 here")
+        self.assertEqual(h.world.done_asks[asks:], [["chat_example_dm_a"]], "the push: one question about that chat")
+        self.assertEqual(self.done_rows(self.page(h)), ["示例同事甲"])
+        h.world.push("chat_example_dm_a", "user_example_a", "还有一件事")
+        wait_until(lambda: "示例同事甲" in self.needs(self.page(h)), what="a new message brings it back")
+
+    def test_a_group_marked_done(self):
+        h = self.ready()
+        h.world.mark_done("chat_example_team")
+        wait_until(lambda: "示例项目群" not in self.needs(self.page(h)), what="a group's @me, 完成 in Feishu")
+
+    def test_a_done_mark_made_while_away_is_found_after_the_catch_up(self):
+        h = self.ready()
+        h.world.drop()
+        wait_until(lambda: not h.world.connected, what="the link is down")
+        h.world.mark_done("chat_example_dm_a", push=False)
+        asks = len(h.world.done_asks)
+        wait_until(lambda: len(h.world.done_asks) > asks, what="asked after the catch-up")
+        self.assertIn("chat_example_dm_a", h.world.done_asks[-1])
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="found 完成: 处理完")
+
+    def test_asked_every_done_check(self):
+        h = self.ready(fast(done_check=0.3))
+        n, conns = h.app.done_rounds, h.world.connections
+        h.world.mark_done("chat_example_dm_a", push=False)
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="found 完成 without a push")
+        self.assertGreater(h.app.done_rounds, n)
+        self.assertEqual(h.world.connections, conns, "no reconnect")
+
+    def test_not_asked_while_the_link_is_down(self):
+        h = self.ready(fast(done_check=0.2))
+        h.world.hold_up = True
+        h.world.drop()
+        wait_until(lambda: h.app.link != "up", what="down")
+        asks = len(h.world.done_asks)
+        time.sleep(0.8)
+        self.assertEqual(len(h.world.done_asks), asks, "nothing asked while down")
+
+    def test_a_mark_older_than_the_line_that_made_the_need_is_left_alone(self):
+        h = self.ready()
+        h.world.mark_done("chat_example_dm_a", when=time.time() - 3600)
+        h.world.mark_done("chat_example_team")
+        wait_until(lambda: "示例项目群" not in self.needs(self.page(h)), what="the other mark was applied")
+        self.assertIn("示例同事甲", self.needs(self.page(h)), "A wrote after that 完成")
+
+    def test_a_later_system_line_does_not_make_a_mark_look_old(self):
+        h = self.ready()
+        h.world.push("chat_example_dm_a", "user_example_a", "这个问题", ago=600)
+        h.world.push("chat_example_dm_a", "user_example_a", "示例同事甲 修改了群名", type="SYSTEM")
+        wait_until(lambda: "修改了群名" in str(h.app.store.messages_before("chat_example_dm_a", None, 3)), what="stored")
+        h.world.mark_done("chat_example_dm_a", when=time.time() - 300)  # after the question, well before the system line
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="the question's 完成 counts")
+
+    def test_a_message_while_the_answer_is_on_its_way_stays(self):
+        h = self.ready()
+        once = []
+
+        def meanwhile():
+            if not once:
+                once.append(1)
+                h.world.push("chat_example_dm_a", "user_example_a", "又想到一件事")
+
+        h.world.done_hook = meanwhile
+        n = h.app.done_rounds
+        h.world.mark_done("chat_example_dm_a")
+        self.rounds_after(h, n, "the round with the answer")
+        self.assertIn("示例同事甲", self.needs(self.page(h)), "the 完成 covered the message before, not this one")
+
+    def test_the_users_restore_while_the_answer_is_on_its_way_holds(self):
+        h = self.ready()
+        once = []
+
+        def meanwhile():
+            if not once:
+                once.append(1)
+                self.act(h, "done:chat:chat_example_dm_a")
+                self.act(h, "undone:chat:chat_example_dm_a")
+
+        h.world.done_hook = meanwhile
+        n = h.app.done_rounds
+        h.world.mark_done("chat_example_dm_a")
+        self.rounds_after(h, n, "the round with the answer")
+        h.world.done_hook = None
+        self.assertIn("示例同事甲", self.needs(self.page(h)), "恢复 pressed meanwhile is kept")
+
+    def test_brought_back_stays_back_while_feishu_still_says_done(self):
+        h = self.ready()
+        h.world.mark_done("chat_example_dm_a")
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="完成: 处理完")
+        n = h.app.done_rounds
+        out = self.act(h, "undone:chat:chat_example_dm_a")
+        self.assertIn("示例同事甲", self.needs(out["view"]))
+        self.rounds_after(h, n, "恢复 asks about the chat")
+        asks = len(h.world.done_asks)
+        h.world.drop()  # a reconnect asks again: Feishu still says 完成
+        wait_until(lambda: len(h.world.done_asks) > asks, what="asked again")
+        n = h.app.done_rounds
+        h.world.mark_done("chat_example_dm_a")  # and the same mark heard live once more
+        self.rounds_after(h, n, "the push's round")
+        self.assertIn("示例同事甲", self.needs(self.page(h)), "恢复 holds against that 完成")
+        h.world.mark_inbox("chat_example_dm_a")  # moved back in Feishu: the 恢复 has done its job…
+        n = h.app.done_rounds
+        h.world.drop()
+        self.rounds_after(h, n, "a round that sees it not done")
+        h.world.mark_done("chat_example_dm_a")  # …so a new 完成 there counts
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="a new 完成 after the 恢复")
+
+    def test_a_first_feishu_done_after_a_restore_here_counts(self):
+        h = self.ready()
+        self.act(h, "done:chat:chat_example_dm_a")
+        n = h.app.done_rounds
+        self.act(h, "undone:chat:chat_example_dm_a")  # Feishu never said 完成
+        self.rounds_after(h, n, "恢复 asks about the chat")
+        h.world.mark_done("chat_example_dm_a")
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="the first 完成 in Feishu counts")
+
+    def test_a_restore_from_a_page_drawn_before_a_new_message_covers_nothing(self):
+        h = self.ready()
+        self.act(h, "done:chat:chat_example_dm_a")
+        h.world.push("chat_example_dm_a", "user_example_a", "新的问题")
+        wait_until(lambda: "示例同事甲" in self.needs(self.page(h)), what="back with the new message")
+        self.act(h, "undone:chat:chat_example_dm_a")  # the 已标记处理完 row of a page drawn before
+        h.world.mark_done("chat_example_dm_a")
+        wait_until(lambda: "示例同事甲" not in self.needs(self.page(h)), what="完成 of the new message counts")
+
+    def test_another_account_forgets_the_marks(self):
+        h = self.ready()
+        st = h.app.store
+        st.dismiss("chat:chat_example_dm_a", "v1")
+        st.dismiss("inbox:item1", "v1")
+        st.wipe_account_data()
+        self.assertEqual(st.dismissed(["chat:chat_example_dm_a", "inbox:item1"]), {"inbox:item1": "v1"})
+
+    def test_asking_fails_quietly(self):
+        h = Harness(self, timing=fast(done_check=0.2))
+        h.world.done_fail = True
+        h.sign_in()
+        wait_until(lambda: len(h.world.done_asks) >= 2, what="asked, and failed, twice")
+        self.assertIn("示例同事甲", self.needs(self.page(h)))
+        self.assertEqual(h.app.link, "up")
 
 
 if __name__ == "__main__":

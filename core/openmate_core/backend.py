@@ -188,6 +188,14 @@ class Backend(abc.ABC):
     #: comment (from the listener's own thread; it returns at once).
     on_doc_mention: Optional[Callable[["DocMention"], None]] = None
 
+    #: Set by the core: call it with {chat_id: when (unix seconds, 0 when unknown)} when the live link hears the user
+    #: marked chats done in the service's own client (Feishu's 完成), from the listener's own thread (it returns at
+    #: once). The core takes it as a hint and asks chat_done_states about those chats. For a backend with done_marks.
+    on_chats_done: Optional[Callable[[Dict[str, float]], None]] = None
+    #: The service has a per-chat done mark (Feishu's 完成: the chat leaves the message list until a new message): the
+    #: core asks chat_done_states about the chats that need the user and counts the marked ones as 处理完.
+    done_marks: bool = False
+
     #: The version of how this backend reads messages into text. When it is newer than the one a store was filled
     #: with, the core reads the recent chats with a message of `rerender_types` once more (a stored message's text
     #: is renewed when it reads otherwise now).
@@ -245,6 +253,13 @@ class Backend(abc.ABC):
     @abc.abstractmethod
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         """A person's display name ("" when unknown); chat_id when the name is per chat (an alias in a group)."""
+
+    def chat_done_states(self, chat_ids: List[str]) -> Dict[str, Optional[float]]:
+        """Where these chats stand in the service's own client now, for those it answered about: when the chat last
+        changed there (unix seconds, 0 when unknown) for one the user marked done and no new message reopened, None
+        for one that is not done. A chat it could not ask about is left out; BackendError when it could ask about
+        none (CredentialsExpired when the sign-in is gone). A backend with done_marks."""
+        return {}
 
     def doc_text(self, doc_url: str, most: int) -> str:
         """A document's text (read as the user), at most `most` characters; "" when it can't be read. For a guest

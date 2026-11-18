@@ -227,6 +227,8 @@ class Fresh:
 
 NEEDS_HOURS = 24  # an @me or a direct message older than this no longer needs the user (setting needs_hours)
 TALK_GAP = 3600.0  # the other side answered within this of my last message: the talk goes on, it is not a request
+DONE_SLACK = 60.0  # a service's done mark this much older than a need's latest line still covers it (clock, rounding)
+REOPENED = "reopened:"  # a 处理完 mark's version brought back (恢复): the service's done mark leaves that one alone
 CLOSER_MOST = 3  # at most this many messages back from them, none asking anything: the talk is over
 ASKING = ("?", "？", "吗", "么", "呢", "嘛", "能不能", "可不可以", "可以不", "帮忙", "帮我", "麻烦", "请你", "请帮",
           "看下", "看一下", "看看", "确认", "给点", "审批", "approval")
@@ -266,10 +268,10 @@ class ChatsToday:
             n = NEEDS_HOURS
         return max(1, min(168, n))
 
-    def needs(self) -> List[dict]:
+    def needs(self, only: Optional[set] = None) -> List[dict]:
         """Direct chats and @me the user has not answered (the inbox's rule), newest first. A bot's (People) are
         notices: left out, and counted in self.bots. The ones marked 处理完 and still the same are left out too, in
-        self.done."""
+        self.done. With only, just those chats are looked at (the counts then cover only them)."""
         app = self.app
         out = []
         self.bots = 0
@@ -279,6 +281,8 @@ class ChatsToday:
             return out
         oldest = time.time() - self.needs_hours() * 3600.0
         for chat in app.store.chats_since(time.time() - app.timing.inbox_window, app.timing.inbox_most):
+            if only is not None and chat["id"] not in only:
+                continue
             rows = app.store.messages_before(chat["id"], None, 60)
             thing = views.inbox_thing(chat, rows, platform=app.platform.name, tz=app.tz, me=app.me_name(), rules="",
                                       can_reply=False)
@@ -288,6 +292,7 @@ class ChatsToday:
                 self.closed += 1
                 continue
             thing["_at"] = max((r.get("at") or 0) for r in rows) if rows else 0
+            thing["_version_at"] = next((r.get("at") or 0 for r in rows if r.get("id") == thing.get("last")), thing["_at"])
             thing["_chat"] = chat
             if thing["kind"] == "dm":
                 who = {chat.get("peer_id") or ""} if chat.get("peer_id") else {r.get("sender_id") for r in rows if not r.get("mine")}
@@ -313,6 +318,7 @@ class ChatsToday:
                 t["sender"], t["preview"] = views.sender_of(r, me), one_line(views.text_of(r), 200)
                 t["_at"] = r.get("at") or t["_at"]
                 t["_version"] = str(r.get("id") or "")  # a new @me brings it back, not any line of the group
+                t["_version_at"] = r.get("at") or t["_at"]
             t["_done_key"] = "chat:" + t["_chat"]["id"]
         fresh = [t for t in out if t["_at"] >= oldest]  # the @me itself (a group) or the last line (a direct chat)
         self.expired = len(out) - len(fresh)
@@ -334,9 +340,54 @@ class ChatsToday:
         return False
 
     def undismiss(self, chat_id: str) -> None:
-        self.app.store.undismiss("chat:" + chat_id)
-        if hasattr(self.app, "mark_changed"):
-            self.app.mark_changed("inbox")
+        """Bring a chat's need back (恢复). It stays back while the service still says the chat is done there (the
+        mark says so until the service is seen not done). Nothing when it is not 处理完 now (a newer message already
+        brought it back: a 恢复 from a page drawn before must not cover that one)."""
+        app = self.app
+        self.needs(only={chat_id})
+        t = next((t for t in self.done if t["_chat"]["id"] == chat_id), None)
+        if t is None:
+            return
+        app.store.dismiss_if(t["_done_key"], REOPENED + t["_version"], t["_version"])
+        if hasattr(app, "ask_done"):
+            app.ask_done([chat_id])  # the service not done there now: a 完成 there from now on counts again
+        if hasattr(app, "mark_changed"):
+            app.mark_changed("inbox")
+
+    def done_snapshot(self, only: Optional[set] = None) -> Tuple[List[dict], Dict[str, str]]:
+        """The needs to ask the service about and their marks now (恢复 ones included), read before asking."""
+        needs = self.needs(only)
+        return needs, (self.app.store.dismissed(t["_done_key"] for t in needs) if needs else {})
+
+    def service_done(self, needs: List[dict], marked: Dict[str, str], states: Dict[str, Optional[float]]) -> int:
+        """The service's own done marks (Feishu's 完成) on needs read before asking it (done_snapshot): a need it says
+        is done counts as 处理完 here too, for that need's version (a newer message, or a newer @me in a group,
+        brings it back as with 处理完 here). Each write holds only while the mark is still what was read (the user may
+        have pressed 处理完 or 恢复 meanwhile). A done mark older than the line that made the need is left alone; so
+        is the one a 恢复 here came after, until the service is seen not done (then a new 完成 there counts again).
+        How many it marked."""
+        app = self.app
+        n = 0
+        for t in needs:
+            chat_id = t["_chat"]["id"]
+            if chat_id not in states:
+                continue  # not answered about
+            key, version = t["_done_key"], t["_version"]
+            prev = marked.get(key)
+            when = states[chat_id]
+            if when is None:
+                if prev == REOPENED + version:
+                    app.store.undismiss_if(key, prev)
+                continue
+            if prev == REOPENED + version or prev == version:
+                continue
+            if when and when + DONE_SLACK < (t.get("_version_at") or t["_at"]):
+                continue
+            if app.store.dismiss_if(key, version, prev):
+                n += 1
+        if n and hasattr(app, "mark_changed"):
+            app.mark_changed("inbox")
+        return n
 
     def counts(self, needs: List[dict]) -> Dict[str, int]:
         app = self.app

@@ -54,13 +54,16 @@ class State:
 STATE = State()
 
 
-def frame(sid=None, cmd=6, messages=()):
+def frame(sid=None, cmd=6, messages=(), payload=None):
     """A websocket frame: what parse_ws_frame and decode_push_messages of the fake read back (the messages, which
-    hold bytes, stay in STATE.pushed under the frame's number)."""
+    hold bytes, stay in STATE.pushed under the frame's number; payload, bytes, is the packet's own)."""
     with STATE.lock:
         STATE.pushed.append([dict(m) for m in messages])
         n = len(STATE.pushed) - 1
-    return json.dumps({"sid": sid, "cmd": cmd, "pushed": n}).encode("utf-8")
+    d = {"sid": sid, "cmd": cmd, "pushed": n}
+    if payload is not None:
+        d["payload"] = payload.decode("latin-1")
+    return json.dumps(d).encode("utf-8")
 
 
 def at(user_id, content=""):

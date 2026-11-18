@@ -62,6 +62,23 @@ out["send"] = [req.chatId, req.rootId, req.parentId, req.isReplyInThread]
 pkt = b.lx.builders.build_send_message_packet("你好", "900", "rid", root_id="85", thread_chat=True)
 req.ParseFromString(pkt.payload)
 out["quote"] = [req.rootId, req.parentId, req.isReplyInThread]
+from larkx.proto import gateway, lark_all_pb2 as LA
+push = LA.feed.PushFeedCardsRequest(); push.type = 2
+c = push.cards.add(); c.id = "900"; c.type = 1; c.updateTime = 1763000000; c.updateTimeMs = 1763000000500
+c = push.cards.add(); c.id = "901"; c.type = 4  # a thread's card
+out["pushed_done"] = larkagentx.pushed_done(push.SerializeToString())
+push = LA.feed.PushFeedCardsRequest(); push.type = 1
+c = push.cards.add(); c.id = "900"; c.type = 1
+out["pushed_inbox"] = larkagentx.pushed_done(push.SerializeToString())
+out["push_cmd"] = gateway.resolve_cmd("feed.PushFeedCardsRequest")[0] == larkagentx.PUSH_FEED_CARDS_CMD
+cmd, req_cls, resp_cls = gateway.resolve_cmd("feed.PullFeedCardsByIdsRequest")
+req = gateway.request_from_dict(req_cls, {"feedCardIdentities": [{"id": "900", "type": larkagentx.FEED_CHAT[0]}]})
+out["ask"] = [cmd, [[i.id, i.type] for i in req.feedCardIdentities]]
+resp = resp_cls()
+c = resp.cards["900"]; c.id = "900"; c.type = 1; c.feedType = 2; c.updateTime = 1763000003
+c = resp.cards["902"]; c.id = "902"; c.type = 1; c.feedType = 1
+d = gateway.response_to_dict(resp_cls, resp.SerializeToString())
+out["answer"] = larkagentx.done_cards(list(d["cards"].values()), None, {"900", "902"})
 files = [f for _, _, fs in os.walk(data) for f in fs]
 out["files"] = files
 from loguru import logger
@@ -85,6 +102,11 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["post"], "周报\n本周完成")
         self.assertEqual(out["send"], ["900", "90", "90", True], "a thread reply")
         self.assertEqual(out["quote"], ["85", "85", False], "a quote that stays in the main stream")
+        self.assertEqual(out["pushed_done"], {"900": 1763000000.5}, "a chat moved to 完成, read from a real push")
+        self.assertEqual(out["pushed_inbox"], {}, "back in the inbox: nothing")
+        self.assertTrue(out["push_cmd"])
+        self.assertEqual(out["ask"], [1009, [["900", 1]]])
+        self.assertEqual(out["answer"], {"900": 1763000003.0})
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")
