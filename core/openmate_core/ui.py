@@ -253,9 +253,14 @@ def talk_closed(rows: List[dict]) -> bool:
     if not run or len(run) == len(msgs) or len(run) > CLOSER_MOST:
         return False
     mine = msgs[len(msgs) - len(run) - 1]
-    # every line of theirs soon after mine: a line hours later is a new thing, even after a short answer then
-    if (run[-1].get("at") or 0) - (mine.get("at") or 0) > TALK_GAP:
-        return False
+    # each line of theirs soon after the one before (mine first): a gap of hours starts a new thing, even after a
+    # short answer then; a line with no time (0) says nothing either way
+    prev = mine.get("at") or 0
+    for r in run:
+        at = r.get("at") or 0
+        if at and prev and at - prev > TALK_GAP:
+            return False
+        prev = at or prev
     return not any(asks_something(r) for r in run)
 
 
