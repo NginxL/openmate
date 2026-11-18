@@ -158,7 +158,8 @@ class Store:
         with self._mu:
             for t in ("messages", "chats", "names", "media"):
                 self._db.execute("DELETE FROM " + t)
-            self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%' "
+            self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at', 'catalog_cursor', 'catalog_after') "
+                             "OR key LIKE 'acked:%' "
                              "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%' "
                              "OR key LIKE 'gone:%' OR key LIKE 'member_at:%' OR key LIKE 'answered:%'")
         BUSINESS.clear()
@@ -961,7 +962,11 @@ class WeChatBackend(Backend):
                     return
                 if full:
                     self._groups_full_at = time.time()
-                    r = self._call(self._link(), "groups", 180)
+                    # the catalog goes on from where its last read stopped (not before the pause the server asked)
+                    params = {}
+                    if time.time() >= float(self.store.get("catalog_after") or 0):
+                        params["catalog_cursor"] = self.store.get("catalog_cursor")
+                    r = self._call(self._link(), "groups", 180, **params)
                     ids = [str(g) for g in r.get("groups") or [] if is_group(str(g))]
                     if self.me != me or self._closed:
                         return  # another account signed in meanwhile: these groups are not its
@@ -971,8 +976,10 @@ class WeChatBackend(Backend):
                     for gid, name in names.items():
                         if is_group(str(gid)) and isinstance(name, str) and name.strip():
                             self.store.set_chat_name(str(gid), name.strip()[:200])
-                    if r.get("complete"):
-                        self.store.put("groups_at", str(time.time()))
+                    self.store.put("catalog_cursor", str(r.get("catalog_cursor") or ""))
+                    self.store.put("catalog_after", str(time.time() + float(r.get("catalog_wait") or 0)))
+                    if r.get("complete") and r.get("catalog_complete", True):
+                        self.store.put("groups_at", str(time.time()))  # both read to the end: good for GROUPS_EVERY
                     log.info("WeChat groups: %d in all (%s in the group catalog%s; contacts %s, %s), %d new here",
                              len(ids), r.get("catalog", "?"), "" if r.get("catalog_complete") else ", not all yet",
                              r.get("contacts", "?"), "all" if r.get("complete") else "not all yet", new)

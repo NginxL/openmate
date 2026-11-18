@@ -839,7 +839,7 @@ fn op_room(app: &App, p: &Value) -> Result<Value> {
 
 /// Every group in the account's contacts (the 通讯录 list WeChat pages out at sign-in); groups never saved there show
 /// up only once they have a message.
-fn op_groups(app: &App) -> Result<Value> {
+fn op_groups(app: &App, p: &Value) -> Result<Value> {
     let client = app.client()?;
     let (mut contacts, mut rooms) = (0u32, 0u32);
     let mut groups = std::collections::BTreeSet::new();
@@ -876,7 +876,15 @@ fn op_groups(app: &App) -> Result<Value> {
     let mut names = serde_json::Map::new();
     let mut catalog = 0usize;
     let mut catalog_complete = false;
-    let mut cursor: Vec<u8> = vec![0];
+    // where the last read of the catalog stopped (it goes on from there), else the start
+    let mut cursor: Vec<u8> = p
+        .get("catalog_cursor")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .and_then(|c| B64.decode(c).ok())
+        .filter(|c| !c.is_empty() && c.len() <= 65536)
+        .unwrap_or_else(|| vec![0]);
+    let mut catalog_wait = 0u32;
     for _ in 0..100 {
         if Instant::now() >= deadline {
             break;
@@ -899,7 +907,10 @@ fn op_groups(app: &App) -> Result<Value> {
         for record in &page.contacts {
             if message::is_group(&record.username) {
                 catalog += 1;
-                if let Some(n) = record.nickname.as_deref().filter(|n| !n.is_empty()) {
+                // the user's own remark for the group first, else its name
+                if let Some(n) = record.remark.as_deref().filter(|n| !n.is_empty())
+                    .or(record.nickname.as_deref().filter(|n| !n.is_empty()))
+                {
                     names.insert(record.username.clone(), json!(n));
                 }
                 groups.insert(record.username.clone());
@@ -914,7 +925,8 @@ fn op_groups(app: &App) -> Result<Value> {
             _ => break,
         }
         if page.wait_seconds > 10 {
-            break; // the server asks for a long pause: the next full read goes on
+            catalog_wait = page.wait_seconds; // the server asks for a long pause: the next read goes on from here
+            break;
         }
         let pause = Instant::now() + Duration::from_secs(u64::from(page.wait_seconds));
         if pause >= deadline {
@@ -923,7 +935,9 @@ fn op_groups(app: &App) -> Result<Value> {
         std::thread::sleep(pause.saturating_duration_since(Instant::now()));
     }
     Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total,
-              "catalog": catalog, "catalog_complete": catalog_complete, "names": names}))
+              "catalog": catalog, "catalog_complete": catalog_complete, "names": names,
+              "catalog_cursor": if catalog_complete { String::new() } else { B64.encode(&cursor) },
+              "catalog_wait": catalog_wait}))
 }
 
 // ---------------------------------------------------------------- media
@@ -1189,7 +1203,7 @@ fn handle(app: Arc<App>, req: Value) {
         "send" => op_send(&app, &req),
         "contacts" => op_contacts(&app, &req),
         "room" => op_room(&app, &req),
-        "groups" => op_groups(&app),
+        "groups" => op_groups(&app, &req),
         "media" => op_media(&app, &req),
         "voice" => op_voice(&app, &req),
         "logout" => op_logout(&app),

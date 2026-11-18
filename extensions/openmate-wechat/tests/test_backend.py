@@ -600,6 +600,17 @@ class GroupCatalogTest(Base):
         self.assertIn("c2@chatroom", listed)
         self.assertNotIn("x", listed)
 
+    def test_a_catalog_read_that_stopped_goes_on_from_there(self):
+        os.environ["MATEWECHAT_FAKE_CATALOG_PART"] = "Y3Vyc29y"
+        spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", spacing)
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b._groups_work(True)
+        self.assertEqual(b.store.get("groups_at"), "", "not read to the end: not good for six hours")
+        b._groups_work(True)
+        self.assertEqual(self.requests("groups")[-1].get("catalog_cursor"), "Y3Vyc29y", "goes on from where it stopped")
+
 
 class GroupGoneTest(Base):
     def setUp(self):
