@@ -2,7 +2,8 @@
 //!
 //! It speaks JSON lines on stdin/stdout with the extension's Python backend, which owns everything else (the store,
 //! the inbox, /agent, 自动代答). Only what those two features need is here: QR sign-in, restoring a saved sign-in,
-//! the live message stream (push, sync, heartbeat), text sends (with real @s and quotes) and names.
+//! the live message stream (push, sync, heartbeat), text sends (with real @s and quotes), names, and the media of a
+//! message (a CDN object decrypted into a file the backend names; a voice note as WAV).
 //!
 //! The protocol is thisnick/agent-wechat's `wechat-protocol` library (MIT), used through its public API only; the
 //! online loop follows that project's daemon: heartbeat at the server's interval (30–180 s), a catch-up drain (scene
@@ -114,6 +115,7 @@ struct App {
     gen: AtomicU64,
     listening: Mutex<Option<(u64, Arc<AtomicBool>)>>,
     intents: Mutex<VecDeque<(Instant, String, String)>>, // (when, chat, text as sent): our own sends' echoes
+    cdn: Mutex<Option<(Instant, wechat_protocol::media::CdnConfig)>>, // the media CDN's route, asked for once an hour
 }
 
 impl App {
@@ -158,6 +160,9 @@ impl App {
             let _ = self.rt.block_on(old.shutdown());
         }
         *self.own.lock().map_err(|_| anyhow!("lock"))? = own.clone();
+        if let Ok(mut c) = self.cdn.lock() {
+            *c = None; // another sign-in: its own CDN route
+        }
         Ok(own)
     }
     /// Stop the live link (only generation `gen` when given: an old listener's stop never stops a newer one).
@@ -515,6 +520,9 @@ fn drain(
                 continue;
             }
             let (mut event, _) = message::normalize(&raw, &own, origin);
+            if let Some(data) = message::inline_media(m.message_type, &m.inline_data) {
+                event["inline"] = json!(B64.encode(data)); // a voice note's SILK, or a picture's thumbnail
+            }
             if m.outgoing {
                 let text = event.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
                 if app.is_echo(&m.peer, &text) {
@@ -799,6 +807,202 @@ fn op_groups(app: &App) -> Result<Value> {
     Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total}))
 }
 
+// ---------------------------------------------------------------- media
+
+const CDN_KEEP: Duration = Duration::from_secs(3600);
+const MEDIA_MOST: u64 = wechat_protocol::media::MAX_CDN_TRANSFER_BYTES as u64; // 25 MB: one ordinary CDN transfer
+
+/// The CDN route (asked of WeChat once an hour, or again after a failed download).
+fn cdn_config(app: &App, client: &NativeClient, fresh: bool) -> Result<wechat_protocol::media::CdnConfig> {
+    if !fresh {
+        if let Some((at, c)) = app.cdn.lock().map_err(|_| anyhow!("lock"))?.as_ref() {
+            if at.elapsed() < CDN_KEEP {
+                return Ok(c.clone());
+            }
+        }
+    }
+    let c = app
+        .rt
+        .block_on(async { tokio::time::timeout(Duration::from_secs(15), client.cdn_config()).await })
+        .map_err(|_| err("network", "问微信要媒体服务器地址超时"))??;
+    *app.cdn.lock().map_err(|_| anyhow!("lock"))? = Some((Instant::now(), c.clone()));
+    Ok(c)
+}
+
+/// A file the backend named: absolute, in an existing directory; written through a temporary file beside it.
+fn target_path(p: &Value) -> Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(str_arg(p, "path")?);
+    if !path.is_absolute() || path.file_name().is_none() || !path.parent().is_some_and(|d| d.is_dir()) {
+        return Err(err("input", "保存位置不对"));
+    }
+    Ok(path)
+}
+
+fn write_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".part");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).context("媒体文件写不进去")?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    Ok(())
+}
+
+/// Why a download failed, in words for people (never the file id or the key).
+fn media_error(e: &anyhow::Error) -> anyhow::Error {
+    if kinded(e).is_some() {
+        return err(kind_of(e), &kinded(e).map(|k| k.message.clone()).unwrap_or_default());
+    }
+    let text = format!("{e:#}");
+    if text.contains("media_expired") {
+        return err("expired_media", "文件已过期，微信服务器上取不到了");
+    }
+    if let Some(r) = ServiceRejected::find(e) {
+        return err("rejected", &format!("微信服务器没有给这个文件（{}），可能已过期或被撤回", r.code));
+    }
+    if is_session_rejected(e) {
+        return err("expired", "微信登录已失效");
+    }
+    if text.contains("outside limit") || text.contains("too large") {
+        return err("too_large", "文件太大");
+    }
+    if text.contains("checksum") || text.contains("integrity") || text.contains("mismatch") {
+        return err("integrity", "下载的文件校验没通过");
+    }
+    err("network", "下载没成功（网络或微信服务器的问题）")
+}
+
+/// Download one CDN object of a media message, decrypt it and write it to "path".
+/// In: quality (original | standard | thumbnail | video | file), file_id, aes_key (32 hex), size (advertised, optional),
+/// most (bytes, at most 25 MB), path. Out: bytes, md5, picture_format.
+fn op_media(app: &App, p: &Value) -> Result<Value> {
+    use wechat_protocol::media::{CdnClient, MediaDescriptor, MediaQuality};
+    let client = app.client()?;
+    let quality = match str_arg(p, "quality")? {
+        "original" => MediaQuality::Original,
+        "standard" => MediaQuality::Standard,
+        "thumbnail" => MediaQuality::Thumbnail,
+        "video" => MediaQuality::Video,
+        "file" => MediaQuality::File,
+        _ => return Err(err("input", "quality")),
+    };
+    let file_id = str_arg(p, "file_id")?.to_owned();
+    let key_hex = str_arg(p, "aes_key")?;
+    if key_hex.len() != 32 {
+        return Err(err("input", "aes_key"));
+    }
+    let aes_key = (0..16)
+        .map(|i| u8::from_str_radix(&key_hex[i * 2..i * 2 + 2], 16))
+        .collect::<std::result::Result<Vec<u8>, _>>()
+        .map_err(|_| err("input", "aes_key"))?;
+    let most = p.get("most").and_then(Value::as_u64).unwrap_or(MEDIA_MOST).min(MEDIA_MOST);
+    let size = p.get("size").and_then(Value::as_u64).filter(|n| *n > 0);
+    if size.is_some_and(|n| n > most) {
+        return Err(err("too_large", "文件太大"));
+    }
+    let path = target_path(p)?;
+    let descriptor = MediaDescriptor {
+        file_id,
+        aes_key,
+        quality,
+        // a picture's advertised length is the original's, not the size asked for: not compared
+        expected_bytes: if matches!(quality, MediaQuality::Video | MediaQuality::File) { size } else { None },
+        expected_md5: None,
+        strict_size: false,
+        expires_at: None,
+    };
+    let mut last = None;
+    for fresh in [false, true] {
+        // a failure with a cached route may be a stale route: asked once more with a fresh one
+        let attempt = (|| -> Result<wechat_protocol::media::DownloadedMedia> {
+            let cdn = CdnClient::new(cdn_config(app, &client, fresh)?, Duration::from_secs(60))?;
+            let d = descriptor.clone();
+            let got = app.rt.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(110),
+                    tokio::task::spawn_blocking(move || cdn.download(&d)),
+                )
+                .await
+            });
+            match got {
+                Ok(Ok(r)) => r,
+                Ok(Err(_)) => Err(anyhow!("download stopped")),
+                Err(_) => Err(err("network", "下载超时")),
+            }
+        })();
+        match attempt {
+            Ok(media) => {
+                if media.bytes.len() as u64 > most {
+                    return Err(err("too_large", "文件太大"));
+                }
+                write_file(&path, &media.bytes)?;
+                return Ok(json!({"bytes": media.bytes.len(), "md5": media.md5, "picture_format": media.picture_format}));
+            }
+            Err(e) => {
+                let shown = media_error(&e);
+                log(&format!("media download failed: {}", shown));
+                let retry = !fresh && matches!(kind_of(&shown), "network");
+                last = Some(shown);
+                if !retry {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| err("network", "下载没成功")))
+}
+
+/// A voice note as a WAV file at "path": from "silk" (a SILK file the backend kept from the message itself), or
+/// downloaded by "server_id" and "length" (its SILK size in bytes).
+fn op_voice(app: &App, p: &Value) -> Result<Value> {
+    let path = target_path(p)?;
+    let silk = if let Some(file) = p.get("silk").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let meta = std::fs::metadata(file).map_err(|_| err("input", "语音文件不在"))?;
+        if meta.len() > wechat_protocol::silk::MAX_STREAM_BYTES as u64 {
+            return Err(err("too_large", "语音太长"));
+        }
+        std::fs::read(file).map_err(|_| err("input", "语音文件读不出来"))?
+    } else {
+        let client = app.client()?;
+        let server_id: u64 = str_arg(p, "server_id")?.parse().map_err(|_| err("input", "server_id"))?;
+        let length = p.get("length").and_then(Value::as_u64).unwrap_or(0);
+        if length == 0 || length > wechat_protocol::silk::MAX_STREAM_BYTES as u64 {
+            return Err(err("input", "语音长度不对"));
+        }
+        let length = length as u32;
+        let mut silk = Vec::with_capacity(length as usize);
+        let mut offset = 0u32;
+        for _ in 0..64 {
+            let c = client.clone();
+            let chunk = app
+                .rt
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(20), c.download_voice_chunk(server_id, length, offset)).await
+                })
+                .map_err(|_| err("network", "下载语音超时"))?
+                .map_err(|e| media_error(&e))?;
+            if chunk.offset != offset || chunk.bytes.is_empty() {
+                return Err(err("integrity", "语音分段对不上"));
+            }
+            silk.extend_from_slice(&chunk.bytes);
+            offset = chunk.next_offset;
+            if chunk.complete {
+                break;
+            }
+        }
+        if offset != length {
+            return Err(err("integrity", "语音没有下载完整"));
+        }
+        silk
+    };
+    let pcm = wechat_protocol::silk::decode(&silk).map_err(|_| err("integrity", "语音解码不了"))?;
+    let wav = wechat_protocol::silk::wav(&pcm).map_err(|_| err("integrity", "语音转换不了"))?;
+    write_file(&path, &wav)?;
+    let ms = pcm.len() as u64 * 1000 / wechat_protocol::silk::SAMPLE_RATE as u64;
+    Ok(json!({"bytes": wav.len(), "ms": ms}))
+}
+
 // ---------------------------------------------------------------- main
 
 fn answer(app: &App, id: &Value, result: Result<Value>) {
@@ -839,6 +1043,8 @@ fn handle(app: Arc<App>, req: Value) {
         "contacts" => op_contacts(&app, &req),
         "room" => op_room(&app, &req),
         "groups" => op_groups(&app),
+        "media" => op_media(&app, &req),
+        "voice" => op_voice(&app, &req),
         "logout" => op_logout(&app),
         _ => Err(err("unsupported", &format!("不认识的操作 {op}"))),
     };
@@ -864,6 +1070,7 @@ fn main() -> Result<()> {
         gen: AtomicU64::new(0),
         listening: Mutex::new(None),
         intents: Mutex::new(VecDeque::new()),
+        cdn: Mutex::new(None),
     });
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {

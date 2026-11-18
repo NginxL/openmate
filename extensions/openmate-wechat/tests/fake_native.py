@@ -102,6 +102,27 @@ def answer(req):
     if op == "groups":
         return ok(groups=json.loads(os.environ.get("FAKE_GROUPS", '["g1@chatroom", "g2@chatroom"]')),
                   complete=os.environ.get("FAKE_GROUPS_COMPLETE", "1") == "1")
+    if op == "media":  # file_id says what the CDN gives: EXPIRED fails, WXGF is WeChat's own format, else by quality
+        if os.environ.get("FAKE_NO_MEDIA"):
+            return fail("unsupported", "不认识的操作 media")
+        fid = req.get("file_id", "")
+        if fid == "EXPIRED":
+            return fail("expired_media", "文件已过期，微信服务器上取不到了")
+        body = {"WXGF": b"wxgf\x00\x01", "PNG": b"\x89PNG\r\n\x1a\n" + b"\x00" * 8}.get(fid)
+        if body is None:
+            body = {"video": b"\x00\x00\x00\x18ftypmp42", "file": b"%PDF-1.4 fake"}.get(req.get("quality"),
+                                                                                      b"\xff\xd8\xff\xe0fake-jpeg")
+        with open(req["path"], "wb") as f:
+            f.write(body)
+        return ok(bytes=len(body), md5="0" * 32, picture_format=None)
+    if op == "voice":
+        if req.get("silk") and not os.path.isfile(req["silk"]):
+            return fail("input", "语音文件不在")
+        if not req.get("silk") and not req.get("server_id"):
+            return fail("input", "缺少 server_id")
+        with open(req["path"], "wb") as f:
+            f.write(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+        return ok(bytes=16, ms=3000)
     if op == "hello":
         return ok(protocol=int(os.environ.get("FAKE_PROTOCOL", "2")), version="fake")
     if op in ("stop", "logout"):

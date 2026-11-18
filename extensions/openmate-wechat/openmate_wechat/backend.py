@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -32,6 +33,7 @@ from openmate_core.backend import (
     CredentialsExpired,
     LoginDone,
     LoginQR,
+    Media,
     Message,
     OnLink,
     OnMessage,
@@ -39,6 +41,7 @@ from openmate_core.backend import (
     SendRejected,
 )
 
+from . import media as wm
 from .native import Native, NativeError, NativeGone
 
 log = logging.getLogger("openmate.wechat")
@@ -114,7 +117,7 @@ class Store:
             os.chmod(path, 0o600)
         except OSError:
             pass
-        for s in SCHEMA:
+        for s in SCHEMA + wm.SCHEMA:
             self._db.execute(s)
         cols = [r[1] for r in self._db.execute("PRAGMA table_info(messages)").fetchall()]
         if "delivered" not in cols:  # a database from before the column: everything in it was handled
@@ -123,6 +126,12 @@ class Store:
     def close(self) -> None:
         with self._mu:
             self._db.close()
+
+    def db(self, sql: str, args: tuple, fetch: bool) -> List[tuple]:
+        """One statement under the lock (the media worker's table)."""
+        with self._mu:
+            cur = self._db.execute(sql, args)
+            return cur.fetchall() if fetch else []
 
     def get(self, key: str) -> str:
         with self._mu:
@@ -139,7 +148,7 @@ class Store:
 
     def wipe(self) -> None:
         with self._mu:
-            for t in ("messages", "chats", "names"):
+            for t in ("messages", "chats", "names", "media"):
                 self._db.execute("DELETE FROM " + t)
             self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%' "
                              "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%'")
@@ -281,7 +290,7 @@ class WeChatBackend(Backend):
     # counts as 处理完 here, as Feishu's 完成 does; a new message brings it back
     done_marks = True
 
-    def __init__(self, native_path: Any, data_dir: str, ack_text: str = ""):
+    def __init__(self, native_path: Any, data_dir: str, ack_text: str = "", voice_cmd: str = ""):
         """native_path: the program's path, or a callable that returns it (waiting for a download) or raises.
         ack_text: the line put in the chat when a /agent or 自动代答 request is taken (the setting agent_ack_reaction);
         WeChat has no reactions, so the core's "reaction" is this message."""
@@ -306,6 +315,10 @@ class WeChatBackend(Backend):
         self._closed = False
         self._groups_full_at = 0.0  # the last time the contacts' group list was read (this run)
         self._ready_for: Optional[Native] = None  # the program that has the sign-in (restored or just signed in)
+        # pictures, voice notes, videos and files, fetched into data/media (see media.py)
+        self.fetcher = wm.Fetcher(os.path.join(data_dir, "media"), self.store.db, self._media_call, self._media_fetched,
+                                  voice_cmd=voice_cmd)
+        self._pruned_at = 0.0
 
     # ---------------------------------------------------------------- the program
 
@@ -373,6 +386,7 @@ class WeChatBackend(Backend):
 
     def close(self) -> None:
         self._closed = True
+        self.fetcher.close()
         n = self._native
         if n is not None:
             n.close()
@@ -429,6 +443,8 @@ class WeChatBackend(Backend):
         me = str(account.get("id") or "")
         if me and self.store.get("account") not in ("", me):
             self.store.wipe()  # another account: none of the previous one's messages or names
+            shutil.rmtree(self.fetcher.root, ignore_errors=True)  # nor its pictures and files
+            os.makedirs(self.fetcher.root, mode=0o700, exist_ok=True)
         if me:
             self.store.put("account", me)
         self.me, self.me_name = me, str(account.get("name") or me)
@@ -458,6 +474,7 @@ class WeChatBackend(Backend):
             n.unsubscribe(gen)
             raise
         held = False  # a live message the core did not take: the cursor stays where it was, so it comes again
+        self._media_upkeep()
         try:
             while not stop.is_set():
                 if time.time() >= self._groups_check_at:  # while online too, quiet or not: every 6 hours
@@ -501,14 +518,22 @@ class WeChatBackend(Backend):
         """Keep the message; give a live one to the core first (so a history read can't take it before /agent and
         自动代答 see it). False when the core could not take it."""
         mid, chat = str(ev.get("id") or ""), str(ev.get("chat") or "")
+        inline = ev.pop("inline", None)  # a voice note's SILK or a picture's thumbnail: a file, never in the database
         if not mid or not chat:
             return True
+        if not isinstance(ev.get("media"), dict):
+            ev.pop("media", None)
         seen = self.store.seen(mid)
+        if inline and isinstance(ev.get("media"), dict) and seen is None:
+            self.fetcher.keep_inline(mid, ev["media"], str(inline))
         if seen is not None and seen[1]:
             return True  # kept already, and handed over when it was live
         new_group = is_group(chat) and self.store.chat(chat) is None
         try:
-            return self._keep_and_hand_over(ev, seen, on_message)
+            taken = self._keep_and_hand_over(ev, seen, on_message)
+            if taken and isinstance(ev.get("media"), dict):
+                self.fetcher.want(mid, ev["media"])  # once the core has it: the new text reaches it as an update
+            return taken
         finally:
             if new_group:  # made or joined just now: kept by now, its name is read in the background
                 self._refresh_groups(full=False)
@@ -545,11 +570,16 @@ class WeChatBackend(Backend):
             cached = self.store.name(self._name_key(sender, chat))
             name = cached[0] if cached else ""
         text = str(ev.get("text") or "")  # as written: a command or a mark is read from the message itself
+        media: List[Media] = []
+        if isinstance(ev.get("media"), dict):
+            text = wm.render(ev, self.fetcher.state(str(ev.get("id") or "")))
+            media = self._media_list(ev)
         return Message(
             id=str(ev.get("id")), chat_id=chat, position=pos, sender_id=sender, sender_name=name, mine=mine,
             type=str(ev.get("type") or "TEXT"), text=text, at=float(ev.get("at") or 0),
             parent_id=str(ev.get("parent") or ""), at_all=bool(ev.get("at_all")),
             at_me=bool(ev.get("at_me")) and not bool(ev.get("at_all")),  # @me among @everyone is a notice
+            media=media,
         )
 
     # ---------------------------------------------------------------- reads
@@ -814,8 +844,77 @@ class WeChatBackend(Backend):
                     return
             full = nxt == "full"
 
+    # ---------------------------------------------------------------- media (see media.py)
+
+    @staticmethod
+    def _media_list(ev: dict) -> List[Media]:
+        """What the conversation page and the knowledge base may fetch (media(ref)): one per media message."""
+        m = ev["media"]
+        kind = m.get("kind")
+        if kind not in wm.KINDS:
+            return []
+        mid = str(ev.get("id") or "")
+        name = str(m.get("name") or "") if kind == "file" else ""
+        return [Media(kind=kind, ref="wx:" + mid, name=name, size=int(m.get("size") or 0) if kind == "file" else 0,
+                      width=int(m.get("width") or 0), height=int(m.get("height") or 0))]
+
+    def _media_call(self, op: str, timeout: float, **params: Any) -> dict:
+        return self._call(self._link(wait=5.0), op, timeout, **params)
+
+    def _media_fetched(self, mid: str) -> None:
+        """A message's media was fetched (or could not be): the core gets its new text, as history."""
+        got = self.store.message(mid)
+        if got is None or self.on_history is None:
+            return
+        ev, pos = got
+        if not (self.store.seen(mid) or (0, False))[1]:
+            return  # not handed over yet: the hand-over reads the new text itself
+        try:
+            self.on_history([self._message(ev, pos)])
+        except Exception:
+            log.exception("the core did not take a WeChat message's new text")
+
+    def _media_upkeep(self) -> None:
+        """At each connect: fetches left half-done by a restart go on; local copies past their days go (once a day)."""
+        for mid in self.fetcher.pending():
+            got = self.store.message(mid)
+            if got is not None and isinstance(got[0].get("media"), dict):
+                self.fetcher.want(mid, got[0]["media"], force=True)
+        if time.time() - self._pruned_at > 86400:
+            self._pruned_at = time.time()
+            for mid in self.fetcher.prune():
+                self._media_fetched(mid)
+
+    def fetch_media(self, mid: str, again: bool = False, wait: float = 200.0) -> Tuple[dict, Optional[dict], str]:
+        """(the kept event, the fetch state, the message's text) of a message, fetching its media first when that has
+        not been done (or again). BackendError(not_found) for a message not kept here."""
+        got = self.store.message(mid)
+        if got is None:
+            raise BackendError("这里没有这条微信消息：%s" % mid, "not_found")
+        ev, pos = got
+        m = ev.get("media")
+        if isinstance(m, dict) and m.get("kind") in wm.KINDS:
+            st = self.fetcher.state(mid)
+            if st is None or again or st["state"] == "pending":
+                self.fetcher.want(mid, m, force=again or st is None)
+                self.fetcher.wait(mid, wait)
+        return ev, self.fetcher.state(mid), self._message(ev, pos).text
+
     def media(self, ref: str, max_bytes: int) -> Tuple[str, bytes]:
-        raise BackendError("这一版还不能查看微信里的图片和文件", "not_found")
+        """The fetched file of a media message ("wx:<message id>"): the picture (or the video's cover), the voice note
+        as WAV, the file."""
+        if not ref.startswith("wx:"):
+            raise BackendError("没有这个附件", "not_found")
+        ev, st, _ = self.fetch_media(ref[3:], wait=120.0)
+        files = (st or {}).get("files") or {}
+        path = next((files[k] for k in ("image", "cover", "audio", "file", "video") if isinstance(files.get(k), str)), "")
+        if not path or not os.path.isfile(path):
+            raise BackendError((st or {}).get("note") or "这条消息的附件没有下载到", "not_found")
+        size = os.path.getsize(path)
+        if size > max_bytes:
+            raise BackendError("附件超过 %d MB" % (max_bytes >> 20), "too_large")
+        with open(path, "rb") as f:
+            return wm.mime_of(path), f.read()
 
     # ---------------------------------------------------------------- writes
 

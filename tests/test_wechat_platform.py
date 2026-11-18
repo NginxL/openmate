@@ -3,6 +3,7 @@ connector ids, no document search, no /agent progress (WeChat cannot edit a mess
 Also the core fixes made with it: a new account forgets the old one's marked groups, and a group's hourly most holds
 when two @s come at once."""
 
+import json
 import os
 import sys
 import threading
@@ -45,7 +46,12 @@ class WeChatPlatformTest(unittest.TestCase):
         with self.assertRaises(Exception):
             page(h, "chats")  # Feishu's id is not this extension's
         names = [t["name"] for t in h.c("tools.list")["tools"]]
-        self.assertEqual(names, [CID + "_" + n for n in ("status", "chats", "messages", "search", "agent_reply")])
+        self.assertEqual(names, [CID + "_" + n for n in ("status", "chats", "messages", "search", "agent_reply", "media")])
+        media = [t for t in h.c("tools.list")["tools"] if t["name"] == CID + "_media"][0]
+        self.assertEqual(media["input_schema"]["required"], ["message"])
+        with open(os.path.join(ROOT, "extensions", "openmate-wechat", "persona-extension.json"), encoding="utf-8") as f:
+            agent_tools = json.load(f)["contributes"]["connectors"][0]["agent_tools"]
+        self.assertIn(CID + "_media", agent_tools, "the Agent gets it too")
         reply = [t for t in h.c("tools.list")["tools"] if t["name"] == CID + "_agent_reply"][0]
         self.assertNotIn("progress", reply["input_schema"]["properties"], "WeChat cannot edit: no progress")
         self.assertIn("只回复一次最终结果", reply["description"])

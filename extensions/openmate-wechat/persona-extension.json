@@ -45,6 +45,7 @@
           "matewechat_chats",
           "matewechat_messages",
           "matewechat_search",
+          "matewechat_media",
           "matewechat_agent_reply"
         ],
         "confirm_always": [
@@ -201,6 +202,12 @@
         "title": "群聊进知识库",
         "description": "私聊和文件传输助手会进知识库；群聊默认不进（群里其他人没同意被记录）。公众号和服务号从不进。",
         "default": false
+      },
+      "voice_to_text": {
+        "type": "string",
+        "title": "语音转文字命令（可选）",
+        "description": "收到的语音会存成 WAV 文件；填一条本机命令（例如 whisper-cli 的完整路径和参数），扩展把 WAV 文件路径加在最后运行它，它打印出的文字附在语音消息后面。留空表示不转文字。",
+        "maxLength": 1024
       },
       "native_path": {
         "type": "string",

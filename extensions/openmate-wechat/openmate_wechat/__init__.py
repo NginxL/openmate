@@ -52,7 +52,8 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
     inst = Installer(data_dir, str(config.get("native_path") or ""))
     inst.start()  # in the background: the extension answers the hub meanwhile
     # path(wait): waits that long for a download in progress
-    return WeChatBackend(inst.path, data_dir, ack_text=str(config.get("agent_ack_reaction") or ""))
+    return WeChatBackend(inst.path, data_dir, ack_text=str(config.get("agent_ack_reaction") or ""),
+                         voice_cmd=str(config.get("voice_to_text") or ""))
 
 
 def archive_chat(chat_id: str, chat, config: Dict) -> bool:
@@ -67,6 +68,49 @@ def archive_chat(chat_id: str, chat, config: Dict) -> bool:
     # a person's chat: an id that looks like one, unless WeChat said it is an official account (BUSINESS, which
     # kind_of answers for); old chats are classified in the background
     return kind_of(chat_id) == "user"
+
+
+MEDIA_TOOL = CONNECTOR_ID + "_media"
+
+
+def media_tools(app) -> Dict:
+    """matewechat_media: a picture, voice note, video or file of one message, as local files (fetched when not yet)."""
+    schema = {
+        "name": MEDIA_TOOL,
+        "description": "看一条微信消息里的图片、语音、视频或文件：下载到本机（还没下载时），返回本地文件路径（图片可以直接读），"
+                       "语音的转写文字（设置了语音转文字时），视频的封面和截图，下载不了时说明原因。消息 id 来自 matewechat_messages。"
+                       "合并转发的聊天记录在 matewechat_messages 里已经展开成文字。只读，不会发任何消息。",
+        "input_schema": {"type": "object", "properties": {
+            "message": {"type": "string", "description": "消息 id（matewechat_messages 每行的 id=…）"},
+            "again": {"type": "boolean", "description": "重新下载（上次失败了，或本地副本被清理了），默认 false"}},
+            "required": ["message"]},
+    }
+
+    def run(a: Dict) -> str:
+        from openmate_core.wire import RPCError
+
+        mid = str(a.get("message") or "").strip()
+        if not mid:
+            raise RPCError("缺少消息 id")
+        backend = app.backend
+        if backend is None or not app.signed_in or not hasattr(backend, "fetch_media"):
+            raise RPCError("微信还没登录")
+        try:
+            ev, st, text = backend.fetch_media(mid, again=bool(a.get("again")))
+        except BackendError as e:
+            raise RPCError(e.message)
+        m = ev.get("media")
+        if not isinstance(m, dict):
+            kind = str(ev.get("type") or "")
+            if kind in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
+                return "%s\n这条消息是在能下载媒体之前收到的，没有留下下载信息，取不到内容。" % text
+            return "%s\n这条消息没有图片、语音、视频或文件。" % text
+        lines = [text]
+        if st is not None and st.get("state") == "pending":
+            lines.append("还在下载，稍后再查一次。")
+        return "\n".join(lines)
+
+    return {MEDIA_TOOL: (schema, run)}
 
 
 def platform(manifest_path: str = "") -> Platform:
@@ -88,6 +132,7 @@ def platform(manifest_path: str = "") -> Platform:
         archive_chat=archive_chat,
         handle_kind="",  # no sender handles in archive batches (WeChat ids are not a kind the knowledge base knows)
         today_api_callers=("extension:openmate-feishu",),  # Feishu's 今天 shows these chats (its own HTTP)
+        tools=media_tools,
     )
 
 
