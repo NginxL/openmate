@@ -398,12 +398,31 @@ class HistoryToCoreTest(Base):
 
 
 class KindsLaterTest(Base):
+    def test_a_failed_request_raises_and_a_group_member_is_never_asked(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b.store.add_message(msg("dm1", "custom_dm", "custom_dm", "你好"))
+        real = b._call
+
+        def down(n, op, timeout, **kw):
+            if op == "contacts":
+                raise BackendError("微信组件退出了", "unreachable")
+            return real(n, op, timeout, **kw)
+
+        b._call = down
+        with self.assertRaises(BackendError):
+            b.people_kinds(["custom_dm"])  # the archive must not take this as asked
+        self.assertEqual(b.people_kinds(["custom_member"]), {"custom_member": "user"},
+                         "a group member (no direct chat): as its id looks, no request")
+
     def test_people_kinds_asks_wechat_about_undescribed_ids_and_tells_the_core_later(self):
         os.environ["MATEWECHAT_FAKE_BUSINESS"] = "qqtech"
         b = self.backend()
         told = []
         b.on_people_kinds = told.append
         b.restore({"state": {"k": "v1"}})
+        for cid in ("qqtech", "wxid_bob"):
+            b.store.add_message(msg("dm-" + cid, cid, cid, "你好"))  # direct chats: worth asking about
         oim = "25984984210915466@openim"
         self.assertEqual(b.people_kinds(["qqtech", "wxid_bob", oim]), {"qqtech": "bot", "wxid_bob": "user", oim: "user"},
                          "腾讯科技 has a person-like id: WeChat says it is an official account")

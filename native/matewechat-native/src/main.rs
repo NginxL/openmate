@@ -722,6 +722,9 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
     // a WeCom contact (…@openim) is read with its own request, one at a time; the rest two per request
     let (openim, plain): (Vec<String>, Vec<String>) = ids.into_iter().partition(|i| i.ends_with("@openim"));
     let mut found = vec![];
+    // ids whose request failed (network, timeout): unlike an id WeChat answered it cannot show, not asked yet
+    let mut failed: Vec<String> = vec![];
+    let unshown = |e: &str| e.contains("Empty contact identity") || e.contains("Contact has no identity");
     for pair in plain.chunks(2) {
         match lookup_contacts(app, &client, pair) {
             Ok(cs) => found.extend(cs),
@@ -731,11 +734,21 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
                 for one in pair {
                     match lookup_contacts(app, &client, std::slice::from_ref(one)) {
                         Ok(cs) => found.extend(cs),
-                        Err(e) => log(&format!("contact lookup failed for one: {e}")),
+                        Err(e) => {
+                            log(&format!("contact lookup failed for one: {e}"));
+                            if !unshown(&e) {
+                                failed.push(one.clone());
+                            }
+                        }
                     }
                 }
             }
-            Err(e) => log(&format!("contact lookup failed: {e}")),
+            Err(e) => {
+                log(&format!("contact lookup failed: {e}"));
+                if !unshown(&e) {
+                    failed.extend(pair.iter().cloned());
+                }
+            }
         }
     }
     for id in openim {
@@ -754,11 +767,17 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
             }
             Ok(Ok(Ok(_))) => log("WeCom contact lookup answered another id"),
             Ok(Ok(Err(e))) => log(&format!("WeCom contact lookup failed: {e:#}")),
-            Ok(Err(_)) => log("WeCom contact lookup stopped"),
-            Err(_) => log("WeCom contact lookup timed out"),
+            Ok(Err(_)) => {
+                log("WeCom contact lookup stopped");
+                failed.push(id.clone());
+            }
+            Err(_) => {
+                log("WeCom contact lookup timed out");
+                failed.push(id.clone());
+            }
         }
     }
-    Ok(json!({"contacts": found}))
+    Ok(json!({"contacts": found, "failed": failed}))
 }
 
 /// One or two ordinary contacts: their records, or why not.

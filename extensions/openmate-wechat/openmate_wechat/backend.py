@@ -687,15 +687,20 @@ class WeChatBackend(Backend):
         else:
             self.store.set_chat_name(chat_id, "")  # asked now: not again before NAME_RETRY
 
-    def _lookup_names(self, ids: List[str]) -> Dict[str, Tuple[str, str]]:
-        """id → (shown name: remark or nickname, mention name: nickname) from WeChat."""
+    def _lookup_names(self, ids: List[str], strict: bool = False) -> Dict[str, Tuple[str, str]]:
+        """id → (shown name: remark or nickname, mention name: nickname) from WeChat. strict: a request that failed
+        (the program not there, the network) raises instead of answering nothing (an id WeChat cannot show does not)."""
         ids = [i for i in ids if i]  # never ask WeChat about nobody (a system line has no sender)
         if not ids:
             return {}
         try:
             r = self._call(self._link(), "contacts", 20, ids=ids[:40])
         except BackendError:
+            if strict:
+                raise
             return {}
+        if strict and any(i in ids for i in r.get("failed") or []):
+            raise BackendError("没能向微信查到这个联系人，稍后再试", "unreachable")
         out = {}
         learnt: Dict[str, str] = {}
         for c in r.get("contacts") or []:
@@ -822,12 +827,16 @@ class WeChatBackend(Backend):
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         # a person-like id WeChat has not described yet may be an official account with an id of its own choosing
         # (腾讯科技 is qqtech): ask WeChat first, a few at a time; the rest are told later through on_people_kinds
+        # only the ones with a direct chat here: an official account never joins a group, so a group member is
+        # answered as its id looks, with no request (自动代答 never waits on one, nor fails with it)
         ask = [u for u in dict.fromkeys(user_ids) if u and kind_of(u) == "user" and u not in PERSONS
-               and u not in BUSINESS and not u.endswith(SURE_PEOPLE)][:KINDS_LOOKUP_MOST]
+               and u not in BUSINESS and not u.endswith(SURE_PEOPLE) and self.store.chat(u) is not None
+               ][:KINDS_LOOKUP_MOST]
         for i in range(0, len(ask), 2):
             if self._closed:
                 break
-            self._lookup_names(ask[i:i + 2])
+            # a failed request raises: the caller asks again later (an id WeChat cannot show is answered as it looks)
+            self._lookup_names(ask[i:i + 2], strict=True)
         out = {}
         for uid in user_ids:
             k = kind_of(uid)
