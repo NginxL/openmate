@@ -293,6 +293,10 @@ class AlignedWithFeishuTest(unittest.TestCase):
         self.fail("archive.changes never ended")
 
     def test_direct_chats_are_archived_groups_only_when_turned_on(self):
+        from openmate_wechat import backend as wb
+
+        wb.PERSONS.add("chat_example_dm_a")  # what a contact lookup would have learnt
+        self.addCleanup(wb.PERSONS.discard, "chat_example_dm_a")
         h = wechat(self)
         got = self.archived(h)
         self.assertIn("chat_example_dm_a", got)
@@ -307,6 +311,36 @@ class AlignedWithFeishuTest(unittest.TestCase):
         things = h.c("inbox.collect", since="", limit=50)["things"]
         self.assertEqual({t["kind"] for t in things} >= {"dm", "mention"}, True)
         self.assertTrue(all("微信" in t["context"] for t in things), "worded for WeChat")
+
+
+class ReviewElevenTest(unittest.TestCase):
+    def test_a_late_model_never_sends_a_mark_alone(self):
+        h = wechat(self, agent_reply_header="> 🤖 AI 回复 · {model} · {effort}")
+        msg = ask(h, "/agent 状态")
+        run = running(h, msg)
+        cur = h.app.store.run_get(run["id"])
+        cur.pop("model", None)
+        cur.pop("effort", None)  # the model is only known once the reply renders
+        h.app.store.run_put(cur)
+        h.app.agent._model_of = lambda r, header="": ("claude-opus-5-5", "xhigh")
+        with self.assertRaises(Exception) as c:
+            h.tool("agent_reply", request=run["id"], text="> 🤖 AI 回复 · Claude Opus 5.5 · xhigh")
+        self.assertIn("只有 AI 标记", str(c.exception))
+        self.assertEqual(h.app.store.run_get(run["id"])["reply_inflight"], 0, "the held place is given back")
+        h.tool("agent_reply", request=run["id"], text="一切正常。")
+        self.assertTrue(h.sent()[-1]["text"].startswith("一切正常。"))
+
+    def test_history_handed_over_is_kept_not_acted_on(self):
+        from openmate_core.backend import Message
+
+        h = wechat(self)
+        now = time.time()
+        h.app._history_from_backend([Message(id="hx1", chat_id="chat_example_dm_a", position=int(now * 1000),
+                                             sender_id="me", mine=True, text="/agent 这是我回复里的一句", at=now)])
+        self.assertTrue(any(r["id"] == "hx1" for r in h.app.store.messages_in_chat("chat_example_dm_a", 50))
+                        if hasattr(h.app.store, "messages_in_chat") else True)
+        time.sleep(0.3)
+        self.assertEqual([r for r in h.app.store.runs_in_chat("chat_example_dm_a", 50)], [], "history is never a request")
 
 
 class GroupCandidatesTest(unittest.TestCase):

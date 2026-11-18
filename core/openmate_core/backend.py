@@ -183,6 +183,9 @@ class Backend(abc.ABC):
     #: called. For a service that must not use rotated credentials before they are stored (WeChat); on_credentials
     #: stays the fire-and-forget form.
     on_credentials_sync: Optional[Callable[[Dict], bool]] = None
+    #: Set by the core: hand it messages to keep as history (from the listener's or a sender's thread): caught up
+    #: after a reconnect, or the account's own sends the service never echoes back. Never acted on (/agent, 代答).
+    on_history: Optional[Callable[[List["Message"]], None]] = None
 
     #: Set by the core: call it with a DocMention when the live link hears the user was @-mentioned in a document's
     #: comment (from the listener's own thread; it returns at once).

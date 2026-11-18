@@ -679,7 +679,15 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
         match r {
             Ok(Ok(lookup)) => {
                 for c in lookup.contacts {
-                    found.push(json!({"id": c.username, "nickname": c.nickname, "remark": c.remark, "alias": c.alias}));
+                    // field 24 of the contact is its verify flag: bit 8 marks a verified official / service account
+                    let flag = wechat_protocol::protobuf::decode(&c.raw)
+                        .ok()
+                        .and_then(|f| match wechat_protocol::protobuf::optional(&f, 24) {
+                            Ok(Some(wechat_protocol::protobuf::Value::Varint(v))) => Some(*v),
+                            _ => None,
+                        });
+                    found.push(json!({"id": c.username, "nickname": c.nickname, "remark": c.remark, "alias": c.alias,
+                                      "verify_flag": flag, "business": flag.is_some_and(|v| v & 8 != 0)}));
                 }
             }
             Ok(Err(e)) => log(&format!("contact lookup failed: {e:#}")),

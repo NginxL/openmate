@@ -58,13 +58,14 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
 def archive_chat(chat_id: str, chat, config: Dict) -> bool:
     """What goes to the knowledge base: direct chats and the user's own notes (文件传输助手); groups only with the setting
     群聊进知识库 (the others in them did not agree to be recorded); never official accounts or WeChat's own."""
-    from .backend import is_group, kind_of
+    from .backend import PERSONS, is_group, kind_of
 
     if is_group(chat_id) or (chat or {}).get("kind") == "group":
         return bool(config.get("archive_groups"))
     if chat_id == "filehelper":
         return True
-    return kind_of(chat_id) == "user"
+    # a person as WeChat described them (a verified service account with a plain id is not); not known yet: out
+    return kind_of(chat_id) == "user" and chat_id in PERSONS
 
 
 def platform(manifest_path: str = "") -> Platform:

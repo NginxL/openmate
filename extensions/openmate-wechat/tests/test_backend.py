@@ -328,6 +328,39 @@ class AckTest(Base):
         self.assertEqual(self.requests("send"), [])
 
 
+class HistoryToCoreTest(Base):
+    def test_caught_up_and_own_sends_reach_the_core_as_history(self):
+        b = self.backend([msg("c9", "wxid_new", "wxid_new", "断线时发的", origin="catchup"), {"sleep": 0.3}])
+        kept = []
+        b.on_history = kept.extend
+        b.restore({"state": {"k": "v1"}})
+        got, _, _ = self.listen(b, lambda g, l, e: kept)
+        self.assertEqual(got, [], "never live")
+        self.assertEqual([m.id for m in kept], ["c9"])
+        b.store.add_message(msg("q5", "1@chatroom", "wxid_bob", "@我 问", at_me=True))
+        mid = b.send("1@chatroom", "答", reply_to="q5")
+        deadline = time.time() + 3
+        while time.time() < deadline and len(kept) < 2:
+            time.sleep(0.05)
+        own = kept[-1]
+        self.assertEqual((own.id, own.mine, own.text, own.parent_id), (mid, True, "@群里的鲍勃\u2005答", "q5"))
+
+    def test_kinds_learnt_from_wechat(self):
+        os.environ["FAKE_BUSINESS"] = "cmb4008205555"
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b._lookup_names(["cmb4008205555", "wxid_bob"])
+        self.assertEqual(wb.kind_of("cmb4008205555"), "bot")
+        import openmate_wechat
+
+        self.assertFalse(openmate_wechat.archive_chat("cmb4008205555", None, {}), "a verified service account")
+        self.assertTrue(openmate_wechat.archive_chat("wxid_bob", None, {}))
+        self.assertFalse(openmate_wechat.archive_chat("wxid_unknown", None, {}), "not known yet: out")
+        self.assertTrue(wb.is_group("123@im.chatroom") and wb.is_group("9@qy_g"))
+        with self.assertRaises(BackendError):
+            b.create_chat("9@qy_g")
+
+
 class ReadTest(Base):
     def test_a_chat_read_on_the_phone_after_the_last_message_is_done(self):
         now = int(time.time())
@@ -415,7 +448,8 @@ class GroupsTest(Base):
         b = self.backend([ev])
         b.restore({"state": {"k": "v1"}})
         got, _, _ = self.listen(b, lambda g, l, e: g)
-        self.assertEqual(got[0].text, "@我 请确认是谁负责这个？\n「引用 小李：需求负责人是郑元」")
+        self.assertEqual(got[0].text, "@我 请确认是谁负责这个？", "the message as written (commands, marks)")
+        self.assertEqual(got[0].parent_id, "77")
 
     def test_no_lookup_for_an_empty_id(self):
         b = self.backend()

@@ -1038,6 +1038,15 @@ class AgentRunner:
             cur["state"] = "done"
             self.store.run_put(cur)
         self._end_reaction(run_id, "done")
+        if post is not None and cur.get("kind") not in QUIET_KINDS:
+            header = self.header
+            me = self._model_of(cur, header) if header else ("", "")
+            if not self._clean_answer(post, cur, me).strip():  # only a mark with the real model: nothing to post
+                post = None
+                with self._lock(run_id):
+                    cur = self.store.run_get(run_id)
+                    cur["fallback"] = "failed"  # nothing in the journal: a late answer may still go out
+                    self.store.run_put(cur)
         if post is not None:
             mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, reply_to=cur["request_id"],
                                   root=cur["root_id"] or cur["request_id"])
@@ -1145,11 +1154,11 @@ class AgentRunner:
             t = t.rsplit("\n", 1)[0].rstrip() if "\n" in t else ""
         return t
 
-    def with_suffix(self, text: str, run: Optional[dict] = None) -> str:
+    def with_suffix(self, text: str, run: Optional[dict] = None, model_effort: Optional[tuple] = None) -> str:
         """The message as it goes out: the AI mark line (the model and effort that answered) after the answer, or on
         top with agent_mark_position "top"; the end mark if one is set. A mark the Agent wrote itself is not doubled."""
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
-        me = self._model_of(run, header) if header else ("", "")  # asked once: the cleaning and the mark agree
+        me = model_effort if model_effort is not None else (self._model_of(run, header) if header else ("", ""))
         t = self._clean_answer(text, run, me)
         if header:
             line = fill_header(header, *me)
@@ -1249,7 +1258,16 @@ class AgentRunner:
                 raise RPCError("%s只回复一次，这条已经回复过了（或者结果还不确定），不要再发" % self.app.platform.name)
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
-        body = self.with_suffix(text, cur)
+        # the place is held; the model is read once, and the answer is cleaned and marked with the same reading
+        header = self.auto_header if cur.get("kind") in QUIET_KINDS else self.header
+        me = self._model_of(cur, header) if header else ("", "")
+        if not self._clean_answer(text, cur, me).strip():
+            with self._lock(run["id"]):
+                cur = self.store.run_get(run["id"])
+                cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
+                self.store.run_put(cur)
+            raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
+        body = self.with_suffix(text, cur, me)
         self._remember_post(body)
         sent_id = ""
         try:

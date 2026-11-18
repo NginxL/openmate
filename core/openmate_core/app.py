@@ -219,6 +219,7 @@ class ConnectorApp:
                 self.backend = self._make_backend(self.config, self.data_dir)
                 self.backend.on_credentials = self._credentials_rotated
                 self.backend.on_credentials_sync = self._credentials_rotated_now
+                self.backend.on_history = self._history_from_backend
                 self.backend.on_doc_mention = self._doc_mention
                 self.backend.on_chats_done = self._chats_done
                 self.backend.on_reacted = self._reacted
@@ -317,6 +318,14 @@ class ConnectorApp:
                 log.warning("saving refreshed credentials failed (%s)", e.code or "error")
 
         threading.Thread(target=run, name="openmate-creds", daemon=True).start()
+
+    def _history_from_backend(self, msgs: list) -> None:
+        """Messages the adapter hands over as history: kept like a catch-up read, never acted on."""
+        try:
+            self.ingest(list(msgs), live=False)
+        except Exception:
+            if not self.closing.is_set():
+                log.exception("the adapter's history could not be kept")
 
     def _credentials_rotated_now(self, creds: dict) -> bool:
         """Seal rotated credentials before the adapter uses them: in the caller's thread, one at a time."""

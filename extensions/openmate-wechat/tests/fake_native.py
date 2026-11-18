@@ -87,8 +87,10 @@ def answer(req):
     if op == "contacts":
         if any(not i for i in req.get("ids", [])):
             return fail("input", "Empty contact identity")
+        biz = set(os.environ.get("FAKE_BUSINESS", "").split(","))
         return ok(contacts=[{"id": i, "nickname": ("群" + i.split("@")[0]) if i.endswith("@chatroom") else "昵称" + i[-1],
-                             "remark": ("备注" + i[-1]) if i == "wxid_bob" else None}
+                             "remark": ("备注" + i[-1]) if i == "wxid_bob" else None,
+                             "verify_flag": 8 if i in biz else 0, "business": i in biz}
                             for i in req.get("ids", [])])
     if op == "room":
         if not isinstance(req.get("room_id"), str):

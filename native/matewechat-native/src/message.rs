@@ -42,8 +42,10 @@ pub struct Quotable {
     pub msgsource: Option<String>,
 }
 
+/// A group: an ordinary one (…@chatroom), a WeCom interop one (…@im.chatroom) or a WeCom group (…@qy_g),
+/// as agent-wechat's daemon classifies them.
 pub fn is_group(chat: &str) -> bool {
-    chat.ends_with("@chatroom")
+    chat.contains("@chatroom") || chat.ends_with("@im.chatroom") || chat.ends_with("@qy_g")
 }
 
 /// The @-list of a message's own msgsource.
@@ -355,6 +357,12 @@ mod tests {
         let (e, _) = normalize(&raw("wxid_bob", "wxid_bob", false, 3, "<msg/>", None), "wxid_me", "live");
         assert_eq!(e["type"], "IMAGE");
         assert_eq!(e["text"], "[图片]");
+    }
+
+    #[test]
+    fn group_ids() {
+        assert!(is_group("1@chatroom") && is_group("2@im.chatroom") && is_group("3@qy_g"));
+        assert!(!is_group("wxid_bob") && !is_group("x@openim"));
     }
 
     #[test]

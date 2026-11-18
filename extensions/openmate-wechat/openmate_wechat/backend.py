@@ -73,7 +73,14 @@ SCHEMA = (
 
 
 def is_group(chat_id: str) -> bool:
-    return chat_id.endswith("@chatroom")
+    """An ordinary group (…@chatroom), a WeCom interop group (…@im.chatroom) or a WeCom group (…@qy_g)."""
+    return "@chatroom" in chat_id or chat_id.endswith(("@im.chatroom", "@qy_g"))
+
+
+# What WeChat said about a contact when its name was read: a verified official / service account, or a person.
+# One backend per program, so the platform's archive rule (openmate_wechat.archive_chat) reads them here.
+BUSINESS: set = set()
+PERSONS: set = set()
 
 
 def kind_of(user_id: str) -> str:
@@ -81,9 +88,9 @@ def kind_of(user_id: str) -> str:
     signed in to (an account someone automates still is one, as ours is; the core's AI marks and limits cover that)."""
     if not user_id:
         return ""
-    if user_id in SERVICE_IDS or user_id.startswith("gh_") or user_id.endswith(SERVICE_SUFFIXES):
+    if user_id in SERVICE_IDS or user_id.startswith("gh_") or user_id.endswith(SERVICE_SUFFIXES) or user_id in BUSINESS:
         return "bot"
-    if user_id.endswith("@chatroom"):
+    if is_group(user_id):
         return ""
     if user_id.endswith("@openim"):  # a WeCom member in a WeChat group: a person's work account
         return "user"
@@ -116,6 +123,10 @@ class Store:
             row = self._db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return row[0] if row else ""
 
+    def keys(self, prefix: str) -> List[str]:
+        with self._mu:
+            return [r[0] for r in self._db.execute("SELECT key FROM kv WHERE key LIKE ?", (prefix + "%",)).fetchall()]
+
     def put(self, key: str, value: str) -> None:
         with self._mu:
             self._db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, value))
@@ -125,7 +136,9 @@ class Store:
             for t in ("messages", "chats", "names"):
                 self._db.execute("DELETE FROM " + t)
             self._db.execute("DELETE FROM kv WHERE key IN ('cursor', 'groups_at') OR key LIKE 'acked:%' "
-                             "OR key LIKE 'read:%'")
+                             "OR key LIKE 'read:%' OR key LIKE 'biz:%' OR key LIKE 'person:%'")
+        BUSINESS.clear()
+        PERSONS.clear()
 
     def seen(self, mid: str) -> Optional[Tuple[int, bool]]:
         """(position, delivered) of a kept message, None when new."""
@@ -264,6 +277,8 @@ class WeChatBackend(Backend):
         os.makedirs(data_dir, exist_ok=True)
         self.store = Store(os.path.join(data_dir, "wechat.db"))
         self._native: Optional[Native] = None
+        BUSINESS.update(k[4:] for k in self.store.keys("biz:"))
+        PERSONS.update(k[7:] for k in self.store.keys("person:"))
         self._mu = threading.RLock()
         self._state: Optional[dict] = None  # the sign-in, as last sealed (to restore a restarted program)
         self._device: Optional[dict] = None  # the device of the sign-in in progress (memory only)
@@ -428,14 +443,14 @@ class WeChatBackend(Backend):
         held = False  # a live message the core did not take: the cursor stays where it was, so it comes again
         try:
             while not stop.is_set():
+                if time.time() >= self._groups_check_at:  # while online too, quiet or not: every 6 hours
+                    self._groups_check_at = time.time() + GROUPS_CHECK_EVERY
+                    if self.me and self._groups_stale():
+                        self._refresh_groups(full=True)
                 try:
                     ev = events.get(timeout=1.0)
                 except Exception:
                     continue
-                if time.time() >= self._groups_check_at:  # while online too: the contacts' groups every 6 hours
-                    self._groups_check_at = time.time() + GROUPS_CHECK_EVERY
-                    if self.me and self._groups_stale():
-                        self._refresh_groups(full=True)
                 if ev is None:
                     raise BackendError("微信组件退出了，正在重新连接", "unreachable")
                 if ev.get("gen") != gen:
@@ -484,7 +499,14 @@ class WeChatBackend(Backend):
     def _keep_and_hand_over(self, ev: dict, seen, on_message: OnMessage) -> bool:
         mid, chat = str(ev.get("id") or ""), str(ev.get("chat") or "")
         if seen is None and ev.get("origin") != "live":
-            self.store.add_message(ev)  # caught up after a reconnect, or our own send's echo: history only
+            # caught up after a reconnect, or our own send's echo: history only, to the core too (a chat new while
+            # the link was down reaches the inbox), never acted on
+            new, pos = self.store.add_message(ev)
+            if new and self.on_history is not None:
+                try:
+                    self.on_history([self._message(ev, pos)])
+                except Exception:
+                    log.exception("the core did not keep a caught-up WeChat message")
             return True
         # live now, or live once and the core did not take it then (the core's freshness rule still applies)
         # kept first (not yet handed over: history() leaves it out), so a reply right away finds what it quotes
@@ -505,11 +527,7 @@ class WeChatBackend(Backend):
         if not mine and sender:
             cached = self.store.name(self._name_key(sender, chat))
             name = cached[0] if cached else ""
-        text = str(ev.get("text") or "")
-        quoted = str(ev.get("quoted_text") or "").strip()
-        if ev.get("parent") and quoted:  # what a quote points at, for whoever reads this (a guest has no history)
-            who = str(ev.get("quoted_sender") or "").strip() or "某人"
-            text = "%s\n「引用 %s：%s」" % (text, who, quoted[:300])
+        text = str(ev.get("text") or "")  # as written: a command or a mark is read from the message itself
         return Message(
             id=str(ev.get("id")), chat_id=chat, position=pos, sender_id=sender, sender_name=name, mine=mine,
             type=str(ev.get("type") or "TEXT"), text=text, at=float(ev.get("at") or 0),
@@ -572,6 +590,12 @@ class WeChatBackend(Backend):
             out[cid] = (str(c.get("remark") or "") or nick, nick)
             if cid and not is_group(cid):
                 self.store.set_name(self._name_key(cid, ""), out[cid][0], nick)
+                if c.get("business"):
+                    BUSINESS.add(cid)
+                    self.store.put("biz:" + cid, "1")
+                elif c.get("verify_flag") is not None or c.get("business") is False:
+                    PERSONS.add(cid)
+                    self.store.put("person:" + cid, "1")
         return out
 
     def _roster(self, chat_id: str) -> Tuple[List[dict], int]:
@@ -717,9 +741,7 @@ class WeChatBackend(Backend):
                         return
                     pair = pending[i:i + 2]
                     found = self._lookup_names(pair)
-                    if not found:
-                        break  # WeChat did not answer now: the rest stays to read later, nothing marked
-                    for gid in pair:
+                    for gid in pair:  # one WeChat would not name is tried again after NAME_TTL, the rest go on
                         self.store.set_chat_name(gid, found.get(gid, ("", ""))[0])
                     time.sleep(GROUP_NAME_PAUSE)  # gently: a person's account reading its own groups
             except BackendError as e:
@@ -789,10 +811,35 @@ class WeChatBackend(Backend):
             raise SendRejected("没有发送：%s" % e.message)  # refused before anything was transmitted
         status = r.get("status")
         if status == "sent":
-            return str(r.get("message_id") or "")
+            mid = str(r.get("message_id") or "")
+            self._keep_own_send(chat_id, mid, text, params)
+            return mid
         if status in ("rejected", "not_sent"):
             raise SendRejected(str(r.get("message") or "微信没有接受这条消息"))
         raise BackendError("发送结果不确定：%s；不会自动重发" % (r.get("message") or "微信没有确认"), "unknown")
+
+    def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any]) -> None:
+        """WeChat does not echo this device's sends back: keep the sent message, and give it to the core as history
+        (the inbox sees the reply, the conversation page and the knowledge base have it). Never acted on."""
+        if not mid:
+            return
+        names = [m.get("name") for m in params.get("mentions") or [] if m.get("name")]
+        shown = "".join("@%s\u2005" % n for n in names) + text
+        ev = {"event": "message", "origin": "local_send", "id": mid, "chat": chat_id, "group": is_group(chat_id),
+              "sender": self.me, "mine": True, "type": "TEXT", "text": shown, "at": int(time.time()),
+              "parent": str((params.get("quote") or {}).get("server_id") or "")}
+        new, pos = self.store.add_message(ev)
+        if new and self.on_history is not None:
+            msg = self._message(ev, pos)
+            threading.Thread(target=self._history_to_core, args=([msg],), name="matewechat-own-send",
+                             daemon=True).start()
+
+    def _history_to_core(self, msgs: List[Message]) -> None:
+        try:
+            if self.on_history is not None:
+                self.on_history(msgs)
+        except Exception:
+            log.exception("the core did not keep a sent WeChat message")
 
     def create_chat(self, user_id: str) -> str:
         if not user_id or is_group(user_id):
