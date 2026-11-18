@@ -705,8 +705,12 @@ class AgentRunner:
             "我在%s里发了一条 /agent 请求，请你替我处理。" % p,
             "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份发到这个话题里，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run)),
             "- 回复以我的名义发出：只写已经做完的事和查到的事实；还没做的写成建议，不要替我答应任何事。",
+        ] + ([
             "- 中途进度：调用 %s_agent_reply 时加 progress=true，它会原地更新同一条进度消息，不会刷屏；只发有意义的进展。" % c,
             "- 最终结果：不要带 progress，它会作为一条新回复发出并提醒我，之前那条进度消息会标成已完成。",
+        ] if self._can_edit() else [
+            "- 只回复一次最终结果：%s不能编辑消息，中途进度不要发（会以我的身份在群里刷屏）。" % p,
+        ]) + [
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
             "- 下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c),
         ])
@@ -1126,6 +1130,8 @@ class AgentRunner:
         if not text.strip():
             raise RPCError("回复内容是空的")
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message
+            if not self._can_edit():  # every update would be one more message in the chat, as the user
+                return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
             return self._progress(run, text)
         key = "agent:%s:%s" % (run["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
         with self._lock(run["id"]):
@@ -1164,6 +1170,9 @@ class AgentRunner:
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
         return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
+
+    def _can_edit(self) -> bool:
+        return bool(getattr(self.app.platform, "can_edit", True))
 
     def _progress(self, run: dict, text: str) -> str:
         """A progress update: the run's one progress message, sent the first time and edited in place after (a new one

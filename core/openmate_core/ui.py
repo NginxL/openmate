@@ -518,7 +518,10 @@ class UI:
 
     def __init__(self, app, extra: Optional[Callable[[Any], Dict[str, Page]]] = None):
         self.app = app
-        self.pages: Dict[str, Page] = {CHATS_PAGE: ChatsPage(app), CHATS_CARD: ChatsPage(app, card=True)}
+        plat = getattr(app, "platform", None)
+        self.chats_page = getattr(plat, "chats_page", "") or CHATS_PAGE
+        self.chats_card = getattr(plat, "chats_card", "") or CHATS_CARD
+        self.pages: Dict[str, Page] = {self.chats_page: ChatsPage(app), self.chats_card: ChatsPage(app, card=True)}
         if extra is not None:
             try:
                 self.pages.update(extra(app) or {})
@@ -591,7 +594,7 @@ class UI:
             if text == self._badge:
                 return
             self._badge = text
-        params = {"contribution": CHATS_PAGE, "text": text}
+        params = {"contribution": self.chats_page, "text": text}
         if text:
             params["tone"] = "caution"
         app.peer.notify("ui.badge", params)

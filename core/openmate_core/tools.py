@@ -31,7 +31,7 @@ def _obj(props: Dict[str, Any], required: Optional[List[str]] = None) -> dict:
 
 def read_tools(app) -> List[dict]:
     c, p = app.cid, app.platform.name
-    return [
+    tools = [
         {"name": c + "_status", "description": "%s连接器的状态：是否登录、实时连接是否正常、最近收到消息的时间、本地记录了多少会话。" % p,
          "input_schema": _obj({})},
         {"name": c + "_chats", "description": "最近活跃的%s会话（私聊和群），按最近消息排序，带会话 id、类型和还没回的消息数。可以按名字过滤。" % p,
@@ -49,15 +49,36 @@ def read_tools(app) -> List[dict]:
         {"name": c + "_search", "description": "在%s里搜人和群，返回用户 id（给 %s_send_dm）或群的会话 id（给 %s_send、%s_messages）。" % (p, c, c, c),
          "input_schema": _obj({"query": {"type": "string", "description": "名字或关键词"},
                                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最多几个，默认 20"}}, ["query"])},
-        {"name": c + "_docs", "description": "通过管理端的 lark-cli 只读集成搜%s文档（标题、链接、摘要）。管理端没开启这个集成时会说明。" % p,
-         "input_schema": _obj({"query": {"type": "string", "description": "关键词"},
-                               "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多几个，默认 10"}}, ["query"])},
-        {"name": c + "_agent_reply", "description": "只给 /agent 用：把处理结果以我的身份回复到发出 /agent 的那个%s话题。request 必须是这次请求给出的 id；可以多次调用发进度，不要编造没做到的事。" % p,
-         "input_schema": _obj({"request": {"type": "string", "description": "这次 /agent 请求的 id（请求说明里给出）"},
-                               "text": {"type": "string", "description": "要回复的内容（纯文本）"},
-                               "progress": {"type": "boolean", "description": "true 表示这是中途进度：原地更新同一条进度消息，不另发新消息。最终结果不要带它"}},
-                              ["request", "text"])},
-    ] + [schema for schema, _ in _page_tools(app).values()]
+        _agent_reply_tool(app, c, p),
+    ]
+    if _has_docs(app):  # Feishu's place for it: before the /agent reply
+        tools.insert(4, _DOCS_TOOL(c, p))
+    return tools + [schema for schema, _ in _page_tools(app).values()]
+
+
+def _agent_reply_tool(app, c: str, p: str) -> dict:
+    """The /agent reply tool; progress (edited in place) only where the service can edit a message."""
+    props = {"request": {"type": "string", "description": "这次 /agent 请求的 id（请求说明里给出）"},
+             "text": {"type": "string", "description": "要回复的内容（纯文本）"}}
+    if getattr(app.platform, "can_edit", True):
+        props["progress"] = {"type": "boolean", "description": "true 表示这是中途进度：原地更新同一条进度消息，不另发新消息。最终结果不要带它"}
+        what = "可以多次调用发进度，不要编造没做到的事。"
+    else:
+        what = "只回复一次最终结果（%s不能编辑消息，进度不发），不要编造没做到的事。" % p
+    return {"name": c + "_agent_reply",
+            "description": "只给 /agent 用：把处理结果以我的身份回复到发出 /agent 的那个%s话题。request 必须是这次请求给出的 id；" % p + what,
+            "input_schema": _obj(props, ["request", "text"])}
+
+
+def _has_docs(app) -> bool:
+    """Only a platform with documents (doc_hosts: Feishu's) offers the lark-cli document search."""
+    return bool(getattr(app.platform, "doc_hosts", ()))
+
+
+def _DOCS_TOOL(c: str, p: str) -> dict:  # noqa: N802
+    return {"name": c + "_docs", "description": "通过管理端的 lark-cli 只读集成搜%s文档（标题、链接、摘要）。管理端没开启这个集成时会说明。" % p,
+            "input_schema": _obj({"query": {"type": "string", "description": "关键词"},
+                                  "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多几个，默认 10"}}, ["query"])}
 
 
 def _page_tools(app) -> dict:
@@ -125,7 +146,7 @@ def call_tool(app, params: dict) -> dict:
         c + "_chats": _chats,
         c + "_messages": _messages,
         c + "_search": _search,
-        c + "_docs": _docs,
+        c + "_docs": _docs if _has_docs(app) else None,
         c + "_agent_reply": _agent_reply,
     }.get(name)
     if fn is not None:
