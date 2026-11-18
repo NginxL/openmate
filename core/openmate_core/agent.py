@@ -132,6 +132,9 @@ def model_label(model: str) -> str:
     return out + (" 1M" if one_m else "")
 
 
+_BUILTIN_MARK = re.compile("^(?:%s)(?:$|\\s|·)" % "|".join(re.escape(m) for m in AI_MARKS[:2]))
+
+
 def fill_header(template: str, model: str, effort: str) -> str:
     """The header with what is known; a part left empty takes its " · " with it."""
     return fill_header_raw(template, model_label(model), (effort or "").strip())
@@ -302,15 +305,16 @@ class AgentRunner:
         for h in (self.header, self.auto_header):
             for m, e in (("\x01", "\x02"), ("\x01", ""), ("", "\x02"), ("", "")):
                 line = fill_header_raw(h or "", m, e).lstrip("> ").strip()
-                if not line.replace("\x01", "").replace("\x02", "").strip(" ·"):
-                    continue  # nothing fixed to recognise it by
+                if not re.sub(r"[\W_]", "", line.replace("\x01", "").replace("\x02", "")):
+                    continue  # nothing but punctuation fixed: it would take any "a：b" line for a mark
                 out.append(re.compile(re.escape(line).replace("\x01", ".+?").replace("\x02", ".+?")))
         return out
 
     def _is_mark_line(self, line: str) -> bool:
-        """WeChat: a line that is an AI mark (a built-in one, or a whole configured header)."""
+        """WeChat: a line that is an AI mark (a built-in one as a word: "🤖 AI 代答功能…" is text; or a whole
+        configured header)."""
         line = line.lstrip("> ").strip()
-        return any(line.startswith(m) for m in AI_MARKS[:2]) or any(p.fullmatch(line) for p in self._header_patterns())
+        return bool(_BUILTIN_MARK.match(line)) or any(p.fullmatch(line) for p in self._header_patterns())
 
     def is_agent_text(self, text: str) -> bool:
         t = (text or "").rstrip()
@@ -422,7 +426,10 @@ class AgentRunner:
             if why:
                 log.info("自动代答: not answered (%s); left for the user", why)
                 return
-            run = self._new_run(row, strip_leading_mentions(self._mark_view(text)).strip(), now)
+            view = getattr(self.app.platform, "mark_view", None)
+            # the question as asked: WeChat drops only the real @s (a typed "@x" is part of it)
+            asked = view(text) if view is not None else strip_leading_mentions(text)
+            run = self._new_run(row, asked.strip(), now)
             run["kind"] = "auto"
             run["asker"] = row.get("sender_name") or ""
             self.store.run_put(run)

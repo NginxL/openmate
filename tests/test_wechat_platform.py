@@ -185,6 +185,20 @@ class MarksAndMentionsTest(unittest.TestCase):
         self.assertFalse(a.is_agent_text("请给我一个回复"))
         self.assertFalse(a.is_agent_text("/agent 请总结上一条回复"))
 
+    def test_punctuation_only_templates_and_builtin_words(self):
+        h = wechat(self, agent_reply_header="> {model}：{effort}", agent_mark_position="end")
+        msg = ask(h, "/agent 结论")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="结论：暂缓发布。\n🤖 AI 代答功能仍不允许上线。")
+        sent = h.sent()[-1]["text"]
+        self.assertTrue(sent.startswith("结论：暂缓发布。\n🤖 AI 代答功能仍不允许上线。"), sent)
+
+    def test_a_question_keeps_its_typed_ats(self):
+        h = wechat(self)
+        h.app.store.autoreply_set(TEAM, True)
+        m = h.world.push(TEAM, "user_example_b", "@示例用户\u2005@openmate 和 @openmate_dev 哪个是官方的？", at_me=True)
+        self.assertEqual(running(h, m)["request_text"], "@openmate 和 @openmate_dev 哪个是官方的？")
+
     def test_an_answers_own_bracket_lines_are_kept(self):
         h = wechat(self, agent_reply_header="【{model} 代答】", agent_mark_position="end")
         msg = ask(h, "/agent 能发布吗")

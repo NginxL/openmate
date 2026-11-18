@@ -21,13 +21,21 @@ EXTENSION_ID = "openmate-wechat"
 CONNECTOR_ID = "matewechat"
 CHATS_PAGE = "wechat-chats"
 CHATS_CARD = "wechat-chats-today"
-# WeChat's real @s: "@name" ended by U+2005 (a name never spans another "@", so a typed "@x …" before them stays)
-AT_PREFIX = re.compile("^(?:\\s*@[^\u2005\\n@]{1,1024}\u2005)+")
+# One of WeChat's real @s: "@name" ended by U+2005. A name may hold "@" (Alice@Acme) but never a space before an "@":
+# that is a typed "@x …" before it, which stays.
+AT_ONE = re.compile("^\\s*@([^\u2005\\n]{1,1024}?)\u2005")
+TYPED_AT = re.compile("\\s@")
 
 
 def mark_view(text: str) -> str:
-    """The text without the real @s it starts with: where a reply's AI mark is found (the message keeps them)."""
-    return AT_PREFIX.sub("", text or "", count=1)
+    """The text without the real @s it starts with: where a reply's AI mark is found and a request is read (the
+    message keeps them)."""
+    t = text or ""
+    while True:
+        m = AT_ONE.match(t)
+        if m is None or TYPED_AT.search(m.group(1)):
+            return t
+        t = t[m.end():]
 
 
 def make_backend(config: Dict, data_dir: str) -> Backend:
