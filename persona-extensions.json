@@ -379,7 +379,7 @@
         "manifest_version": 1,
         "id": "openmate-wechat",
         "name": "微信（OpenMate）",
-        "version": "0.1.20",
+        "version": "0.1.21",
         "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -614,9 +614,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-wechat/0.1.20/openmate-wechat-0.1.20.tar.gz",
-          "sha256": "49da85f8c8250cd717c795108ed063e2b38adaaa624bdb82e24fd4ab8a092af2",
-          "size": 146012
+          "url": "packages/openmate-wechat/0.1.21/openmate-wechat-0.1.21.tar.gz",
+          "sha256": "d5275788cd743144ade07c80d16f9d16f042c861e14235b3e6536c7efb17deae",
+          "size": 146362
         }
       ]
     }
