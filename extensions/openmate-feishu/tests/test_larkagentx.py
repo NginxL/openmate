@@ -620,6 +620,20 @@ class ReadTest(Base):
         S.chats["640"] = {"id": "640", "type": 2, "name": "示例群", "lastMessagePosition": 3}
         self.assertEqual([m.text for m in self.b.history("640", None, 5)], ["一二", "先后", "[@]"])
 
+    def test_a_text_with_no_content_takes_its_preview_links(self):
+        url = "https://example.com/articles/42"
+        S.history["650"] = {1: frame_msg("651", "650", 1, {}), 2: frame_msg("652", "650", 2, {})}
+        S.chats["650"] = {"id": "650", "type": 2, "name": "示例群", "lastMessagePosition": 2}
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {
+            "1": {"id": "651", "type": 4, "urlPreviewHangPointMap": {"h1": {"url": url, "previewId": "p1"}}},
+            "2": {"id": "652", "type": 4, "isEncrypted": True, "content": b""}}}
+        larkagentx._SHAPES_SEEN.clear()
+        with self.assertLogs("openmate.larkx", level="INFO") as logs:
+            msgs = self.b.history("650", None, 10)
+        self.assertEqual([m.text for m in msgs], [url, ""])
+        self.assertTrue(any('"isEncrypted": true' in line for line in logs.output), logs.output)
+        self.assertFalse(any(url in line for line in logs.output), "no content in the log")
+
     def test_a_text_read_as_nothing_is_noted(self):
         empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}
         S.history["610"] = {1: frame_msg("611", "610", 1, empty)}

@@ -55,7 +55,7 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
-RENDER_VERSION = "6"
+RENDER_VERSION = "7"  # 7: a text whose content is empty takes the links of its preview hang points
 RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
@@ -858,6 +858,8 @@ class LarkXBackend(Backend):
                 on_message(msg)
             except Exception as e:
                 log.warning("a pushed message was not taken (%s)", type(e).__name__)
+            if msg.type in ("TEXT", "POST") and not (msg.text or "").strip():
+                self._refill_later(msg)  # a link shown only as a card: its entity has it
             self._seen_group(msg.chat_id, me)  # after the core: it reads a chat it does not know (chat_info)
 
     # ------------------------------------------------------------ every group (自动代答's list)
@@ -1481,8 +1483,53 @@ class LarkXBackend(Backend):
                 if m is not None and (before_position is None or m.position < before_position):
                     out[m.id] = m
             hi = lo
-        msgs = sorted(out.values(), key=lambda m: (m.position, m.at))
-        return msgs[-limit:]
+        msgs = sorted(out.values(), key=lambda m: (m.position, m.at))[-limit:]
+        self._fill_blank(client, chat_id, msgs)
+        return msgs
+
+    def _fill_blank(self, client, chat_id: str, msgs: List[Message]) -> None:
+        """A text or post read as nothing: the message's own entity is asked for once more and its preview hang points
+        (urlPreviewHangPointMap: a link shown as a card) give the text; its flags are noted (never its content)."""
+        blank = [m for m in msgs if m.type in ("TEXT", "POST") and not (m.text or "").strip()]
+        if not blank:
+            return
+        try:
+            raw = self._answer(client.api("messages.PullMessagesByPositionsRequest",
+                                          {"chatId": str(chat_id), "positions": sorted({m.position for m in blank})}),
+                               "读取历史消息")
+        except Exception as e:  # the text stays empty; the next re-read tries again
+            log.info("the entity of a message read as nothing could not be read (%s)", type(e).__name__)
+            return
+        entities = {}
+        for v in (raw.get("messages") or {}).values():
+            if isinstance(v, dict) and v.get("id"):
+                entities[str(v["id"])] = v
+        for m in blank:
+            ent = entities.get(m.id)
+            if ent is None:
+                continue
+            links = hang_links(ent)
+            if links:
+                m.text = " ".join(links)
+            else:
+                note_flags(m.type, entity_flags(ent))
+
+    def _refill_later(self, msg: Message) -> None:
+        """A pushed text read as nothing: its entity read again in the background, handed to the core as history (the
+        stored row then takes the text)."""
+        cb = self.on_history
+        if cb is None:
+            return
+
+        def run():
+            try:
+                got = [m for m in self.history(msg.chat_id, msg.position + 1, 1) if m.id == msg.id and (m.text or "").strip()]
+                if got:
+                    cb(got)
+            except Exception as e:
+                log.info("a pushed message read as nothing was not read again (%s)", type(e).__name__)
+
+        threading.Thread(target=run, name="openmate-larkx-refill", daemon=True).start()
 
     def _chat_raw(self, client, chat_id: str) -> dict:
         try:
@@ -2275,6 +2322,33 @@ def rich_text(rich: dict, P) -> str:
     return text if text.strip() else ""
 
 
+def hang_links(entity: dict) -> List[str]:
+    """The links of a message entity's preview hang points (urlPreviewHangPointMap: {key: {url, previewId, …}})."""
+    out: List[str] = []
+    hangs = entity.get("urlPreviewHangPointMap") or {}
+    for hp in (hangs.values() if isinstance(hangs, dict) else hangs if isinstance(hangs, list) else []):
+        if isinstance(hp, dict) and "value" in hp and isinstance(hp["value"], dict):
+            hp = hp["value"]  # a map read back as entries
+        url = str((hp or {}).get("url") or "").strip() if isinstance(hp, dict) else ""
+        if URL_RE.match(url) and url not in out:
+            out.append(url)
+    return out
+
+
+def entity_flags(entity: dict) -> dict:
+    """What says why a message entity's content reads as nothing: flags and sizes only, never content."""
+    state = entity.get("contentState") if isinstance(entity.get("contentState"), dict) else {}
+    crypto = entity.get("cryptoInfo") if isinstance(entity.get("cryptoInfo"), dict) else {}
+    return {
+        "isEncrypted": bool(entity.get("isEncrypted")), "encryptedInfo": bool(entity.get("encryptedInfo")),
+        "cryptoType": crypto.get("cryptoType"), "isTruncated": bool(entity.get("isTruncated")),
+        "content": len(entity.get("content") or b""), "characterLength": entity.get("characterLength"),
+        "hangPoints": len(entity.get("urlPreviewHangPointMap") or {}), "isIncludeDocUrl": bool(entity.get("isIncludeDocUrl")),
+        "state": sorted(k for k, v in state.items() if v), "displayMode": entity.get("displayMode"),
+        "references": len(entity.get("references") or []),
+    }
+
+
 def rich_shape(rich: dict) -> str:
     """The tags of a rich text's elements and their properties' field layout, never their content."""
     parts = []
@@ -2285,6 +2359,16 @@ def rich_shape(rich: dict) -> str:
         prop = el.get("property") or b""
         parts.append("%s:%d strings" % (el.get("tag"), len(wire_strings(prop)) if prop else 0))
     return "elements=[%s] innerText=%s" % (",".join(parts), "yes" if (rich or {}).get("innerText") else "no")
+
+
+def note_flags(name: str, flags: dict) -> None:
+    """A message read as nothing: its entity's flags in the log (values: flags and sizes, no content), once each."""
+    line = json.dumps(flags, sort_keys=True, default=str)
+    key = name + "flags" + line
+    if key in _SHAPES_SEEN or len(_SHAPES_SEEN) > 200:
+        return
+    _SHAPES_SEEN.add(key)
+    log.info("a %s message read as nothing; its entity: %s", name, line[:800])
 
 
 def note_shape(name: str, data: dict, extra: str = "") -> None:
