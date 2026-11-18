@@ -76,9 +76,11 @@ class WeChatPlatformTest(unittest.TestCase):
         run = running(h, msg)
         self.assertEqual(run["kind"], "auto")
         self.assertEqual(h.http.starts()[-1]["body"]["guest"], {"tools": [CID + "_agent_reply"]})
-        self.assertIn("不发进度", h.tool("agent_reply", request=run["id"], text="进度", progress=True))
-        h.tool("agent_reply", request=run["id"], text="周五前上线。")
+        self.assertIn("不能编辑消息", h.tool("agent_reply", request=run["id"], text="进度", progress=True))
+        first = h.tool("agent_reply", request=run["id"], text="周五前上线。")
         n = len(h.sent())
+        self.assertEqual(h.tool("agent_reply", request=run["id"], text="周五前上线。"), first,
+                         "the same reply asked again gets what it got")
         with self.assertRaises(Exception) as caught:
             h.tool("agent_reply", request=run["id"], text="再补充一句")
         self.assertIn("只回复一次", str(caught.exception))
@@ -92,6 +94,30 @@ class WeChatPlatformTest(unittest.TestCase):
         self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
 
 
+class FeishuUnchangedTest(unittest.TestCase):
+    """What the shared core keeps doing for Feishu (it can edit): progress, and more than one /agent reply."""
+
+    def test_feishu_agent_may_reply_twice_and_auto_reply_may_send_progress(self):
+        h = Harness(self, config={"agent": True, "agent_reply_header": " ", "agent_ack_reaction": ""})
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        msg = ask(h, "/agent 两件事")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="第一件做完了。")
+        h.tool("agent_reply", request=run["id"], text="第二件也做完了。")
+        h.app.store.autoreply_set(TEAM, True)
+        at = h.world.push(TEAM, "user_example_b", "@示例用户 怎么样了", at_me=True)
+        auto = running(h, at)
+        self.assertIn("进度", h.tool("agent_reply", request=auto["id"], text="在查", progress=True))
+
+    def test_an_ai_mark_after_a_leading_mention_is_seen(self):
+        from openmate_core.agent import AI_MARKS, ai_marked
+
+        self.assertTrue(ai_marked("@鲍勃\u2005> 🤖 AI 代答 · 模型 · high\n周五上线", AI_MARKS))
+        self.assertTrue(ai_marked("@Bob @Ann > 🤖 AI 回复 · x\nok", AI_MARKS))
+        self.assertFalse(ai_marked("@Bob 你好\n周五上线", AI_MARKS))
+
+
 class CoreFixesTest(unittest.TestCase):
     def test_a_new_account_forgets_the_marked_groups(self):
         h = wechat(self)
@@ -100,6 +126,21 @@ class CoreFixesTest(unittest.TestCase):
         h.app.store.wipe_account_data()
         self.assertEqual(h.app.store.autoreply_chats(), [])
         self.assertEqual(h.app.store.people_kinds(["user_example_b"]), {})
+
+    def test_pruning_runs_never_frees_the_quota(self):
+        h = wechat(self, auto_reply_daily_most=1)
+        h.app.store.autoreply_set(TEAM, True)
+        m1 = h.world.push(TEAM, "user_example_b", "@示例用户 一", at_me=True)
+        running(h, m1)
+        for r in h.app.store.runs_in_chat(TEAM, 50):
+            r["state"] = "done"
+            h.app.store.run_put(r)
+        h.app.store.runs_prune(time.time() + 1, 0)  # every finished run gone
+        self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
+        self.assertEqual(h.app.agent.auto_used(TEAM), 1)
+        h.world.push(TEAM, "user_example_b", "@示例用户 二", at_me=True)
+        time.sleep(0.5)
+        self.assertEqual(h.app.agent.auto_used(TEAM), 1, "the day's most holds")
 
     def test_the_hourly_most_holds_for_two_at_once(self):
         h = wechat(self, auto_reply_hourly_most=1)

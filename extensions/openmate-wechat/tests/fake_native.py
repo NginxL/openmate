@@ -30,11 +30,16 @@ def record(v):
             f.write(json.dumps(v, ensure_ascii=False) + "\n")
 
 
-def play():
+gen = [0]
+
+
+def play(g):
     for ev in EVENTS:
         if "sleep" in ev:
             time.sleep(ev["sleep"])
             continue
+        if ev.get("event") != "persist":
+            ev = dict(ev, gen=ev.get("gen", g))
         out(ev)
         if ev.get("event") == "persist":
             with ack_cv:
@@ -60,8 +65,9 @@ def answer(req):
             return fail("expired", "expired")
         return ok(account={"id": req.get("state", {}).get("who", "wxid_me"), "name": "我"})
     if op == "listen":
-        ok()
-        threading.Thread(target=play, daemon=True).start()
+        gen[0] += 1
+        ok(gen=gen[0])
+        threading.Thread(target=play, args=(gen[0],), daemon=True).start()
         return None
     if op == "send":
         t = req.get("text", "")
@@ -78,7 +84,9 @@ def answer(req):
         return ok(contacts=[{"id": i, "nickname": "昵称" + i[-1], "remark": ("备注" + i[-1]) if i == "wxid_bob" else None}
                             for i in req.get("ids", [])])
     if op == "room":
-        return ok(id=req.get("id"), members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
+        if not isinstance(req.get("room_id"), str):
+            return fail("input", "缺少 room_id")
+        return ok(room_id=req.get("room_id"), members=[{"id": "wxid_bob", "nickname": "Bob", "display": "群里的鲍勃"},
                                              {"id": "wxid_me", "nickname": "我", "display": None}])
     if op in ("stop", "logout", "hello"):
         return ok()

@@ -177,6 +177,10 @@ pub fn normalize(raw: &Raw, own: &str, origin: &str) -> (Value, Option<Quotable>
         "parent": parent,
         "quoted_sender": quoted_who,
         "quoted_text": quoted_text,
+        // for a later quote of this message (text only): its body without the group envelope, and its own source
+        "quotable": raw.message_type == 1 && !raw.server_id.is_empty() && (raw.outgoing || !sender.is_empty()),
+        "content": if raw.message_type == 1 { body.as_str() } else { "" },
+        "msgsource": if raw.message_type == 1 { raw.msgsource.unwrap_or("") } else { "" },
     });
     let quotable = (raw.message_type == 1 && !raw.server_id.is_empty() && (raw.outgoing || !sender.is_empty())).then(|| {
         Quotable {

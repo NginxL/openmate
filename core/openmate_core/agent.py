@@ -62,7 +62,11 @@ MARK_POSITIONS = ("end", "top")  # where the AI mark line goes: after the answer
 def mark_lines(text: str) -> tuple:
     """The first and the last non-empty line of a message, without a leading quote mark: where an AI mark sits."""
     lines = [l.lstrip("> ").strip() for l in (text or "").split("\n") if l.strip()]
-    return (lines[0], lines[-1]) if lines else ("", "")
+    if not lines:
+        return ("", "")
+    # a reply that @s its asker starts with the @ (WeChat puts it before the text): the mark comes right after it
+    first = strip_leading_mentions(lines[0]).lstrip("> ").strip() or lines[0]
+    return (first, lines[-1])
 
 
 def ai_marked(text: str, marks) -> bool:
@@ -330,8 +334,9 @@ class AgentRunner:
     # ---------------------------------------------------------------- 自动代答
 
     def auto_used(self, chat_id: str, now: Optional[float] = None, within: float = 86400, kind: str = "auto") -> int:
+        """Guest runs started in the chat within the window: their own ledger, which pruning the runs never shortens."""
         since = (now or time.time()) - within
-        return sum(1 for r in self.store.runs_in_chat(chat_id, 200) if r.get("kind") == kind and r["created"] >= since)
+        return self.store.quota_count(chat_id, kind, since)
 
     def _guest_room(self, chat_id: str, kind: str, now: float) -> str:
         """Why a guest run may not start now ("" when it may): the hour's and the day's most for the chat (a document's:
@@ -396,6 +401,7 @@ class AgentRunner:
             run["kind"] = "auto"
             run["asker"] = row.get("sender_name") or ""
             self.store.run_put(run)
+            self.store.quota_add(chat_id, "auto", now)
         self._prune()
         self._start_run(run, row)
 
@@ -433,6 +439,7 @@ class AgentRunner:
                 return
             run = self._doc_run(m, doc_chat, asker, now)
             self.store.run_put(run)
+            self.store.quota_add(doc_chat, "doc", now)
         self._prune()
         self._start_run(run, None)
 
@@ -1135,8 +1142,6 @@ class AgentRunner:
             raise RPCError("这个 /agent 请求已经过期了")
         if not text.strip():
             raise RPCError("回复内容是空的")
-        if progress and run.get("kind") in GUEST_KINDS:  # an answer for someone else is one message, no progress
-            return "代答只回复一次，不发进度；直接不带 progress 回复最终内容"
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message
             if not self._can_edit():  # every update would be one more message in the chat, as the user
                 return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
@@ -1146,8 +1151,12 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur["state"] in ("stopped", "failed"):
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
-            if cur.get("kind") in GUEST_KINDS and int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0:
-                raise RPCError("代答只回复一次，这条已经回复过了")
+            if not self._can_edit() and int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0:
+                done = self.store.send_get(key)
+                if done is not None and done["state"] == "done":  # the same reply asked again: what it got
+                    ref = (done.get("result") or {}).get("message_ref") or "未知"
+                    return "已回复到%s（消息 id=%s）" % (self.app.platform.name, ref)
+                raise RPCError("%s只回复一次，这条已经回复过了（或者结果还不确定），不要再发" % self.app.platform.name)
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
         body = self.with_suffix(text, cur)

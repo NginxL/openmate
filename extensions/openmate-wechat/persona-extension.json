@@ -16,7 +16,7 @@
       {
         "id": "matewechat",
         "name": "微信（OpenMate）",
-        "capabilities": ["status", "tools", "actions", "events", "login"],
+        "capabilities": ["status", "tools", "events", "login"],
         "agent_tools": ["matewechat_status", "matewechat_chats", "matewechat_messages", "matewechat_search", "matewechat_agent_reply"],
         "confirm_always": ["matewechat_*"],
         "sends_as_user": true,
@@ -136,6 +136,8 @@
     "network": [
       "weixin.qq.com",
       "*.weixin.qq.com",
+      "wechat.com",
+      "*.wechat.com",
       "*.qpic.cn",
       "github.com",
       "*.githubusercontent.com"

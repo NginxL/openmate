@@ -83,6 +83,9 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS dismissed (key TEXT PRIMARY KEY, version TEXT NOT NULL, at REAL NOT NULL)",
     # groups the user marked for 自动代答: an @me there is answered by the Agent as the user, with no confirmation
     "CREATE TABLE IF NOT EXISTS autoreply (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
+    # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
+    "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
 ]
 
 _MESSAGE_COLUMNS = (
@@ -506,13 +509,25 @@ class Store:
 
     # ---- another account ----
 
+    def quota_add(self, chat_id: str, kind: str, at: float) -> None:
+        def run(db):
+            db.execute("INSERT INTO guest_quota (chat_id, kind, at) VALUES (?, ?, ?)", (chat_id, kind, at))
+            db.execute("DELETE FROM guest_quota WHERE at < ?", (at - 3 * 86400,))
+
+        self._tx(run)
+
+    def quota_count(self, chat_id: str, kind: str, since: float) -> int:
+        r = self._one("SELECT COUNT(*) AS n FROM guest_quota WHERE chat_id = ? AND kind = ? AND at >= ?",
+                      (chat_id, kind, since))
+        return int(r["n"]) if r else 0
+
     def wipe_account_data(self) -> None:
         """Forget the chats of the account signed in before (another one signed in). Message seqs keep growing, so
         the hub's archive cursor stays valid. The send journal stays: request ids are the hub's."""
 
         def run(db):
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
-            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people"):
+            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM meta WHERE key IN ('initial_history_done')")
 

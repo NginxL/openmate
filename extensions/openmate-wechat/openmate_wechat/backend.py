@@ -47,14 +47,19 @@ EXPIRED = "微信登录已失效，需要重新扫码登录"
 NAME_TTL = 6 * 3600.0
 SEND_WAIT = 45.0
 # Accounts that are WeChat's own or a program, never a person (official accounts are gh_…, ClawBot bots …@im.bot)
-SERVICE_IDS = {"weixin", "filehelper", "fmessage", "medianote", "floatbottle", "qqmail", "newsapp", "notifymessage",
-               "tmessage", "qmessage", "qqsync", "voip", "voipapp", "brandsessionholder", "officialaccounts"}
+SERVICE_IDS = {"filehelper", "weixin", "weibo", "fmessage", "floatbottle", "medianote", "qmessage", "tmessage",
+               "masssendapp", "newsapp", "blogapp", "qqmail", "qqsync", "lbsapp", "shakeapp", "brandsessionholder",
+               "brandservicesessionholder", "appbrandcustomerservicemsg", "service_officialaccounts", "notifymessage",
+               "notification_messages", "wa_app_kefu_message", "wxzhifu", "voip", "voipapp"}  # agent-wechat's list
+SERVICE_SUFFIXES = ("@im.bot", "@stranger", "@kefu.openim", "@opencustomerservicemsg", "@placeholder_foldgroup",
+                    "@weclaw", "@im.chatroom")
 PERSON_ID = re.compile(r"^(wxid_[A-Za-z0-9_-]{4,64}|[A-Za-z][A-Za-z0-9_-]{5,31})$")
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY, chat TEXT NOT NULL, position INTEGER NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL)""",
+        id TEXT PRIMARY KEY, chat TEXT NOT NULL, position INTEGER NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL,
+        delivered INTEGER NOT NULL DEFAULT 1)""",
     "CREATE INDEX IF NOT EXISTS messages_chat ON messages (chat, position)",
     """CREATE TABLE IF NOT EXISTS chats (
         id TEXT PRIMARY KEY, last_at INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '', named_at REAL NOT NULL DEFAULT 0,
@@ -72,7 +77,7 @@ def kind_of(user_id: str) -> str:
     signed in to (an account someone automates still is one, as ours is; the core's AI marks and limits cover that)."""
     if not user_id:
         return ""
-    if user_id in SERVICE_IDS or user_id.startswith("gh_") or user_id.endswith("@im.bot") or user_id.endswith("@stranger"):
+    if user_id in SERVICE_IDS or user_id.startswith("gh_") or user_id.endswith(SERVICE_SUFFIXES):
         return "bot"
     if user_id.endswith("@chatroom"):
         return ""
@@ -114,17 +119,33 @@ class Store:
                 self._db.execute("DELETE FROM " + t)
             self._db.execute("DELETE FROM kv WHERE key IN ('cursor')")
 
-    def add_message(self, ev: dict) -> Tuple[bool, int]:
+    def seen(self, mid: str) -> Optional[Tuple[int, bool]]:
+        """(position, delivered) of a kept message, None when new."""
+        with self._mu:
+            row = self._db.execute("SELECT position, delivered FROM messages WHERE id=?", (mid,)).fetchone()
+        return (row[0], bool(row[1])) if row else None
+
+    def position_for(self, chat: str, at: int) -> int:
+        with self._mu:
+            n = self._db.execute("SELECT COUNT(*) FROM messages WHERE chat=? AND at=?", (chat, at)).fetchone()[0]
+        return at * 1000 + min(n, 999)
+
+    def mark_delivered(self, mid: str) -> None:
+        with self._mu:
+            self._db.execute("UPDATE messages SET delivered=1 WHERE id=?", (mid,))
+
+    def add_message(self, ev: dict, pos: Optional[int] = None, delivered: bool = True) -> Tuple[bool, int]:
         """Keep a message (once); (new, position). position grows with time: second * 1000 + its place that second."""
         mid, chat, at = str(ev.get("id") or ""), str(ev.get("chat") or ""), int(ev.get("at") or 0)
         with self._mu:
             row = self._db.execute("SELECT position FROM messages WHERE id=?", (mid,)).fetchone()
             if row:
                 return False, row[0]
-            n = self._db.execute("SELECT COUNT(*) FROM messages WHERE chat=? AND at=?", (chat, at)).fetchone()[0]
-            pos = at * 1000 + min(n, 999)
-            self._db.execute("INSERT INTO messages (id, chat, position, at, body) VALUES (?, ?, ?, ?, ?)",
-                             (mid, chat, pos, at, json.dumps(ev, ensure_ascii=False)))
+            if pos is None:
+                n = self._db.execute("SELECT COUNT(*) FROM messages WHERE chat=? AND at=?", (chat, at)).fetchone()[0]
+                pos = at * 1000 + min(n, 999)
+            self._db.execute("INSERT INTO messages (id, chat, position, at, body, delivered) VALUES (?, ?, ?, ?, ?, ?)",
+                             (mid, chat, pos, at, json.dumps(ev, ensure_ascii=False), 1 if delivered else 0))
             self._db.execute("INSERT INTO chats (id, last_at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
                              "last_at=MAX(last_at, excluded.last_at)", (chat, at))
         return True, pos
@@ -206,9 +227,13 @@ class WeChatBackend(Backend):
                 return n
             n = Native(self._path(wait), self._persist)
             n.start()
-            self._native = n
             if restore and self._state is not None:  # a restarted program knows nothing: give it the sign-in again
-                self._call(n, "restore", 20, state=self._state)
+                try:
+                    self._call(n, "restore", 20, state=self._state)
+                except BackendError:
+                    n.close()
+                    raise
+            self._native = n  # only now: a program that could not take the sign-in is never reused
             return n
 
     def _call(self, n: Native, op: str, timeout: float, **params: Any) -> dict:
@@ -244,7 +269,8 @@ class WeChatBackend(Backend):
 
     def login_start(self) -> LoginQR:
         n = self._link(restore=False, wait=5.0)  # a sign-in step answers the hub within 10 s
-        r = self._call(n, "login_start", 9, device=self._device)
+        device = self._device or (self._state or {}).get("device")  # the same computer as before, when known
+        r = self._call(n, "login_start", 9, device=device)
         self._device = r.get("device") or None
         return LoginQR(url=str(r.get("qr") or ""), state="qr")
 
@@ -255,7 +281,7 @@ class WeChatBackend(Backend):
         except NativeGone as e:
             raise BackendError(e.message, "unreachable")
         except NativeError as e:
-            raise BackendError(e.message, "unknown")
+            raise BackendError(e.message, "login" if e.kind == "login" else "unknown")
         s = str(r.get("status") or "pending")
         return {"pending": "waiting", "cancelled": "expired", "rejected": "expired"}.get(s, s)
 
@@ -301,8 +327,9 @@ class WeChatBackend(Backend):
 
     def listen(self, on_message: OnMessage, on_link: OnLink, stop: threading.Event) -> None:
         n = self._link()
-        self._call(n, "listen", 10, cursor=self.store.get("cursor"))
+        gen = self._call(n, "listen", 10, cursor=self.store.get("cursor")).get("gen")
         events = n.events
+        held = False  # a live message the core did not take: the cursor stays where it was, so it comes again
         try:
             while not stop.is_set():
                 try:
@@ -311,11 +338,15 @@ class WeChatBackend(Backend):
                     continue
                 if ev is None:
                     raise BackendError("微信组件退出了，正在重新连接", "unreachable")
+                if ev.get("gen") != gen:
+                    continue  # an older listen's last words (another account's, maybe): never ours to act on
                 kind = ev.get("event")
                 if kind == "message":
-                    self._on_event(ev, on_message)
+                    if not self._on_event(ev, on_message):
+                        held = True
                 elif kind == "cursor":
-                    self.store.put("cursor", str(ev.get("cursor") or ""))  # after the messages before it
+                    if not held:
+                        self.store.put("cursor", str(ev.get("cursor") or ""))  # after the messages before it
                 elif kind == "link":
                     on_link("up" if ev.get("up") else "down", "" if ev.get("up") else "连接断开，正在重连")
                 elif kind == "auth_lost":
@@ -323,20 +354,35 @@ class WeChatBackend(Backend):
         finally:
             if n.alive():
                 try:
-                    n.call("stop", timeout=5)
+                    n.call("stop", timeout=5, gen=gen)
                 except NativeError:
                     pass
 
-    def _on_event(self, ev: dict, on_message: OnMessage) -> None:
-        if not ev.get("id") or not ev.get("chat"):
-            return
-        new, pos = self.store.add_message(ev)
-        if not new or ev.get("origin") != "live":
-            return  # caught up after a reconnect, or our own send's echo: kept for history, never acted on
+    def _on_event(self, ev: dict, on_message: OnMessage) -> bool:
+        """Keep the message; give a live one to the core first (so a history read can't take it before /agent and
+        自动代答 see it). False when the core could not take it."""
+        mid, chat = str(ev.get("id") or ""), str(ev.get("chat") or "")
+        if not mid or not chat:
+            return True
+        seen = self.store.seen(mid)
+        if seen is not None and seen[1]:
+            return True  # kept already, and handed over when it was live
+        if seen is None and ev.get("origin") != "live":
+            self.store.add_message(ev)  # caught up after a reconnect, or our own send's echo: history only
+            return True
+        # live now, or live once and the core did not take it then (the core's freshness rule still applies)
+        pos = seen[0] if seen else self.store.position_for(chat, int(ev.get("at") or 0))
         try:
             on_message(self._message(ev, pos))
+            ok = True
         except Exception:
-            log.exception("a WeChat message could not be handled")
+            log.exception("a WeChat message could not be handled; it will come again")
+            ok = False
+        if seen is None:
+            self.store.add_message(ev, pos=pos, delivered=ok)
+        elif ok:
+            self.store.mark_delivered(mid)
+        return ok
 
     def _message(self, ev: dict, pos: int) -> Message:
         chat = str(ev.get("chat") or "")
@@ -349,7 +395,8 @@ class WeChatBackend(Backend):
         return Message(
             id=str(ev.get("id")), chat_id=chat, position=pos, sender_id=sender, sender_name=name, mine=mine,
             type=str(ev.get("type") or "TEXT"), text=str(ev.get("text") or ""), at=float(ev.get("at") or 0),
-            parent_id=str(ev.get("parent") or ""), at_me=bool(ev.get("at_me")), at_all=bool(ev.get("at_all")),
+            parent_id=str(ev.get("parent") or ""), at_all=bool(ev.get("at_all")),
+            at_me=bool(ev.get("at_me")) and not bool(ev.get("at_all")),  # @me among @everyone is a notice
         )
 
     # ---------------------------------------------------------------- reads
@@ -408,7 +455,7 @@ class WeChatBackend(Backend):
 
     def _roster(self, chat_id: str) -> List[dict]:
         try:
-            r = self._call(self._link(), "room", 20, id=chat_id)
+            r = self._call(self._link(), "room", 20, room_id=chat_id)
         except BackendError:
             return []
         members = r.get("members") or []
@@ -470,16 +517,20 @@ class WeChatBackend(Backend):
         if not text.strip():
             raise SendRejected("消息内容是空的")
         params: Dict[str, Any] = {"chat": chat_id, "text": text, "key": "om-" + uuid.uuid4().hex}
-        if reply_to:
-            params["reply_to"] = reply_to
-            got = self.store.message(reply_to)
-            if got is not None:
-                ev = got[0]
-                sender = str(ev.get("sender") or "")
-                if ev.get("chat") == chat_id and is_group(chat_id) and sender and not ev.get("mine") and sender != self.me:
-                    name = self._mention_name(sender, chat_id)
-                    params["mentions"] = [{"id": sender, "name": name}]
-                    params["reply_name"] = name
+        got = self.store.message(reply_to) if reply_to else None
+        if got is not None and got[0].get("chat") == chat_id:
+            ev = got[0]
+            sender = str(ev.get("sender") or "")
+            mine = bool(ev.get("mine")) or sender == self.me
+            name = ""
+            if is_group(chat_id) and sender and not mine:  # answering someone in a group: @ them for real
+                name = self._mention_name(sender, chat_id)
+                params["mentions"] = [{"id": sender, "name": name}]
+            if ev.get("quotable"):  # a text message: quoted (anything else gets the plain answer)
+                params["quote"] = {"server_id": str(ev.get("id")), "sender": sender, "outgoing": mine,
+                                   "display_name": name or (self.me_name if mine else sender),
+                                   "content": str(ev.get("content") or ""), "created_at": int(ev.get("at") or 0),
+                                   "msgsource": str(ev.get("msgsource") or "")}
         try:
             n = self._link()
         except BackendError as e:

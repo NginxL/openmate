@@ -28,7 +28,7 @@ FAKE = os.path.join(HERE, "fake_native.py")
 def msg(mid, chat, sender, text, origin="live", mine=False, at_me=False, at_all=False, at=None, parent=""):
     return {"event": "message", "origin": origin, "id": mid, "chat": chat, "group": chat.endswith("@chatroom"),
             "sender": sender, "mine": mine, "type": "TEXT", "text": text, "at": at or int(time.time()),
-            "at_me": at_me, "at_all": at_all, "parent": parent}
+            "at_me": at_me, "at_all": at_all, "parent": parent, "quotable": True, "content": text, "msgsource": ""}
 
 
 class Base(unittest.TestCase):
@@ -130,6 +130,51 @@ class ListenTest(Base):
         self.assertEqual([m.id for m in b.history("1@chatroom")], ["c1", "e1", "l1", "l2"], "all kept for history")
         self.assertIn("stop", [r["op"] for r in self.requests()])
 
+    def test_an_older_listens_events_are_ignored(self):
+        b = self.backend([dict(msg("old", "1@chatroom", "wxid_me", "/agent 旧账号的", mine=True), gen=99),
+                          msg("new", "1@chatroom", "wxid_bob", "hi")])
+        b.restore({"state": {"k": "v1"}})
+        got, _, _ = self.listen(b, lambda g, l, e: len(g) >= 1)
+        time.sleep(0.2)
+        self.assertEqual([m.id for m in got], ["new"])
+        self.assertIsNone(b.store.seen("old"))
+        stops = self.requests("stop")
+        self.assertTrue(stops and all(s.get("gen") == 1 for s in stops), "a stop names its own listen")
+
+    def test_at_me_among_at_all_is_not_at_me(self):
+        b = self.backend([msg("a1", "1@chatroom", "wxid_bob", "@所有人 @我", at_me=True, at_all=True)])
+        b.restore({"state": {"k": "v1"}})
+        got, _, _ = self.listen(b, lambda g, l, e: len(g) >= 1)
+        self.assertEqual((got[0].at_me, got[0].at_all), (False, True))
+
+    def test_a_message_the_core_could_not_take_comes_again(self):
+        b = self.backend([msg("f1", "1@chatroom", "wxid_bob", "hi"), {"event": "cursor", "cursor": "TkVX"}])
+        b.restore({"state": {"k": "v1"}})
+        b.store.put("cursor", "T0xE")
+        calls = []
+
+        def broken(m):
+            calls.append(m.id)
+            raise RuntimeError("the core failed")
+
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: b.listen(broken, lambda s, r: None, stop), daemon=True)
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not calls:
+            time.sleep(0.02)
+        time.sleep(0.3)
+        stop.set()
+        t.join(5)
+        self.assertEqual(b.store.get("cursor"), "T0xE", "the cursor waits for the message")
+        self.assertEqual(b.store.seen("f1")[1], False)
+        # after a restart the same message comes back as caught-up: the core gets it now
+        os.environ["FAKE_EVENTS"] = json.dumps([msg("f1", "1@chatroom", "wxid_bob", "hi", origin="catchup")])
+        b._native.close()
+        got, _, _ = self.listen(b, lambda g, l, e: len(g) >= 1)
+        self.assertEqual([m.id for m in got], ["f1"])
+        self.assertEqual(b.store.seen("f1")[1], True)
+
     def test_cursor_saved_from_listen_on_next_start(self):
         b = self.backend([{"event": "cursor", "cursor": "QUJD"}])
         b.restore({"state": {"k": "v1"}})
@@ -179,14 +224,21 @@ class SendTest(Base):
     def test_answering_someone_quotes_and_ats_them(self):
         self.assertEqual(self.b.send("1@chatroom", "答复", reply_to="q1"), "srv_%d" % self.requests("send")[-1]["id"])
         r = self.requests("send")[-1]
-        self.assertEqual(r["reply_to"], "q1")
         self.assertEqual(r["mentions"], [{"id": "wxid_bob", "name": "群里的鲍勃"}], "the group nickname, not a remark")
-        self.assertEqual(r["reply_name"], "群里的鲍勃")
+        q = r["quote"]
+        self.assertEqual((q["server_id"], q["sender"], q["outgoing"], q["content"], q["display_name"]),
+                         ("q1", "wxid_bob", False, "@我 问题", "群里的鲍勃"))
 
     def test_answering_my_own_agent_request_ats_nobody(self):
         self.b.send("1@chatroom", "结果", reply_to="q2")
         r = self.requests("send")[-1]
-        self.assertEqual(r["reply_to"], "q2")
+        self.assertEqual(r["quote"]["outgoing"], True)
+        self.assertNotIn("mentions", r)
+
+    def test_a_reply_in_another_chat_quotes_nothing(self):
+        self.b.send("2@chatroom", "别处", reply_to="q1")
+        r = self.requests("send")[-1]
+        self.assertNotIn("quote", r)
         self.assertNotIn("mentions", r)
 
     def test_outcomes(self):
@@ -210,9 +262,10 @@ class NamesTest(Base):
         self.assertEqual(b.user_name("wxid_bob"), "备注b")
         self.assertEqual(b.chat_info("wxid_bob").name, "备注b")
         self.assertEqual(b.chat_info("1@chatroom").members, 2)
-        self.assertEqual(b.people_kinds(["wxid_bob", "gh_abc", "abc@im.bot", "filehelper", "x@openim", "1@chatroom"]),
+        self.assertEqual(b.people_kinds(["wxid_bob", "gh_abc", "abc@im.bot", "filehelper", "x@openim", "1@chatroom",
+                                         "masssendapp", "y@kefu.openim"]),
                          {"wxid_bob": "user", "gh_abc": "bot", "abc@im.bot": "bot", "filehelper": "bot",
-                          "x@openim": "user"})
+                          "x@openim": "user", "masssendapp": "bot", "y@kefu.openim": "bot"})
 
     def test_proxy_variables_never_reach_the_program(self):
         env = clean_env({"PATH": "/bin", "https_proxy": "http://127.0.0.1:7897", "ALL_PROXY": "socks5://x"})

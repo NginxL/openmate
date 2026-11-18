@@ -6,12 +6,13 @@
 //!
 //! The protocol is thisnick/agent-wechat's `wechat-protocol` library (MIT), used through its public API only; the
 //! online loop follows that project's daemon: heartbeat at the server's interval (30–180 s), a catch-up drain (scene
-//! 6) after each connect, scene 1 on a notification, scene 7 when a heartbeat says so.
+//! 6) after each connect, scene 1 on a notification, scene 7 when a heartbeat says so, one renewal attempt when the
+//! server rejects the session.
 //!
 //! Lines in:  {"id":N,"op":"…",…}               a request; the answer is {"id":N,"ok":true,…} or {"id":N,"ok":false,"error":{"kind","message"}}
-//!            {"op":"persist_ack","seq":S,"ok":bool}   the backend sealed (or failed to seal) a rotated sign-in
-//! Lines out: answers, and events without an id: message, cursor, link, persist, auth_lost.
-//! Credentials go out only in login_finish's answer and in persist events; never to stderr.
+//!            {"op":"persist_ack","seq":S,"ok":bool}   the backend sealed (or failed to seal) a renewed sign-in
+//! Lines out: answers, and events (they have "event"): message, cursor, link, auth_lost (each with the listen's
+//!            "gen"), and persist. Credentials go out only in login_finish's answer and in persist events.
 
 mod message;
 
@@ -25,17 +26,15 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use wechat_protocol::{
     is_retryable_login_poll_error, is_session_rejected, wire, AccountInterrupted, AccountPersistence, AccountState,
-    DeviceProfile, LoginAttempt, LoginStatus, NativeClient, NativeOptions, NativeRequestNotSubmitted,
-    ServiceRejected, TextSendOptions,
+    DeviceProfile, LoginStatus, NativeClient, NativeOptions, NativeRequestNotSubmitted, ServiceRejected,
+    TextSendOptions,
 };
 
 const PROTOCOL: u32 = 1;
 const DEVICE_TYPE: &str = "UnifiedPCLinux x86_64";
 const COMPUTER_NAME: &str = "OpenMate";
-const LOGIN_POLL_MOST: Duration = Duration::from_secs(6); // the hub forwards an extension call for 10 s at most
 const PERSIST_WAIT: Duration = Duration::from_secs(30);
-const QUOTES_KEPT: usize = 5000;
-const SENT_KEPT: usize = 500;
+const INTENT_KEEP: Duration = Duration::from_secs(600);
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 // ---------------------------------------------------------------- output
@@ -57,13 +56,14 @@ fn log(msg: &str) {
     eprintln!("matewechat-native: {msg}");
 }
 
-// ---------------------------------------------------------------- persistence of rotated credentials
+// ---------------------------------------------------------------- persistence of renewed credentials
 
 /// The protocol library calls this before a renewed sign-in takes effect: the backend must seal it first.
 struct Persist {
     out: Arc<Out>,
     seq: AtomicU64,
     waiting: Mutex<HashMap<u64, mpsc::Sender<bool>>>,
+    latest: Mutex<Option<Value>>, // the last sealed state (login_finish answers with it)
 }
 
 impl Persist {
@@ -85,31 +85,35 @@ impl AccountPersistence for Persist {
         if let Ok(mut w) = self.waiting.lock() {
             w.remove(&seq);
         }
-        if ok {
-            Ok(())
-        } else {
-            bail!("the rotated sign-in was not stored")
+        if !ok {
+            bail!("the renewed sign-in was not stored")
         }
+        if let Ok(mut l) = self.latest.lock() {
+            *l = Some(state);
+        }
+        Ok(())
     }
 }
 
 // ---------------------------------------------------------------- state
 
+/// A QR sign-in in progress: a worker polls it until it ends; login_poll only reads what it last saw.
 struct Login {
-    boot: NativeClient,
-    attempt: LoginAttempt,
+    status: Mutex<(String, String)>, // (status, message)
+    state: Mutex<Option<AccountState>>,
+    cancel: Arc<AtomicBool>,
 }
 
 struct App {
     out: Arc<Out>,
     rt: tokio::runtime::Runtime,
     persist: Arc<Persist>,
-    login: Mutex<Option<Login>>,
+    login: Mutex<Option<Arc<Login>>>,
     client: Mutex<Option<NativeClient>>,
     own: Mutex<String>,
-    listening: Mutex<Option<Arc<AtomicBool>>>,
-    quotes: Mutex<(HashMap<String, message::Quotable>, VecDeque<String>)>,
-    sent: Mutex<VecDeque<String>>,
+    gen: AtomicU64,
+    listening: Mutex<Option<(u64, Arc<AtomicBool>)>>,
+    intents: Mutex<VecDeque<(Instant, String, String)>>, // (when, chat, text as sent): our own sends' echoes
 }
 
 impl App {
@@ -119,51 +123,49 @@ impl App {
     fn own(&self) -> String {
         self.own.lock().map(|o| o.clone()).unwrap_or_default()
     }
-    fn remember_quote(&self, q: message::Quotable) {
-        if let Ok(mut g) = self.quotes.lock() {
-            let (map, order) = &mut *g;
-            if map.insert(q.server_id.clone(), q.clone()).is_none() {
-                order.push_back(q.server_id);
-                while order.len() > QUOTES_KEPT {
-                    if let Some(old) = order.pop_front() {
-                        map.remove(&old);
-                    }
-                }
-            }
+    /// Remember a send before it is submitted, so its echo is known even when it comes before the receipt.
+    fn intend(&self, chat: &str, text: &str) {
+        if let Ok(mut q) = self.intents.lock() {
+            let now = Instant::now();
+            q.retain(|(at, _, _)| now.duration_since(*at) < INTENT_KEEP);
+            q.push_back((now, chat.to_owned(), text.to_owned()));
         }
     }
-    fn remember_sent(&self, id: &str) {
-        if id.is_empty() {
-            return;
+    /// Is this outgoing message the echo of a send made here? (Each intent matches once.)
+    fn is_echo(&self, chat: &str, text: &str) -> bool {
+        let Ok(mut q) = self.intents.lock() else { return false };
+        let now = Instant::now();
+        q.retain(|(at, _, _)| now.duration_since(*at) < INTENT_KEEP);
+        if let Some(i) = q.iter().position(|(_, c, t)| c == chat && t.trim() == text.trim()) {
+            q.remove(i);
+            return true;
         }
-        if let Ok(mut s) = self.sent.lock() {
-            s.push_back(id.to_owned());
-            while s.len() > SENT_KEPT {
-                s.pop_front();
-            }
-        }
-    }
-    fn was_sent_here(&self, id: &str) -> bool {
-        self.sent.lock().map(|s| s.iter().any(|x| x == id)).unwrap_or(false)
+        false
     }
     fn adopt(&self, state: AccountState) -> Result<String> {
         let own = state.own_username.clone();
         let client = NativeClient::from_account_with_persistence(state, NativeOptions::default(), self.persist.clone())?;
-        self.stop_listening();
+        self.stop_listening(None);
         if let Some(old) = self.client.lock().map_err(|_| anyhow!("lock"))?.replace(client) {
             let _ = self.rt.block_on(old.shutdown());
         }
         *self.own.lock().map_err(|_| anyhow!("lock"))? = own.clone();
         Ok(own)
     }
-    fn stop_listening(&self) {
-        if let Some(stop) = self.listening.lock().ok().and_then(|mut l| l.take()) {
-            stop.store(true, Ordering::SeqCst);
+    /// Stop the live link (only generation `gen` when given: an old listener's stop never stops a newer one).
+    fn stop_listening(&self, gen: Option<u64>) {
+        if let Ok(mut l) = self.listening.lock() {
+            if let Some((g, stop)) = l.as_ref() {
+                if gen.is_none() || gen == Some(*g) {
+                    stop.store(true, Ordering::SeqCst);
+                    *l = None;
+                }
+            }
         }
     }
 }
 
-/// An error with a kind the backend maps (signed_out, expired, rejected, not_sent, uncertain, unsupported, input…).
+/// An error with a kind the backend maps (signed_out, expired, rejected, not_sent, input, lan, unsupported…).
 #[derive(Debug)]
 struct Kinded {
     kind: &'static str,
@@ -178,8 +180,11 @@ impl std::error::Error for Kinded {}
 fn err(kind: &'static str, message: &str) -> anyhow::Error {
     anyhow::Error::new(Kinded { kind, message: message.to_owned() })
 }
+fn kinded(e: &anyhow::Error) -> Option<&Kinded> {
+    e.downcast_ref::<Kinded>().or_else(|| e.chain().find_map(|c| c.downcast_ref::<Kinded>()))
+}
 fn kind_of(e: &anyhow::Error) -> &'static str {
-    if let Some(k) = e.chain().find_map(|c| c.downcast_ref::<Kinded>()) {
+    if let Some(k) = kinded(e) {
         return k.kind;
     }
     if is_session_rejected(e) {
@@ -187,8 +192,11 @@ fn kind_of(e: &anyhow::Error) -> &'static str {
     }
     "error"
 }
+fn not_submitted(e: &anyhow::Error) -> bool {
+    e.is::<NativeRequestNotSubmitted>() || e.chain().any(|c| c.downcast_ref::<NativeRequestNotSubmitted>().is_some())
+}
 
-// ---------------------------------------------------------------- ops
+// ---------------------------------------------------------------- sign-in
 
 fn str_arg<'a>(p: &'a Value, name: &str) -> Result<&'a str> {
     p.get(name).and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| err("input", &format!("缺少 {name}")))
@@ -208,37 +216,73 @@ fn op_login_start(app: &App, p: &Value) -> Result<Value> {
         Some(v) if !v.is_null() => serde_json::from_value::<DeviceProfile>(v.clone()).context("保存的设备信息读不出来")?,
         _ => DeviceProfile::generate(DEVICE_TYPE.into())?,
     };
+    if let Some(old) = app.login.lock().map_err(|_| anyhow!("lock"))?.take() {
+        old.cancel.store(true, Ordering::SeqCst);
+    }
     let boot = NativeClient::new(NativeOptions::default())?;
-    let attempt = boot.start_qr_login(device, COMPUTER_NAME)?;
+    let mut attempt = boot.start_qr_login(device, COMPUTER_NAME)?;
     let url = decode_qr(&attempt.qr_png)?;
     let out = json!({"qr": url, "expires_at": attempt.expires_at, "device": serde_json::to_value(&attempt.device)?});
-    *app.login.lock().map_err(|_| anyhow!("lock"))? = Some(Login { boot, attempt });
+    let login = Arc::new(Login {
+        status: Mutex::new(("pending".into(), String::new())),
+        state: Mutex::new(None),
+        cancel: Arc::new(AtomicBool::new(false)),
+    });
+    *app.login.lock().map_err(|_| anyhow!("lock"))? = Some(login.clone());
+    // The worker owns the attempt until it ends: a LAN confirmation the phone makes late still finds its listener.
+    std::thread::Builder::new().name("login".into()).spawn(move || {
+        let set = |s: &str, m: &str| {
+            if let Ok(mut st) = login.status.lock() {
+                *st = (s.to_owned(), m.to_owned());
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(600);
+        loop {
+            if login.cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            let cancel = login.cancel.clone();
+            match boot.poll_login_guarded(&mut attempt, deadline, move || cancel.load(Ordering::SeqCst)) {
+                Ok(LoginStatus::Pending) => set("pending", ""),
+                Ok(LoginStatus::Scanned) => set("scanned", ""),
+                Ok(LoginStatus::Approved) | Ok(LoginStatus::Completed) => {
+                    match boot.complete_login(&mut attempt) {
+                        Ok(state) => {
+                            if let Ok(mut s) = login.state.lock() {
+                                *s = Some(state);
+                            }
+                            set("confirmed", "");
+                        }
+                        Err(e) => set("failed", &format!("{e:#}")),
+                    }
+                    return;
+                }
+                Ok(LoginStatus::Expired) => return set("expired", ""),
+                Ok(LoginStatus::Cancelled) | Ok(LoginStatus::Rejected) => return set("expired", "手机上取消了登录"),
+                Err(e) if is_retryable_login_poll_error(&e) => {}
+                Err(e) => {
+                    if let Some(reason) = wechat_protocol::login_lan_error_reason(&e) {
+                        return set("failed", &format!("微信要求手机和这台电脑在同一个局域网里确认登录（{reason}）"));
+                    }
+                    return set("failed", &format!("{e:#}"));
+                }
+            }
+            if Instant::now() >= deadline {
+                return set("expired", "");
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    })?;
     Ok(out)
 }
 
 fn op_login_poll(app: &App) -> Result<Value> {
-    let mut guard = app.login.lock().map_err(|_| anyhow!("lock"))?;
-    let login = guard.as_mut().ok_or_else(|| err("input", "没有进行中的扫码登录"))?;
-    let deadline = Instant::now() + LOGIN_POLL_MOST;
-    let status = match login.boot.poll_login_guarded(&mut login.attempt, deadline, || false) {
-        Ok(s) => s,
-        Err(e) if is_retryable_login_poll_error(&e) => LoginStatus::Pending,
-        Err(e) => {
-            if let Some(reason) = wechat_protocol::login_lan_error_reason(&e) {
-                return Err(err("lan", &format!("微信要求手机和这台电脑在同一个局域网里确认登录（{reason}）")));
-            }
-            return Err(e);
-        }
-    };
-    let s = match status {
-        LoginStatus::Pending => "pending",
-        LoginStatus::Scanned => "scanned",
-        LoginStatus::Approved | LoginStatus::Completed => "confirmed",
-        LoginStatus::Expired => "expired",
-        LoginStatus::Cancelled => "cancelled",
-        LoginStatus::Rejected => "rejected",
-    };
-    Ok(json!({"status": s}))
+    let login = app.login.lock().map_err(|_| anyhow!("lock"))?.clone().ok_or_else(|| err("input", "没有进行中的扫码登录"))?;
+    let (status, message) = login.status.lock().map_err(|_| anyhow!("lock"))?.clone();
+    if status == "failed" {
+        return Err(err("login", &message));
+    }
+    Ok(json!({"status": status, "message": message}))
 }
 
 fn account_name(app: &App, client: &NativeClient, own: &str) -> String {
@@ -259,12 +303,16 @@ fn account_name(app: &App, client: &NativeClient, own: &str) -> String {
 
 fn op_login_finish(app: &App) -> Result<Value> {
     let login = app.login.lock().map_err(|_| anyhow!("lock"))?.take().ok_or_else(|| err("input", "没有进行中的扫码登录"))?;
-    let mut attempt = login.attempt;
-    let state = login.boot.complete_login(&mut attempt)?;
-    let saved = serde_json::to_value(&state)?;
+    let state = login.state.lock().map_err(|_| anyhow!("lock"))?.take().ok_or_else(|| err("input", "还没有在手机上确认"))?;
+    let first = serde_json::to_value(&state)?;
+    if let Ok(mut l) = app.persist.latest.lock() {
+        *l = None;
+    }
     let own = app.adopt(state)?;
     let name = account_name(app, &app.client()?, &own);
-    Ok(json!({"state": saved, "account": {"id": own, "name": name}}))
+    // a renewal during the name lookup was sealed already: answer with that, never the older first state
+    let latest = app.persist.latest.lock().ok().and_then(|l| l.clone()).unwrap_or(first);
+    Ok(json!({"state": latest, "account": {"id": own, "name": name}}))
 }
 
 fn op_restore(app: &App, p: &Value) -> Result<Value> {
@@ -276,7 +324,7 @@ fn op_restore(app: &App, p: &Value) -> Result<Value> {
 }
 
 fn op_logout(app: &App) -> Result<Value> {
-    app.stop_listening();
+    app.stop_listening(None);
     let client = app.client.lock().map_err(|_| anyhow!("lock"))?.take();
     if let Some(c) = client {
         let _ = app.rt.block_on(async { tokio::time::timeout(Duration::from_secs(8), c.logout()).await });
@@ -293,19 +341,21 @@ fn op_listen(app: Arc<App>, p: &Value) -> Result<Value> {
         Some(s) if !s.is_empty() => B64.decode(s).map_err(|_| err("input", "cursor"))?,
         _ => vec![],
     };
-    app.stop_listening();
+    app.stop_listening(None);
+    let gen = app.gen.fetch_add(1, Ordering::SeqCst) + 1;
     let stop = Arc::new(AtomicBool::new(false));
-    *app.listening.lock().map_err(|_| anyhow!("lock"))? = Some(stop.clone());
-    std::thread::Builder::new().name("listen".into()).spawn(move || listen_loop(app, client, cursor, stop))?;
-    Ok(json!({}))
+    *app.listening.lock().map_err(|_| anyhow!("lock"))? = Some((gen, stop.clone()));
+    std::thread::Builder::new().name("listen".into()).spawn(move || listen_loop(app, client, cursor, stop, gen))?;
+    Ok(json!({"gen": gen}))
 }
 
-fn listen_loop(app: Arc<App>, client: NativeClient, mut cursor: Vec<u8>, stop: Arc<AtomicBool>) {
+fn listen_loop(app: Arc<App>, client: NativeClient, mut cursor: Vec<u8>, stop: Arc<AtomicBool>, gen: u64) {
     let mut backoff = Duration::from_secs(1);
+    let mut renewed = false;
     while !stop.load(Ordering::SeqCst) {
         let started = Instant::now();
-        let result = session(&app, &client, &mut cursor, &stop);
-        app.out.line(&json!({"event": "link", "up": false}));
+        let result = session(&app, &client, &mut cursor, &stop, gen);
+        app.out.line(&json!({"event": "link", "gen": gen, "up": false}));
         let e = match result {
             Ok(()) => return,
             Err(e) => e,
@@ -319,12 +369,24 @@ fn listen_loop(app: Arc<App>, client: NativeClient, mut cursor: Vec<u8>, stop: A
             _ => {}
         }
         if is_session_rejected(&e) {
-            app.out.line(&json!({"event": "auth_lost", "message": "微信登录已失效，需要重新扫码"}));
+            // the daemon's rule: one renewal with the saved credentials before asking for a new QR
+            if !renewed {
+                renewed = true;
+                match client.renew_session_blocking(COMPUTER_NAME) {
+                    Ok(()) => {
+                        log("session renewed");
+                        continue;
+                    }
+                    Err(r) => log(&format!("renewal failed: {r:#}")),
+                }
+            }
+            app.out.line(&json!({"event": "auth_lost", "gen": gen, "message": "微信登录已失效，需要重新扫码"}));
             return;
         }
         log(&format!("link down: {e:#}"));
         if started.elapsed() > Duration::from_secs(60) {
             backoff = Duration::from_secs(1);
+            renewed = false;
         }
         let until = Instant::now() + backoff;
         while Instant::now() < until && !stop.load(Ordering::SeqCst) {
@@ -338,11 +400,11 @@ fn heartbeat_interval(next: u32) -> Duration {
     Duration::from_secs((next as u64).clamp(30, 180))
 }
 
-fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &AtomicBool) -> Result<()> {
+fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &AtomicBool, gen: u64) -> Result<()> {
     let mut conn = client.open_push_connection_blocking()?;
     let beat = conn.heartbeat(cursor)?;
-    drain(app, &mut conn, cursor, 6, "catchup")?; // what came while away: stored, never acted on
-    app.out.line(&json!({"event": "link", "up": true}));
+    drain(app, &mut conn, cursor, 6, "catchup", gen, stop)?; // what came while away: stored, never acted on
+    app.out.line(&json!({"event": "link", "gen": gen, "up": true}));
     let mut next_beat = Instant::now() + heartbeat_interval(beat.next_interval);
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -352,13 +414,13 @@ fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &Atomic
             let beat = conn.heartbeat(cursor)?;
             next_beat = Instant::now() + heartbeat_interval(beat.next_interval);
             if beat.selector & 7 != 0 {
-                drain(app, &mut conn, cursor, 7, "live")?;
+                drain(app, &mut conn, cursor, 7, "live", gen, stop)?;
             }
         }
         if let Some(n) = conn.poll(Duration::from_secs(1))? {
             if n.command != 356 {
                 // 356 is a contact change; names are read when shown
-                drain(app, &mut conn, cursor, 1, "live")?;
+                drain(app, &mut conn, cursor, 1, "live", gen, stop)?;
             }
         }
     }
@@ -370,10 +432,15 @@ fn drain(
     cursor: &mut Vec<u8>,
     scene: u32,
     origin: &str,
+    gen: u64,
+    stop: &AtomicBool,
 ) -> Result<()> {
     let own = app.own();
     for _ in 0..8 {
         let batch = conn.sync(cursor, scene)?;
+        if stop.load(Ordering::SeqCst) {
+            return Ok(()); // a stopped listener says nothing more
+        }
         for command in &batch.commands {
             if command.id != 5 {
                 continue;
@@ -388,7 +455,6 @@ fn drain(
             let server_id = m.server_message_id.clone().unwrap_or_default();
             let content = m.content_text.clone().unwrap_or_else(|| String::from_utf8_lossy(&m.content).into_owned());
             let source = m.msgsource.as_ref().map(|s| String::from_utf8_lossy(s).into_owned());
-            let origin = if m.outgoing && app.was_sent_here(&server_id) { "local_send" } else { origin };
             let raw = message::Raw {
                 chat: &m.peer,
                 from: &m.from,
@@ -399,17 +465,20 @@ fn drain(
                 created_at: m.created_at,
                 msgsource: source.as_deref(),
             };
-            let (event, quotable) = message::normalize(&raw, &own, origin);
-            if let Some(q) = quotable {
-                app.remember_quote(q);
+            let (mut event, _) = message::normalize(&raw, &own, origin);
+            if m.outgoing {
+                let text = event.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+                if app.is_echo(&m.peer, &text) {
+                    event["origin"] = json!("local_send");
+                }
             }
+            event["gen"] = json!(gen);
             app.out.line(&event);
         }
-        if !batch.cursor.is_empty() {
-            *cursor = batch.cursor.clone();
-        }
+        // the protocol computes the next cursor (an empty one is a reset the server asked for)
+        *cursor = batch.cursor.clone();
         // after the batch's messages: the backend stores the cursor once it has handled them
-        app.out.line(&json!({"event": "cursor", "cursor": B64.encode(&*cursor)}));
+        app.out.line(&json!({"event": "cursor", "gen": gen, "cursor": B64.encode(&*cursor)}));
         if !batch.continuation {
             return Ok(());
         }
@@ -419,39 +488,46 @@ fn drain(
 
 // ---------------------------------------------------------------- sends
 
-fn quote_reference(q: &message::Quotable, own: &str, display: &str) -> wechat_protocol::quote_send::QuoteReference {
-    // agent-wechat's daemon: from_user is me for my own message, the group for a group member's, else the sender;
-    // chat_user is the sender
-    let from_user = if q.outgoing {
-        own.to_owned()
-    } else if message::is_group(&q.chat) {
-        q.chat.clone()
-    } else {
-        q.sender.clone()
-    };
-    wechat_protocol::quote_send::QuoteReference {
-        message_type: q.message_type,
-        server_id: q.server_id.clone(),
-        from_user,
-        chat_user: if q.outgoing { own.to_owned() } else { q.sender.clone() },
-        display_name: if display.is_empty() { q.sender.clone() } else { display.to_owned() },
-        content: q.content.clone(),
-        created_at: q.created_at,
-        msg_source: q.msgsource.clone(),
+/// agent-wechat's daemon: from_user is me for my own message, the group for a group member's, else the sender;
+/// chat_user is the sender.
+fn quote_reference(q: &Value, chat: &str, own: &str) -> Result<wechat_protocol::quote_send::QuoteReference> {
+    let get = |k: &str| q.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let outgoing = q.get("outgoing").and_then(Value::as_bool).unwrap_or(false);
+    let sender = if outgoing { own.to_owned() } else { get("sender") };
+    if get("server_id").is_empty() || sender.is_empty() || get("content").is_empty() {
+        return Err(err("input", "引用的消息缺少信息"));
     }
+    let from_user = if outgoing {
+        own.to_owned()
+    } else if message::is_group(chat) {
+        chat.to_owned()
+    } else {
+        sender.clone()
+    };
+    let display = get("display_name");
+    Ok(wechat_protocol::quote_send::QuoteReference {
+        message_type: 1,
+        server_id: get("server_id"),
+        from_user,
+        chat_user: sender.clone(),
+        display_name: if display.is_empty() { sender } else { display },
+        content: get("content"),
+        created_at: q.get("created_at").and_then(Value::as_u64).unwrap_or(0) as u32,
+        msg_source: Some(get("msgsource")).filter(|s| !s.is_empty()),
+    })
 }
 
-/// How a send ended: "sent" (the server took it), "rejected" (the server refused it), "not_sent" (nothing left this
-/// program) or "uncertain" (it may have gone out: never sent again blindly).
+/// How a send ended: "sent" (the server took this very send), "rejected" (the server refused it), "not_sent"
+/// (nothing left this program) or "uncertain" (it may have gone out: never sent again blindly).
 fn send_outcome(e: &anyhow::Error) -> (&'static str, String) {
-    if e.chain().any(|c| c.downcast_ref::<NativeRequestNotSubmitted>().is_some()) {
+    if not_submitted(e) {
         return ("not_sent", format!("{e:#}"));
+    }
+    if let Some(k) = kinded(e) {
+        return (if k.kind == "rejected" { "rejected" } else { "not_sent" }, k.message.clone());
     }
     if let Some(r) = ServiceRejected::find(e) {
         return ("rejected", format!("微信拒绝了这条消息（{}）", r.code));
-    }
-    if let Some(k) = e.chain().find_map(|c| c.downcast_ref::<Kinded>()) {
-        return (if k.kind == "rejected" { "rejected" } else { "not_sent" }, k.message.clone());
     }
     ("uncertain", format!("{e:#}"))
 }
@@ -460,7 +536,7 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
     let chat = str_arg(p, "chat")?.to_owned();
     let text = str_arg(p, "text")?.to_owned();
     let key = str_arg(p, "key")?.to_owned();
-    let reply_to = p.get("reply_to").and_then(Value::as_str).unwrap_or("").to_owned();
+    let quote = p.get("quote").filter(|q| q.is_object()).cloned();
     let mut members: Vec<(String, String)> = vec![];
     for m in p.get("mentions").and_then(Value::as_array).cloned().unwrap_or_default() {
         let id = m.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
@@ -469,7 +545,6 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
             members.push((id, name));
         }
     }
-    let quote_name = p.get("reply_name").and_then(Value::as_str).unwrap_or("").to_owned();
     let client = app.client()?;
     let own = app.own();
     let attempt = (|| -> Result<(String, Option<String>)> {
@@ -485,41 +560,39 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
             return Err(err("input", "key"));
         }
         let created_at = wire::unix_time()?;
-        let quoted = if reply_to.is_empty() {
-            None
-        } else {
-            app.quotes.lock().ok().and_then(|g| g.0.get(&reply_to).cloned()).filter(|q| q.chat == chat)
-        };
-        if let Some(q) = quoted {
-            let reference = quote_reference(&q, &own, &quote_name);
+        if let Some(q) = &quote {
+            let reference = quote_reference(q, &chat, &own)?;
             let xml = wechat_protocol::quote_send::quote_xml(&own, &rendered, &reference)?;
+            app.intend(&chat, &rendered);
             let r = app.rt.block_on(client.send_quote(&chat, &client_id.to_string(), created_at, &xml, source.as_deref()))?;
             return match r.status {
-                wechat_protocol::media_send::SendStatus::ServerAccepted => Ok(("sent".into(), r.server_message_id)),
+                wechat_protocol::media_send::SendStatus::ServerAccepted if r.client_id_matches == Some(true) => {
+                    Ok(("sent".into(), r.server_message_id))
+                }
                 wechat_protocol::media_send::SendStatus::Rejected => {
                     Err(err("rejected", &format!("微信拒绝了这条消息（{}）", r.service_code)))
                 }
-                wechat_protocol::media_send::SendStatus::NeedsReview => Ok(("uncertain".into(), r.server_message_id)),
+                _ => Ok(("uncertain".into(), None)), // accepted without matching this send, or needs review
             };
         }
+        app.intend(&chat, &rendered);
         let r = app.rt.block_on(client.send_text(
             &chat,
             &rendered,
             TextSendOptions { created_at, client_message_id: client_id, source },
         ))?;
+        let matches = r.returned_destination_matches && r.returned_client_id_matches;
+        if !matches {
+            return Ok(("uncertain".into(), None)); // a receipt that is not this send's says nothing about it
+        }
         if !r.accepted {
             let code = r.item_code.unwrap_or(r.outer_code);
             return Err(err("rejected", &format!("微信拒绝了这条消息（{code}）")));
         }
-        let matches = r.returned_destination_matches && r.returned_client_id_matches;
-        Ok((if matches { "sent".into() } else { "uncertain".into() }, r.server_message_id))
+        Ok(("sent".into(), r.server_message_id))
     })();
     match attempt {
-        Ok((status, id)) => {
-            let id = id.unwrap_or_default();
-            app.remember_sent(&id);
-            Ok(json!({"status": status, "message_id": id, "quoted": !reply_to.is_empty()}))
-        }
+        Ok((status, id)) => Ok(json!({"status": status, "message_id": id.unwrap_or_default(), "quoted": quote.is_some()})),
         Err(e) => {
             let (status, why) = send_outcome(&e);
             log(&format!("send {status}: {why}"));
@@ -556,11 +629,11 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
 
 fn op_room(app: &App, p: &Value) -> Result<Value> {
     let client = app.client()?;
-    let id = str_arg(p, "id")?.to_owned();
-    if !message::is_group(&id) {
+    let room = str_arg(p, "room_id")?.to_owned();
+    if !message::is_group(&room) {
         return Err(err("input", "不是群"));
     }
-    let r = app.rt.block_on(async { tokio::time::timeout(Duration::from_secs(8), client.lookup_room(&id, 0)).await });
+    let r = app.rt.block_on(async { tokio::time::timeout(Duration::from_secs(8), client.lookup_room(&room, 0)).await });
     let roster = match r {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return Err(e),
@@ -571,7 +644,7 @@ fn op_room(app: &App, p: &Value) -> Result<Value> {
         .iter()
         .map(|m| json!({"id": m.username, "nickname": m.nickname, "display": m.room_display_name}))
         .collect();
-    Ok(json!({"id": roster.room_id, "members": members, "owner": roster.owner}))
+    Ok(json!({"room_id": roster.room_id, "members": members, "owner": roster.owner}))
 }
 
 // ---------------------------------------------------------------- main
@@ -587,7 +660,7 @@ fn answer(app: &App, id: &Value, result: Result<Value>) {
         }
         Err(e) => {
             let kind = kind_of(&e);
-            let message = match e.chain().find_map(|c| c.downcast_ref::<Kinded>()) {
+            let message = match kinded(&e) {
                 Some(k) => k.message.clone(),
                 None => format!("{e:#}"),
             };
@@ -607,7 +680,7 @@ fn handle(app: Arc<App>, req: Value) {
         "restore" => op_restore(&app, &req),
         "listen" => op_listen(app.clone(), &req),
         "stop" => {
-            app.stop_listening();
+            app.stop_listening(req.get("gen").and_then(Value::as_u64).or(Some(0)));
             Ok(json!({}))
         }
         "send" => op_send(&app, &req),
@@ -622,7 +695,12 @@ fn handle(app: Arc<App>, req: Value) {
 fn main() -> Result<()> {
     let out = Arc::new(Out(Mutex::new(std::io::stdout())));
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
-    let persist = Arc::new(Persist { out: out.clone(), seq: AtomicU64::new(0), waiting: Mutex::new(HashMap::new()) });
+    let persist = Arc::new(Persist {
+        out: out.clone(),
+        seq: AtomicU64::new(0),
+        waiting: Mutex::new(HashMap::new()),
+        latest: Mutex::new(None),
+    });
     let app = Arc::new(App {
         out,
         rt,
@@ -630,9 +708,9 @@ fn main() -> Result<()> {
         login: Mutex::new(None),
         client: Mutex::new(None),
         own: Mutex::new(String::new()),
+        gen: AtomicU64::new(0),
         listening: Mutex::new(None),
-        quotes: Mutex::new((HashMap::new(), VecDeque::new())),
-        sent: Mutex::new(VecDeque::new()),
+        intents: Mutex::new(VecDeque::new()),
     });
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
@@ -659,6 +737,6 @@ fn main() -> Result<()> {
         std::thread::spawn(move || handle(app, req));
     }
     // stdin closed: the extension is going away
-    app.stop_listening();
+    app.stop_listening(None);
     Ok(())
 }

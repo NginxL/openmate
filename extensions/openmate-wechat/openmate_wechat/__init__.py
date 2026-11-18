@@ -46,7 +46,8 @@ def platform(manifest_path: str = "") -> Platform:
         manifest_path=manifest_path or os.path.join(ROOT, "persona-extension.json"),
         make_backend=make_backend,
         agent_purpose="lark.agent",  # the hub's /agent model setting (Settings › Model configuration › Lark /agent)
-        login_hint="用微信扫码，并在手机上确认登录（会作为一台新的电脑登录）",
+        login_hint="用微信扫码，并在手机上确认登录。会作为一台新电脑登录：你已登录的电脑版微信可能会下线；"
+                   "这是非官方协议，不能排除账号被限制的可能。",
         login_hint_scanned="已扫码，请在手机微信上点“登录”",
         login_hint_expired="二维码过期了，已换一张新的，请重新扫码",
         chats_page=CHATS_PAGE,
