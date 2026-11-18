@@ -13,6 +13,7 @@ import json
 import logging
 import threading
 import time
+import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import views
@@ -77,9 +78,26 @@ def row(title: str, subtitle: str = "", value: str = "", action: str = "", key: 
     return out
 
 
-def done_action(key: str) -> dict:
-    """A row's 处理完: hides it until it changes (a new message, an update)."""
-    return {"title": "处理完", "icon": "check", "swipe": True, "action": {"id": "done:" + key}}
+def done_action(key: str, version: Optional[str] = None) -> dict:
+    """A row's 处理完: hides it until it changes (a new message, an update). With version, what the page showed:
+    a newer one arrived since is not hidden by it."""
+    return {"title": "处理完", "icon": "check", "swipe": True, "action": {"id": done_id(key, version)}}
+
+
+def done_id(key: str, version: Optional[str] = None) -> str:
+    return "done:" + key + ("" if version is None else "|" + urllib.parse.quote(str(version), safe=""))
+
+
+def split_done(rest: str) -> Tuple[str, Optional[str]]:
+    """(the thing, the version the page showed or None) of what follows "done:" (a page drawn before versions)."""
+    ident, sep, v = rest.rpartition("|")
+    if not sep:
+        return rest, None
+    return ident, urllib.parse.unquote(v)
+
+
+class NotYet(Exception):
+    """A first read is still on its way: the page shows that, and draws again soon."""
 
 
 def tile(title: str, value: str = "", subtitle: str = "", icon: str = "", color: str = "", key: str = "",
@@ -166,12 +184,16 @@ class Fresh:
         self._reading = threading.Lock()  # one read at a time
         self._kept: Optional[Tuple[float, Any, Any]] = None  # (read at, key, value)
         self._busy = False
+        self._cold: Optional[threading.Event] = None  # a first read under way for a bounded get(wait)
+        self._cold_error: Optional[BaseException] = None
 
     def _usable(self, k, within: float) -> bool:
         kept = self._kept
         return kept is not None and kept[1] == k and self.clock() - kept[0] < within
 
-    def get(self) -> Any:
+    def get(self, wait: Optional[float] = None) -> Any:
+        """The value. With wait, a read that has to be waited for is waited for that long at most (the page has 20
+        seconds in all): NotYet when it is still on its way (it goes on in the background), its error when it failed."""
         k = self.key()
         again = False
         with self._mu:
@@ -188,6 +210,8 @@ class Fresh:
             return value
         if value is not None:
             return value
+        if wait is not None:
+            return self._bounded(k, wait)
         with self._reading:
             with self._mu:  # read by someone else meanwhile
                 if self._usable(k, self.ahead):
@@ -195,6 +219,40 @@ class Fresh:
             value = self.read()
             self._keep(k, value)
             return value
+
+    def _bounded(self, k, wait: float) -> Any:
+        with self._mu:
+            ev = self._cold
+            start = ev is None
+            if start:
+                ev = self._cold = threading.Event()
+                self._cold_error = None
+
+        def run():
+            try:
+                with self._reading:
+                    with self._mu:
+                        done = self._usable(k, self.ahead)
+                    if not done:
+                        self._keep(k, self.read())
+            except BaseException as e:
+                with self._mu:
+                    self._cold_error = e
+            finally:
+                with self._mu:
+                    self._cold = None
+                ev.set()
+
+        if start:
+            self.spawn(run)
+        ev.wait(max(0.0, wait))
+        with self._mu:
+            if self._usable(k, self.stale):
+                return self._kept[2]
+            err = self._cold_error if ev.is_set() else None
+        if err is not None:
+            raise err
+        raise NotYet(self.name)
 
     def _again(self) -> None:
         k = self.key()
@@ -291,10 +349,15 @@ class ChatsToday:
         if app.store is None:
             return out
         oldest = time.time() - self.needs_hours() * 3600.0
-        for chat in app.store.chats_since(time.time() - app.timing.inbox_window, app.timing.inbox_most):
+        since = min(time.time() - app.timing.inbox_window, oldest)  # needs_hours may go back further (7 days)
+        if only is not None:
+            chats = [c for c in (app.store.get_chat(i) for i in sorted(only)) if c is not None and (c.get("last_at") or 0) >= since]
+        else:
+            chats = app.store.chats_since(since, app.timing.inbox_most)
+        for chat in chats:
             if only is not None and chat["id"] not in only:
                 continue
-            rows = app.store.messages_before(chat["id"], None, 60)
+            rows = app.store.inbox_rows(chat["id"], 60)
             thing = views.inbox_thing(chat, rows, platform=app.platform.name, tz=app.tz, me=app.me_name(), rules="",
                                       can_reply=False)
             if thing is None or thing.get("done") or thing["kind"] not in ("dm", "mention"):
@@ -339,16 +402,19 @@ class ChatsToday:
         self.done = [t for t in out if marked.get(t["_done_key"]) == t["_version"]]
         return [t for t in out if marked.get(t["_done_key"]) != t["_version"]]
 
-    def dismiss(self, chat_id: str) -> bool:
-        """Mark a chat's need 处理完 (until a newer message, or a newer @me in a group). False: it needs nothing now."""
+    def dismiss(self, chat_id: str, version: Optional[str] = None) -> str:
+        """Mark a chat's need 处理完 (until a newer message, or a newer @me in a group). With version, only the need
+        the page showed: "newer" when a newer message came since (it stays), "none" when it needs nothing now, "ok"."""
         app = self.app
-        for t in self.needs() + self.done:
+        for t in self.needs(only={chat_id}) + self.done:
             if t["_chat"]["id"] == chat_id:
+                if version is not None and version != t["_version"]:
+                    return "newer"
                 app.store.dismiss(t["_done_key"], t["_version"])
                 if hasattr(app, "mark_changed"):
                     app.mark_changed("inbox")  # the badge counts again
-                return True
-        return False
+                return "ok"
+        return "none"
 
     def undismiss(self, chat_id: str) -> None:
         """Bring a chat's need back (恢复). It stays back while the service still says the chat is done there (the
@@ -460,7 +526,11 @@ class ChatsPage(Page):
             return self._overview(version)
 
         if aid.startswith("done:chat:"):
-            if not self.data.dismiss(aid[len("done:chat:"):]):
+            chat_id, seen = split_done(aid[len("done:chat:"):])
+            got = self.data.dismiss(chat_id, seen)
+            if got == "newer":
+                return {"toast": "这个会话又有新消息了，先看一下", "view": here()}
+            if got == "none":
                 return {"toast": "这个会话现在没有要处理的了", "view": here()}
             return {"toast": "已标记处理完，有新消息会再出现", "view": here()}
         if aid.startswith("undone:chat:"):
@@ -647,7 +717,7 @@ class ChatsPage(Page):
             rows.append(row(t["title"], "%s：%s" % (t["sender"], t["preview"]), when(t["_at"], app.tz),
                             "" if self.card else "chat:" + chat["id"], key="need:" + chat["id"],
                             badge={"text": label, "tone": "caution" if t["kind"] == "mention" else "neutral"},
-                            actions=[done_action("chat:" + chat["id"])] if version >= 6 and not self.card else None))
+                            actions=[done_action("chat:" + chat["id"], t["_version"])] if version >= 6 and not self.card else None))
         sections = [{"items": [self._summary(c, version)]}]
         if rows:
             sections.append({"title": "需要我", "items": rows})
@@ -688,8 +758,9 @@ class ChatsPage(Page):
         if not items:
             items = [empty("最近没有消息", "", version)]
         top = [{"type": "button", "title": "返回", "action": {"id": "back"}}]
-        if any(t["_chat"]["id"] == chat_id for t in self.data.needs()):
-            top.append({"type": "button", "title": "处理完", "action": {"id": "done:chat:" + chat_id}})
+        need = next((t for t in self.data.needs(only={chat_id}) if t["_chat"]["id"] == chat_id), None)
+        if need is not None:  # this chat's need only (not every chat's), with the version shown
+            top.append({"type": "button", "title": "处理完", "action": {"id": done_id("chat:" + chat_id, need["_version"])}})
         return {"title": views.chat_name(chat, chat_id), "state": state_text({"chat": chat_id}), "refresh_after": REFRESH,
                 "sections": [{"items": top}, {"title": views.where(app.platform.name, chat, chat_id), "items": items}]}
 

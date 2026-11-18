@@ -7,8 +7,8 @@ import unittest
 from harness import Harness, fast, wait_until
 
 
-def signed_in(test):
-    h = Harness(test)
+def signed_in(test, config=None):
+    h = Harness(test, config=config)
     h.sign_in()
     wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
     return h
@@ -32,9 +32,11 @@ class DoneTest(unittest.TestCase):
         h = signed_in(self)
         view = self.page(h)
         rows = [s for s in view["sections"] if s.get("title") == "需要我"][0]["items"]
-        self.assertEqual(rows[0]["actions"], [{"title": "处理完", "icon": "check", "swipe": True,
-                                               "action": {"id": "done:chat:chat_example_dm_a"}}])
-        out = self.act(h, "done:chat:chat_example_dm_a")
+        aid = rows[0]["actions"][0]["action"]["id"]
+        self.assertTrue(aid.startswith("done:chat:chat_example_dm_a|"), aid)  # with the version the page showed
+        self.assertEqual({k: v for k, v in rows[0]["actions"][0].items() if k != "action"},
+                         {"title": "处理完", "icon": "check", "swipe": True})
+        out = self.act(h, aid)
         self.assertIn("已标记处理完", out["toast"])
         self.assertEqual(self.needs(out["view"]), ["示例项目群"])
         done = [s for s in out["view"]["sections"] if s.get("title") == "已标记处理完"][0]
@@ -47,6 +49,33 @@ class DoneTest(unittest.TestCase):
         h.world.push("chat_example_dm_a", "user_example_a", "还在吗？")
         wait_until(lambda: "示例同事甲" in self.needs(self.page(h)), what="back with a new message")
         wait_until(lambda: self.badges(h)[-1].get("text") == "2", what="the badge again")
+
+    def test_a_page_drawn_before_a_new_message_does_not_hide_it(self):
+        h = signed_in(self)
+        rows = [s for s in self.page(h)["sections"] if s.get("title") == "需要我"][0]["items"]
+        aid = rows[0]["actions"][0]["action"]["id"]
+        h.world.push("chat_example_dm_a", "user_example_a", "又一个问题")  # arrives after the page was drawn
+        wait_until(lambda: "又一个问题" in str(h.app.store.messages_before("chat_example_dm_a", None, 3)), what="stored")
+        out = self.act(h, aid)
+        self.assertIn("新消息", out["toast"])
+        self.assertIn("示例同事甲", self.needs(out["view"]), "what the page did not show stays")
+        out = self.act(h, "done:chat:chat_example_dm_a")  # a page from before versions: the latest, as before
+        self.assertNotIn("示例同事甲", self.needs(out["view"]))
+
+    def test_needs_reach_as_far_back_as_set(self):
+        h = signed_in(self, config={"needs_hours": 168})
+        h.world.add_chat(type(h.world.chats["chat_example_dm_a"])("chat_example_dm_old", "dm", "示例旧私聊",
+                                                                 peer_id="user_example_b"))
+        m = h.world.make("chat_example_dm_old", "user_example_b", "四天前问你的事", ago=4 * 86400)
+        h.app.ingest([m], live=False)
+        self.assertIn("示例旧私聊", self.needs(self.page(h)), "4 days old, within the 7 days set")
+
+    def test_an_at_me_pushed_out_by_chatter_still_needs_me(self):
+        h = signed_in(self)
+        at = h.world.make("chat_example_chatter", "user_example_a", "@示例用户 这个你看下", at_me=True)
+        rest = [h.world.make("chat_example_chatter", "user_example_b", "闲聊第%d条" % i) for i in range(80)]
+        h.app.ingest([at] + rest, live=False)
+        self.assertIn("示例闲聊群", self.needs(self.page(h)), "80 lines later, the @me is still unanswered")
 
     def test_a_group_comes_back_only_with_a_new_at_me(self):
         h = signed_in(self)

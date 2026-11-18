@@ -44,11 +44,13 @@ class Chats:
     def needs(self):
         return self._needs
 
-    def dismiss(self, chat_id):
+    def dismiss(self, chat_id, version=None):
         hit = [t for t in self._needs if t["_chat"]["id"] == chat_id]
+        if hit and version is not None and version != hit[0].get("_version"):
+            return "newer"
         self._needs = [t for t in self._needs if t not in hit]
         self.done += hit
-        return bool(hit)
+        return "ok" if hit else "none"
 
     bots = 0
 
@@ -182,14 +184,51 @@ class TodayTest(unittest.TestCase):
             self.assertNotIn("layout", view)
             self.assertFalse(any(k in s for s in body(view) for k in ("span", "icon", "link", "columns")))
 
+    def test_a_page_drawn_before_a_change_does_not_hide_it(self):
+        now = [NOW]
+        answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
+        page, _, _ = make(answers=answers, clock=lambda: now[0])
+        view = page.render({"ui_version": 6})
+        aid = rows(body(view)[0])[1]["actions"][0]["action"]["id"]  # the inbox item, as drawn
+        answers["/api/v1/inbox"] = {"items": [dict(PERSONA["/api/v1/inbox"]["items"][0], updated_at="2026-11-16T03:00:00Z")]}
+        now[0] += 700
+        page.render({"ui_version": 6})  # read again: it changed
+        out = page.action({"action": {"id": aid}, "ui_version": 6})
+        self.assertIn("新变化", out["toast"])
+        self.assertIn("示例告警", [r["title"] for r in rows(body(out["view"])[0])])
+
+    def test_inbox_items_done_or_not_needing_me_are_not_counted(self):
+        answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
+        answers["/api/v1/inbox"] = {"items": [
+            {"id": "i1", "title": "示例告警", "tier": "action", "status": "action", "updated_at": "2026-11-16T01:00:00Z"},
+            {"id": "i3", "title": "已处理的告警", "tier": "action", "done_at": "2026-11-16T02:00:00Z"},
+            {"id": "i4", "title": "在跑的", "tier": "action", "status": "working"}]}
+        page, _, _ = make(answers=answers)
+        titles = [r["title"] for r in rows(body(page.render({"ui_version": 6}))[0])]
+        self.assertIn("示例告警", titles)
+        self.assertNotIn("已处理的告警", titles, "done: listed by Persona for 3 days, not a need")
+        self.assertNotIn("在跑的", titles, "status working: not under Needs you")
+
+    def test_a_source_not_read_is_not_cleared(self):
+        answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
+        answers["/api/v1/inbox"] = HubError(503, "离线", "assistant_offline")
+        answers["/api/v1/sessions?state=needs_you"] = {"sessions": []}
+        answers["/api/v1/todos"] = {"todos": []}
+        page, _, _ = make(answers=answers, needs=[])
+        status = page.render({"ui_version": 6})["sections"][1]["items"][0]
+        needs_tile = [t for t in status["tiles"] if t["title"] == "需要我"][0]
+        self.assertEqual(needs_tile["badge"]["text"], "读不全", "the inbox could not be read: not 清空")
+
     def test_marked_done(self):
         now = [NOW]
         answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
         page, card, _ = make(answers=answers, clock=lambda: now[0])
         view = page.render({"ui_version": 6})
         needs = rows(body(view)[0])
-        self.assertEqual([r["actions"][0]["action"]["id"] for r in needs[:-1]],
+        self.assertEqual([r["actions"][0]["action"]["id"].split("|")[0] for r in needs[:-1]],
                          ["done:wait:s1", "done:inbox:i1", "done:ask:t1", "done:chat:c1", "done:chat:c2"])
+        self.assertEqual(needs[1]["actions"][0]["action"]["id"], "done:inbox:i1|2026-11-16T01%3A00%3A00Z",
+                         "with the version the page showed")
         self.assertTrue(all(r["actions"][0]["title"] == "处理完" for r in needs[:-1]))
         self.assertFalse(any("actions" in r for r in card.render({"ui_version": 6})["sections"][1]["items"]))
         self.assertFalse(any("actions" in r for r in rows(body(page.render({"ui_version": 5}))[0])), "a row menu is 6")

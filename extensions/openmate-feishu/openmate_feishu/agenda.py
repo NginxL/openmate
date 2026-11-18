@@ -18,7 +18,7 @@ import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from openmate_core.ui import Fresh, Page, day_start, empty, row, stat
+from openmate_core.ui import Fresh, NotYet, Page, day_start, empty, row, stat
 
 log = logging.getLogger("openmate.calendar")
 
@@ -31,6 +31,9 @@ KEEP = 300.0  # while running, read this often anyway, so that a draw after a lo
 TIMEOUT = 25
 REFRESH = 120
 LATER_MOST = 30
+PENDING_MOST = 30  # a page holds 300 items: invitations are also in their day's list
+TODAY_MOST = 60
+PAGE_WAIT = 12.0  # the 日程 page waits this long at most for a first read (Persona gives a page 20 seconds)
 WEEKDAYS = "一二三四五六日"
 RSVP = {"needs_action": ("待回复", "caution"), "tentative": ("暂定", "caution"), "accept": ("已接受", "neutral"),
         "decline": ("已拒绝", "neutral")}
@@ -224,6 +227,7 @@ class Event:
         self.start, self.all_day = event_time(e.get("start_time"), tz)
         self.end, _ = event_time(e.get("end_time"), tz)
         self.rsvp = str(e.get("self_rsvp_status") or "")
+        self.free = str(e.get("free_busy_status") or "").lower() == "free"  # marked free: not a meeting
         org = e.get("event_organizer") if isinstance(e.get("event_organizer"), dict) else {}
         self.organizer = str(org.get("display_name") or "")
         vchat = e.get("vchat") if isinstance(e.get("vchat"), dict) else {}
@@ -274,9 +278,14 @@ class Agenda:
     def warm(self) -> None:
         self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
-    def events(self) -> List[Event]:
+    def events(self, wait: Optional[float] = None) -> List[Event]:
+        """The events; with wait, a first read is waited for that long at most (CalendarError "loading" after)."""
         tz = self.app.tz
-        out = [Event(e, tz) for e in self._fresh.get()]
+        try:
+            got = self._fresh.get(wait)
+        except NotYet:
+            raise CalendarError("正在读取日程，稍后自动刷新", "loading")
+        out = [Event(e, tz) for e in got]
         out = [e for e in out if e.start is not None and e.rsvp != "decline"]
         out.sort(key=lambda e: (e.start, e.title))
         return out
@@ -302,7 +311,7 @@ class CalendarPage(Page):
 
     def _stats(self, now, today: List[Event], events: List[Event], version: int) -> dict:
         timed = [e for e in today if not e.all_day]
-        current = [e for e in timed if e.start <= now and (e.end or e.start) > now]
+        current = [e for e in timed if e.start <= now and (e.end or e.start) > now and not e.free]
         upcoming = [e for e in timed if e.start > now]
         nxt = upcoming[0] if upcoming else None
         stats = [stat("今天", "%d 个" % len(today), "已过 %d 个" % sum(1 for e in timed if (e.end or e.start) <= now) if timed else "")]
@@ -327,8 +336,10 @@ class CalendarPage(Page):
     def render(self, params: dict) -> dict:
         version = int(params.get("ui_version") or 1)
         try:
-            events = self.agenda.events()
+            events = self.agenda.events(PAGE_WAIT)
         except CalendarError as e:
+            if e.kind == "loading":
+                return {"sections": [{"items": [empty("正在读取日程", "稍后自动刷新", version)]}], "refresh_after": 5}
             return {"sections": [{"items": [empty("日程读不到", e.message, version)]}], "refresh_after": REFRESH * 5}
         now, today, later = self._split(events)
         sections: List[Dict[str, Any]] = [{"items": [self._stats(now, today, events, version)]}]
@@ -338,9 +349,11 @@ class CalendarPage(Page):
             return {"sections": sections, "refresh_after": REFRESH}
         pending = [e for e in events if e.rsvp == "needs_action"]
         if pending:
-            sections.append({"title": "待回复的邀请", "items": [self._row(e, True, True, "pending") for e in pending]})
-        sections.append({"title": "今天", "items": [self._row(e, False, True, "today") for e in today]
-                         or [empty("今天没有日程", "", version)]})
+            sections.append({"title": "待回复的邀请", "items": [self._row(e, True, True, "pending") for e in pending[:PENDING_MOST]],
+                             **({"footer": "还有 %d 个" % (len(pending) - PENDING_MOST)} if len(pending) > PENDING_MOST else {})})
+        sections.append({"title": "今天", "items": [self._row(e, False, True, "today") for e in today[:TODAY_MOST]]
+                         or [empty("今天没有日程", "", version)],
+                         **({"footer": "还有 %d 个" % (len(today) - TODAY_MOST)} if len(today) > TODAY_MOST else {})})
         if later:
             sections.append({"title": "接下来 %d 天" % (DAYS - 1),
                              "items": [self._row(e, True, True, "later") for e in later[:LATER_MOST]],

@@ -112,6 +112,49 @@ class AgendaTest(unittest.TestCase):
         pages_default.render({"ui_version": 6})
         self.assertNotIn("--profile", runner2.calls[0][0])
 
+    def test_an_event_marked_free_is_no_meeting(self):
+        free = dict(ev("f1", "给自己的提醒", 16, (9, 0), (12, 0)), free_busy_status="free")
+        page, _, _, _ = pages(runner=Runner({"ok": True, "data": [free]}))
+        grid = items(page.render({"ui_version": 6}))[0]["stats"]
+        self.assertNotIn(("现在", "会议中"), [(s["label"], s["value"]) for s in grid])
+        self.assertIn("给自己的提醒", [r["title"] for r in section(page.render({"ui_version": 6}), "今天")])
+
+    def test_150_invitations_stay_within_a_page(self):
+        many = [ev("p%d" % i, "邀请%d" % i, 16, (11, 0), (11, 30), rsvp="needs_action") for i in range(150)]
+        page, _, _, _ = pages(runner=Runner({"ok": True, "data": many}))
+        view = page.render({"ui_version": 6})
+        n = len(items(view))  # check_view: within 300 items
+        self.assertLessEqual(n, 300)
+        pending = [s for s in view["sections"] if s.get("title") == "待回复的邀请"][0]
+        self.assertIn("还有 120 个", pending.get("footer", ""))
+
+    def test_a_first_read_never_holds_the_page_past_its_wait(self):
+        import threading
+        gate = threading.Event()
+
+        class Slow(Runner):
+            def __call__(self, args, **kw):
+                gate.wait(5)
+                return Runner.__call__(self, args, **kw)
+
+        cfg = {"lark_cli": "/bin/sh", "lark_cli_profile": "persona"}
+        app = types.SimpleNamespace(config=cfg, tz=TZ)
+        shared = agenda.Agenda(app, clock=lambda: NOW, cli=agenda.LarkCLI(cfg, run=Slow()))
+        page = agenda.CalendarPage(app, shared)
+        old = agenda.PAGE_WAIT
+        agenda.PAGE_WAIT = 0.2
+        self.addCleanup(setattr, agenda, "PAGE_WAIT", old)
+        view = page.render({"ui_version": 6})
+        self.assertEqual(view["refresh_after"], 5)
+        self.assertIn("正在读取日程", str(view))
+        gate.set()
+        import time as _t
+        for _ in range(50):
+            if "正在读取" not in str(page.render({"ui_version": 6})):
+                break
+            _t.sleep(0.05)
+        self.assertNotIn("正在读取", str(page.render({"ui_version": 6})), "drawn once the read is in")
+
     def test_the_page(self):
         page, _, _, _ = pages()
         view = page.render({"ui_version": 6})

@@ -1193,7 +1193,7 @@ class ConnectorApp:
         things = []
         me = self.me_name()
         for chat in self.store.chats_since(time.time() - t.inbox_window, t.inbox_most):
-            rows = self.store.messages_before(chat["id"], None, 60)
+            rows = self.store.inbox_rows(chat["id"], 60)
             thing = views.inbox_thing(chat, rows, platform=self.platform.name, tz=self.tz, me=me, rules=rules,
                                       can_reply=self.signed_in)
             if thing is not None:

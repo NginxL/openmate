@@ -423,6 +423,19 @@ class Store:
         )
         return [_message_row(r) for r in reversed(rows)]
 
+    def inbox_rows(self, chat_id: str, limit: int = 60) -> List[dict]:
+        """The chat's last limit messages (oldest first), and before them its newest @me the account has not answered
+        when later chatter pushed it out of them: a mention stays a mention however busy the group is."""
+        rows = self.messages_before(chat_id, None, limit)
+        if not rows or any(r.get("mine") or r.get("at_me") for r in rows):
+            return rows
+        r = self._one(
+            "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND at_me = 1 AND mine = 0 AND position < ? "
+            "AND position > COALESCE((SELECT MAX(position) FROM messages WHERE chat_id = ? AND mine = 1), -1) "
+            "ORDER BY position DESC, seq DESC LIMIT 1",
+            (chat_id, int(rows[0]["position"]), chat_id))
+        return ([_message_row(r)] + rows) if r is not None else rows
+
     def messages_after(self, chat_id: str, position: int, limit: int) -> List[dict]:
         rows = self._all(
             "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND position > ? ORDER BY position, seq LIMIT ?",

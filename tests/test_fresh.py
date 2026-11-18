@@ -123,5 +123,43 @@ class FreshTest(unittest.TestCase):
         self.assertEqual(calls, [p, q])
 
 
+class BoundedWaitTest(unittest.TestCase):
+    def test_a_first_read_is_waited_for_a_bounded_time(self):
+        import threading
+        from openmate_core.ui import Fresh, NotYet
+
+        gate = threading.Event()
+        reads = []
+
+        def read():
+            gate.wait(5)
+            reads.append(1)
+            return "value"
+
+        f = Fresh(read, 30.0, 900.0)
+        with self.assertRaises(NotYet):
+            f.get(wait=0.1)
+        with self.assertRaises(NotYet):
+            f.get(wait=0.1)  # the same read still on its way: not a second one
+        gate.set()
+        for _ in range(50):
+            try:
+                self.assertEqual(f.get(wait=0.1), "value")
+                break
+            except NotYet:
+                time.sleep(0.05)
+        self.assertEqual(len(reads), 1)
+
+    def test_a_failed_first_read_raises_its_error(self):
+        from openmate_core.ui import Fresh
+
+        def read():
+            raise ValueError("bad")
+
+        f = Fresh(read, 30.0, 900.0)
+        with self.assertRaises(ValueError):
+            f.get(wait=1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

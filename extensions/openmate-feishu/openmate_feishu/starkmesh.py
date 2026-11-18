@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from openmate_core.ui import Fresh, Page, empty, row, stat, tile, when
+from openmate_core.ui import Fresh, NotYet, Page, empty, row, stat, tile, when
 
 log = logging.getLogger("openmate.starkmesh")
 
@@ -36,6 +36,10 @@ REFRESH = 120
 WINDOWS = (("five_hour", "5 小时"), ("seven_day", "本周"), ("seven_day_fable", "Fable 本周"))
 ACCOUNT_WINDOWS = (("five_hour", "5 小时"), ("seven_day", "7D"), ("seven_day_fable", "Fable 7D"))  # an account's bars
 PERMISSIONS = "accounts.read、accounts.usage.read、accounts.stats.read、dashboard.read"
+ACCOUNTS_MOST = 40  # accounts listed on the page (four items each at most): a page holds 300
+ACCOUNT_PAGES = 5  # pages of 200 accounts read at most
+PAGE_WAIT = 12.0  # the page waits this long at most for a first read; the 今天 page's block CARD_WAIT
+CARD_WAIT = 2.0
 
 
 class StarkMeshError(Exception):
@@ -222,12 +226,21 @@ class StarkMesh:
         if self.configured:
             self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
-    def read(self) -> Snapshot:
-        return self._fresh.get()
+    def read(self, wait: Optional[float] = None) -> Snapshot:
+        try:
+            return self._fresh.get(wait)
+        except NotYet:
+            raise StarkMeshError("正在读取 StarkMesh，稍后自动刷新", "loading")
 
     def _read(self) -> Snapshot:
-        data = self.api.call("GET", "/api/v1/admin/accounts", {"page": 1, "page_size": 200}) or {}
-        accounts = [a for a in (data.get("items") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+        accounts: List[dict] = []
+        for page in range(1, ACCOUNT_PAGES + 1):  # every page, not the first 200 taken as all
+            data = self.api.call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": 200}) or {}
+            items = [a for a in (data.get("items") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+            accounts += items
+            total = int(data.get("total") or 0) if isinstance(data, dict) else 0
+            if len(items) < 200 or (total and len(accounts) >= total):
+                break
         ids = [int(a["id"]) for a in accounts if str(a.get("platform") or "") == "anthropic" and a.get("id") is not None]
         usage: Dict[str, dict] = {}
         if ids:
@@ -277,8 +290,10 @@ class StarkMeshPage(Page):
                                "在这个扩展的设置里填“StarkMesh 地址”（例如 %s）和“StarkMesh 只读管理密钥”（在 StarkMesh 后台 设置 › 管理密钥 新建，权限只勾 %s）" % (EXAMPLE_URL, PERMISSIONS),
                                version)
         try:
-            return self.mesh.read(), None
+            return self.mesh.read(PAGE_WAIT), None
         except StarkMeshError as e:
+            if e.kind == "loading":
+                return None, empty("正在读取 StarkMesh", "稍后自动刷新", version)
             return None, empty("StarkMesh 读不到", e.message, version)
 
     def quota_tiles(self, s: Snapshot, version: int) -> List[dict]:
@@ -337,7 +352,7 @@ class StarkMeshPage(Page):
         version = int(params.get("ui_version") or 1)
         s, problem = self._snapshot(version)
         if s is None:
-            return {"title": TITLE, "sections": [{"items": [problem]}], "refresh_after": REFRESH}
+            return {"title": TITLE, "sections": [{"items": [problem]}], "refresh_after": 5 if "正在读取" in str(problem) else REFRESH}
         st = s.stats
         errors = [a for a in s.accounts if state_of(a, s.now)[1] == "danger"]
         heads = [("服务", "%d/%d" % (len(s.ok), len(s.accounts)), "可用账号 / 全部", "power", "green" if not errors else "amber"),
@@ -363,7 +378,8 @@ class StarkMeshPage(Page):
             quota["footer"] = "最近一次重置在 %s后" % span(min(resets))
         rows = []
         order = {"danger": 0, "caution": 1, "neutral": 2, "positive": 3}
-        for a in sorted(s.accounts, key=lambda a: (order.get(state_of(a, s.now)[1], 9), str(a.get("name") or ""))):
+        listed = sorted(s.accounts, key=lambda a: (order.get(state_of(a, s.now)[1], 9), str(a.get("name") or "")))
+        for a in listed[:ACCOUNTS_MOST]:  # the ones with a problem first
             text, tone = state_of(a, s.now)
             sub = " · ".join(x for x in (str(a.get("platform") or ""), str(a.get("type") or ""),
                                           str(a.get("error_message") or "")[:60]) if x)
@@ -371,6 +387,8 @@ class StarkMeshPage(Page):
                             badge={"text": text, "tone": tone}))
             rows += self.account_bars(a, s)
         accounts = {"title": "账号 · %d" % len(s.accounts), "items": rows or [empty("没有账号", "", version)]}
+        if len(listed) > ACCOUNTS_MOST:
+            accounts["footer"] = "还有 %d 个账号（都能用的排在后面），完整列表在 StarkMesh 后台" % (len(listed) - ACCOUNTS_MOST)
         updated = "数据读于 %s" % when(s.now, self.app.tz)
         view = {"title": TITLE, "refresh_after": REFRESH,
                 "sections": [{"items": [head]}, quota, accounts, {"items": [{"type": "text", "style": "caption", "text": updated}]}]}
@@ -387,8 +405,10 @@ class StarkMeshPage(Page):
         if not self.mesh.configured:
             return None
         try:
-            s = self.mesh.read()
+            s = self.mesh.read(CARD_WAIT)
         except StarkMeshError as e:
+            if e.kind == "loading":
+                return {"title": CARD_TITLE, "items": [empty("正在读取 StarkMesh", "稍后自动刷新", version)]}
             return {"title": CARD_TITLE, "items": [empty("StarkMesh 读不到", e.message, version)]}
         parts = ["可用号 %d/%d" % (len(s.ok_claude), len(s.claude))]
         for key, label in WINDOWS[:2]:
@@ -412,8 +432,10 @@ class StarkMeshPage(Page):
         if not self.mesh.configured:
             return None
         try:
-            s = self.mesh.read()
-        except StarkMeshError:
+            s = self.mesh.read(CARD_WAIT)
+        except StarkMeshError as e:
+            if e.kind == "loading":
+                return ("中转站", "—", "正在读取", "gauge", "gray", {"text": "读取中", "tone": "neutral"}, "b:mesh")
             return ("中转站", "—", "读不到", "gauge", "gray", {"text": "读不到", "tone": "caution"}, "b:mesh")
         word, tone = standing(s)
         w = s.window(WINDOWS[0][0])

@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openmate_core.hub import HubError
 from openmate_core import views
-from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, Page, day_start, done_action, empty, row, stat, state_of,
+from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, Page, day_start, done_action, empty, row, split_done, stat, state_of,
                               state_text, tile, when)
 
 from openmate_core import agents as agents_mod
@@ -49,6 +49,7 @@ NEEDS_ALL = 200  # 展开全部: at most this many (as many as WeChat lists)
 PEER = "openmate-wechat"  # the extension whose chats 今天 shows too
 PEER_NAME = "微信"
 PEER_WAIT = 3.0  # a draw waits this long at most for WeChat's read (the rest of the page does not wait for it)
+CAL_WAIT = 5.0  # …and for a first read of the calendar (Persona gives a page 20 seconds in all)
 LINES_MOST = 20  # a WeChat chat's lines on its page here
 
 
@@ -306,7 +307,7 @@ class TodayPage(Page):
         """(today's events still to come or on now, invitations waiting for an answer, how many in the next six days,
         why it is missing or "")."""
         try:
-            events = self.agenda.events()
+            events = self.agenda.events(CAL_WAIT)
         except CalendarError as e:
             return [], [], 0, e.message
         tomorrow = _dt.datetime.fromtimestamp(day_start(self.app.tz, now.timestamp()), self.app.tz) + _dt.timedelta(days=1)
@@ -337,7 +338,10 @@ class TodayPage(Page):
         if self.wechat is not None and wx is None:
             wx = {"state": "unreachable"}
         t1 = time.monotonic()
-        chat_needs = self._safe(self.chats.needs, [])
+        chat_needs = self._safe(self.chats.needs, None)
+        self.chats_failed = chat_needs is None
+        if chat_needs is None:
+            chat_needs = []
         counts = self._safe(lambda: self.chats.counts(chat_needs), None) or {
             "mentions": sum(1 for t in chat_needs if t["kind"] == "mention"),
             "dms": sum(1 for t in chat_needs if t["kind"] == "dm"), "messages": 0, "chats": 0}
@@ -381,10 +385,13 @@ class TodayPage(Page):
         if aid == "needs:all":
             return {"view": self.render(dict(params, state=state_text({"all": 1})))}
         if aid.startswith("done:"):
-            kind, _, ident = aid[5:].partition(":")
-            ok = self.chats.dismiss(ident) if kind == "chat" else self._dismiss(kind, ident)
+            kind, _, rest = aid[5:].partition(":")
+            ident, seen = split_done(rest)
+            got = self.chats.dismiss(ident, seen) if kind == "chat" else self._dismiss(kind, ident, seen)
+            if got == "newer":
+                return {"toast": "这一件又有新变化了，先看一下", "view": self.render(params)}
             toast = "已标记处理完，有新消息会再出现" if kind == "chat" else "已标记处理完，有新变化会再出现"
-            return {"toast": toast if ok else "这一件现在没有要处理的了", "view": self.render(params)}
+            return {"toast": toast if got == "ok" else "这一件现在没有要处理的了", "view": self.render(params)}
         if aid.startswith("chat:"):
             chat_id = aid[5:]
             return {"push": {"ui": CHATS_PAGE, "state": state_text({"chat": chat_id}), "title": self._chat_title(chat_id)}}
@@ -429,16 +436,19 @@ class TodayPage(Page):
         view = self.render(dict(params, state=state_text({"edit": 1})))
         return {"toast": toast, "view": view} if toast else {"view": view}
 
-    def _dismiss(self, kind: str, ident: str) -> bool:
+    def _dismiss(self, kind: str, ident: str, seen: Optional[str] = None) -> str:
         store = getattr(self.app, "store", None)
         if kind not in DONE_KINDS or store is None:
-            return False
+            return "none"
         part, id_field, fields = DONE_KINDS[kind]
         for d in self.persona.read()[part]:
             if str(d.get(id_field)) == ident:
-                store.dismiss("%s:%s" % (kind, ident), version_of(d, *fields))
-                return True
-        return False
+                now = version_of(d, *fields)
+                if seen is not None and seen != now:
+                    return "newer"  # it changed since the page was drawn: not hidden by that 处理完
+                store.dismiss("%s:%s" % (kind, ident), now)
+                return "ok"
+        return "none"
 
     def absent(self) -> set:
         """The blocks with nothing to show on this manager: 微信今天 without WeChat beside this extension."""
@@ -556,7 +566,12 @@ class Day:
         self.v8 = version >= 8  # a page of cards side by side (layout columns), with icons and links on the cards
         self.current = [e for e in today if not e.all_day and e.start <= now]
         self.upcoming = [e for e in today if not e.all_day and e.start > now]
-        self.inbox_needs = [i for i in p["inbox"] if str(i.get("tier") or "") in NEEDS_TIERS]
+        # what needs the user: status "action" (absent once done); an older manager says only the tier, and lists the
+        # items done in the last days too
+        self.inbox_needs = [i for i in p["inbox"] if not (i.get("done_at") or i.get("dismissed") or i.get("superseded"))
+                            and (str(i.get("status") or "") == "action" if "status" in i
+                                 else str(i.get("tier") or "") in NEEDS_TIERS)]
+        self.partial = bool(p.get("missing")) or bool(getattr(page, "chats_failed", False))
         self.asks = [t for t in p["todos"] if t.get("ask")]
         self.todos = [t for t in p["todos"] if not t.get("ask")]
         self.done = len(getattr(page.chats, "done", []) or [])
@@ -617,21 +632,22 @@ class Day:
         sub = " · ".join(x for x in (("到期 " + due) if due else "", str(t.get("stage") or "")) if x)
         return row(str(t.get("title") or "待办"), sub, "", key=key + str(t.get("id")),
                    badge={"text": "等你拍板", "tone": "caution"} if t.get("ask") else None, **self._icon("check", "green"),
-                   actions=self._done("ask:" + str(t.get("id"))) if t.get("ask") else None)
+                   actions=self._done("ask:" + str(t.get("id")), version_of(t, *DONE_KINDS["ask"][2])) if t.get("ask") else None)
 
-    def _done(self, key: str) -> Optional[List[dict]]:
-        return [done_action(key)] if self.icons else None  # a row's menu came with UI version 6
+    def _done(self, key: str, version: Optional[str] = None) -> Optional[List[dict]]:
+        return [done_action(key, version)] if self.icons else None  # a row's menu came with UI version 6
 
     def needs_rows(self) -> List[dict]:
         out = []
         for s in self.p["waiting"]:
             out.append(row(agent_title(s), agent_detail(s) or "在等你回答", "", key="wait:" + str(s.get("session_id")),
                            badge={"text": "Agent 等你", "tone": "danger"}, **self._icon("robot", "red"),
-                           actions=self._done("wait:" + str(s.get("session_id")))))
+                           actions=self._done("wait:" + str(s.get("session_id")), version_of(s, *DONE_KINDS["wait"][2]))))
         for i in self.inbox_needs:
             out.append(row(str(i.get("title") or "收件箱"), str(i.get("summary") or i.get("preview") or ""), "",
                            key="inbox:" + str(i.get("id")), badge={"text": "收件箱", "tone": "caution"},
-                           **self._icon("mail", "amber"), actions=self._done("inbox:" + str(i.get("id")))))
+                           **self._icon("mail", "amber"),
+                           actions=self._done("inbox:" + str(i.get("id")), version_of(i, *DONE_KINDS["inbox"][2]))))
         for t in self.asks:
             out.append(self._todo_row(t, "ask:"))
         chats = [(float(t.get("_at") or 0), 0, str((t.get("_chat") or {}).get("id") or t.get("thread") or ""), t)
@@ -647,7 +663,7 @@ class Day:
                                "chat:" + chat_id if self.links and chat_id else "", key="chat:" + str(t.get("thread") or chat_id),
                                badge={"text": "@我" if mention else "私聊", "tone": "caution" if mention else "neutral"},
                                **self._icon("chat", "orange" if mention else "indigo"),
-                               actions=self._done("chat:" + chat_id) if chat_id else None))
+                               actions=self._done("chat:" + chat_id, t.get("_version")) if chat_id else None))
                 continue
             q = urllib.parse.quote(chat_id, safe="")
             acct = urllib.parse.quote(str(self.wx.get("account") or ""), safe="")
@@ -724,6 +740,8 @@ class Day:
             needs_badge = {"text": "待处理", "tone": "danger"}
         elif self.wx_unknown:
             needs_badge = {"text": "微信读不到", "tone": "caution"}
+        elif self.partial:  # a source could not be read: nothing found is not nothing to do
+            needs_badge = {"text": "读不全", "tone": "caution"}
         else:
             needs_badge = {"text": "清空", "tone": "positive"}
         out = [
