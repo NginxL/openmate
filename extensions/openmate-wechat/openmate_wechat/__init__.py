@@ -21,7 +21,8 @@ EXTENSION_ID = "openmate-wechat"
 CONNECTOR_ID = "matewechat"
 CHATS_PAGE = "wechat-chats"
 CHATS_CARD = "wechat-chats-today"
-AT_PREFIX = re.compile("^(?:\\s*@[^\u2005\\n]{1,1024}\u2005)+")  # WeChat's real @s: "@name" ended by U+2005
+# WeChat's real @s: "@name" ended by U+2005 (a name never spans another "@", so a typed "@x …" before them stays)
+AT_PREFIX = re.compile("^(?:\\s*@[^\u2005\\n@]{1,1024}\u2005)+")
 
 
 def mark_view(text: str) -> str:

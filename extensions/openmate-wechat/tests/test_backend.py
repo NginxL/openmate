@@ -324,6 +324,8 @@ class NamesTest(Base):
         self.assertEqual(v("@鲍勃\u2005@Ann\u2005[智能代答] x"), "[智能代答] x")
         self.assertEqual(v("@" + "长" * 300 + "\u2005> 🤖 AI 代答"), "> 🤖 AI 代答")
         self.assertEqual(v("@鲍勃 你好"), "@鲍勃 你好", "a typed @ is not a real one")
+        self.assertEqual(v("@运营 例子 @Bob Smith\u2005/agent x"), "@运营 例子 @Bob Smith\u2005/agent x",
+                         "never past a typed @")
 
     def test_proxy_variables_never_reach_the_program(self):
         env = clean_env({"PATH": "/bin", "https_proxy": "http://127.0.0.1:7897", "ALL_PROXY": "socks5://x"})

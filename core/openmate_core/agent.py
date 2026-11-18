@@ -134,7 +134,11 @@ def model_label(model: str) -> str:
 
 def fill_header(template: str, model: str, effort: str) -> str:
     """The header with what is known; a part left empty takes its " · " with it."""
-    out = template.replace("{model}", model_label(model)).replace("{effort}", (effort or "").strip())
+    return fill_header_raw(template, model_label(model), (effort or "").strip())
+
+
+def fill_header_raw(template: str, model: str, effort: str) -> str:
+    out = template.replace("{model}", model).replace("{effort}", effort)
     out = re.sub(r"(\s*·\s*)+(?=\s*(·|$))", "", out)  # empty parts
     return re.sub(r"\s+$", "", out)
 
@@ -292,15 +296,21 @@ class AgentRunner:
         return marks
 
     def _header_patterns(self) -> List["re.Pattern"]:
-        """The configured headers as whole-line patterns: their fixed words, {model} and {effort} anything."""
+        """The configured headers as whole-line patterns, made by the sender's own rule (fill_header): {model} and
+        {effort} are anything, each may be missing with its " · ", every other character is itself."""
         out = []
         for h in (self.header, self.auto_header):
-            t = (h or "").lstrip("> ").strip()
-            parts = re.split(r"\{[a-z_]+\}", t)
-            if not "".join(parts).strip(" ·"):
-                continue  # nothing fixed to recognise it by
-            out.append(re.compile(".+?".join(re.escape(p) for p in parts)))
+            for m, e in (("\x01", "\x02"), ("\x01", ""), ("", "\x02"), ("", "")):
+                line = fill_header_raw(h or "", m, e).lstrip("> ").strip()
+                if not line.replace("\x01", "").replace("\x02", "").strip(" ·"):
+                    continue  # nothing fixed to recognise it by
+                out.append(re.compile(re.escape(line).replace("\x01", ".+?").replace("\x02", ".+?")))
         return out
+
+    def _is_mark_line(self, line: str) -> bool:
+        """WeChat: a line that is an AI mark (a built-in one, or a whole configured header)."""
+        line = line.lstrip("> ").strip()
+        return any(line.startswith(m) for m in AI_MARKS[:2]) or any(p.fullmatch(line) for p in self._header_patterns())
 
     def is_agent_text(self, text: str) -> bool:
         t = (text or "").rstrip()
@@ -309,11 +319,9 @@ class AgentRunner:
                 return True
         if getattr(self.app.platform, "mark_view", None) is None:
             return ai_marked(t, self._header_marks())  # Feishu: as it always read
-        # WeChat: after the real @s, the built-in marks or a whole configured header on the first or last line
+        # WeChat: after the real @s, a built-in mark or a whole configured header on the first or last line
         first, last = mark_lines(self._mark_view(t))
-        if ai_marked(self._mark_view(t), AI_MARKS[:2]):
-            return True
-        return any(p.fullmatch(first) or p.fullmatch(last) for p in self._header_patterns())
+        return self._is_mark_line(first) or self._is_mark_line(last)
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
@@ -1018,12 +1026,19 @@ class AgentRunner:
             if cur is None or cur["state"] != "running":
                 return
             cur["state"] = "timeout"
+            notice = not cur["replies"] and not cur["reply_inflight"] and cur.get("kind") not in QUIET_KINDS
+            if notice:
+                cur["timeout_notice"] = "claimed"  # a late reply now waits for what the notice does
             self.store.run_put(cur)
         self._end_reaction(run_id, "failed")
-        if not cur["replies"] and not cur["reply_inflight"]:
+        if notice:
             self._post_once(cur, "agent:%s:timeout" % run_id,
                             "等了 %s 还没有结果，不再等待。可以在 Persona 里打开这个会话看进度。" % _span(self.app.timing.agent_timeout),
                             reply_to=cur["request_id"], root=cur["root_id"] or cur["request_id"])
+            with self._lock(run_id):
+                cur = self.store.run_get(run_id)
+                cur["timeout_notice"] = "done"  # the send journal says whether it went out (or may have)
+                self.store.run_put(cur)
 
     def _fail(self, run_id: str, message: str) -> None:
         with self._lock(run_id):
@@ -1081,10 +1096,14 @@ class AgentRunner:
                 t = t[: -len(s)].rstrip()
                 if t.endswith(">"):
                     t = t[:-1].rstrip()
-        marks = self._header_marks()
-        while t and any(t.split("\n", 1)[0].lstrip("> ").strip().startswith(m) for m in marks):
+        if getattr(self.app.platform, "mark_view", None) is None:  # Feishu: as it always cleaned
+            marks = self._header_marks()
+            is_mark = lambda line: any(line.lstrip("> ").strip().startswith(m) for m in marks)  # noqa: E731
+        else:  # WeChat: only a whole mark line goes, an answer's own "【结论】…" stays
+            is_mark = self._is_mark_line
+        while t and is_mark(t.split("\n", 1)[0]):
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
-        while t and any(t.rsplit("\n", 1)[-1].lstrip("> ").strip().startswith(m) for m in marks):
+        while t and is_mark(t.rsplit("\n", 1)[-1]):
             t = t.rsplit("\n", 1)[0].rstrip() if "\n" in t else ""
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
         if header:
@@ -1173,7 +1192,7 @@ class AgentRunner:
             posted = lambda what: self.store.send_get("agent:%s:%s" % (cur["id"], what)) is not None  # noqa: E731
             quiet = cur.get("kind") in QUIET_KINDS  # a run that never posts a fallback or a timeout notice
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
-                or (not quiet and (cur.get("fallback") == "claimed" or cur["state"] == "timeout")) \
+                or (not quiet and (cur.get("fallback") == "claimed" or cur.get("timeout_notice") == "claimed")) \
                 or posted("fallback") or posted("timeout")
             if not self._can_edit() and answered:
                 done = self.store.send_get(key)

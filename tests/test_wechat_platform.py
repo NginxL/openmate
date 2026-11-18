@@ -155,11 +155,43 @@ class MarksAndMentionsTest(unittest.TestCase):
         msg = ask(h, "/agent 慢活")
         run = running(h, msg)
         cur = h.app.store.run_get(run["id"])
-        cur["state"] = "timeout"  # the timeout thread took it; its notice is on the way
+        cur["state"] = "timeout"
+        cur["timeout_notice"] = "claimed"  # the timeout thread is sending its notice
         h.app.store.run_put(cur)
         with self.assertRaises(Exception) as c:
             h.tool("agent_reply", request=run["id"], text="终于好了")
         self.assertIn("只回复一次", str(c.exception))
+        cur = h.app.store.run_get(run["id"])
+        cur["timeout_notice"] = "done"  # it surely failed: nothing in the journal
+        h.app.store.run_put(cur)
+        n = len(h.sent())
+        h.tool("agent_reply", request=run["id"], text="终于好了")
+        self.assertEqual(len(h.sent()), n + 1, "a notice that never went out does not take the reply")
+
+    def test_a_typed_at_before_a_real_one_is_not_a_command(self):
+        h = wechat(self)
+        ask(h, "@运营 例子请看 @Bob Smith\u2005/agent 写周报")
+        time.sleep(0.4)
+        self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") != "auto"], [])
+
+    def test_header_variants_and_literal_braces(self):
+        h = wechat(self, auto_reply_header="> [智能代答] · {model} · {effort}", agent_reply_header="{bot}回复 · {model}",
+                   agent_mark_position="top")
+        a = h.app.agent
+        self.assertTrue(a.is_agent_text("> [智能代答] · GPT-6 · high\n好"))
+        self.assertTrue(a.is_agent_text("> [智能代答] · GPT-6\n好"), "no effort: its part is gone")
+        self.assertTrue(a.is_agent_text("> [智能代答]\n好"), "neither")
+        self.assertTrue(a.is_agent_text("{bot}回复 · 某模型\n好"), "literal braces are themselves")
+        self.assertFalse(a.is_agent_text("请给我一个回复"))
+        self.assertFalse(a.is_agent_text("/agent 请总结上一条回复"))
+
+    def test_an_answers_own_bracket_lines_are_kept(self):
+        h = wechat(self, agent_reply_header="【{model} 代答】", agent_mark_position="end")
+        msg = ask(h, "/agent 能发布吗")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="【前提】下面只指测试环境。\n可以发布。")
+        sent = h.sent()[-1]["text"]
+        self.assertTrue(sent.startswith("【前提】下面只指测试环境。\n可以发布。"), sent)
 
 
 class FeishuUnchangedTest(unittest.TestCase):
