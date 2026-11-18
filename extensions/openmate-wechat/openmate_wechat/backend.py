@@ -825,6 +825,16 @@ class WeChatBackend(Backend):
         return (found[1] if found else "") or user_id
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        """Kinds as known now, asking WeChat about direct chats' undescribed accounts; a failed request answers as
+        the id looks (自动代答's check never fails on one)."""
+        return self._kinds(user_ids, strict=False)
+
+    def ask_kinds(self, user_ids: List[str]) -> Dict[str, str]:
+        """For the archive rule: the same, but a request that failed raises (the core then waits, it does not take
+        the account as asked about)."""
+        return self._kinds(user_ids, strict=True)
+
+    def _kinds(self, user_ids: List[str], strict: bool) -> Dict[str, str]:
         # a person-like id WeChat has not described yet may be an official account with an id of its own choosing
         # (腾讯科技 is qqtech): ask WeChat first, a few at a time; the rest are told later through on_people_kinds
         # only the ones with a direct chat here: an official account never joins a group, so a group member is
@@ -835,8 +845,7 @@ class WeChatBackend(Backend):
         for i in range(0, len(ask), 2):
             if self._closed:
                 break
-            # a failed request raises: the caller asks again later (an id WeChat cannot show is answered as it looks)
-            self._lookup_names(ask[i:i + 2], strict=True)
+            self._lookup_names(ask[i:i + 2], strict=strict)
         out = {}
         for uid in user_ids:
             k = kind_of(uid)

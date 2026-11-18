@@ -722,9 +722,9 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
     // a WeCom contact (…@openim) is read with its own request, one at a time; the rest two per request
     let (openim, plain): (Vec<String>, Vec<String>) = ids.into_iter().partition(|i| i.ends_with("@openim"));
     let mut found = vec![];
-    // ids whose request failed (network, timeout): unlike an id WeChat answered it cannot show, not asked yet
+    // ids whose request failed: not asked yet (the protocol answers an id WeChat says it cannot show as a success
+    // with no record, so every error here is a failure)
     let mut failed: Vec<String> = vec![];
-    let unshown = |e: &str| e.contains("Empty contact identity") || e.contains("Contact has no identity");
     for pair in plain.chunks(2) {
         match lookup_contacts(app, &client, pair) {
             Ok(cs) => found.extend(cs),
@@ -736,18 +736,14 @@ fn op_contacts(app: &App, p: &Value) -> Result<Value> {
                         Ok(cs) => found.extend(cs),
                         Err(e) => {
                             log(&format!("contact lookup failed for one: {e}"));
-                            if !unshown(&e) {
-                                failed.push(one.clone());
-                            }
+                            failed.push(one.clone());
                         }
                     }
                 }
             }
             Err(e) => {
                 log(&format!("contact lookup failed: {e}"));
-                if !unshown(&e) {
-                    failed.extend(pair.iter().cloned());
-                }
+                failed.extend(pair.iter().cloned());
             }
         }
     }

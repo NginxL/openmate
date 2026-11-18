@@ -355,13 +355,16 @@ class AlignedWithFeishuTest(unittest.TestCase):
         from openmate_core import app as core_app
 
         h = wechat(self)
-        hours, core_app.ARCHIVE_UNDECIDED_HOURS = core_app.ARCHIVE_UNDECIDED_HOURS, 0
+        # its messages are 45-50 minutes old: past the limit for one asked about, not for one that could not be
+        hours, core_app.ARCHIVE_UNDECIDED_HOURS = core_app.ARCHIVE_UNDECIDED_HOURS, 0.5
         self.addCleanup(setattr, core_app, "ARCHIVE_UNDECIDED_HOURS", hours)
         h.app._ask_kind = lambda cid: False  # signed out between two reads: nothing asked
         res = h.c("archive.changes", cursor="", limit=100)
         self.assertFalse(res["more"], "no point reading on before a sign-in")
         again = h.c("archive.changes", cursor=res["next"], limit=100)
         self.assertEqual(again["next"], res["next"], "never skipped for its age while it could not be asked")
+        core_app.ARCHIVE_UNDECIDED_HOURS = 0.01  # never askable for 4 x the limit: left out, the archive goes on
+        self.assertNotIn("chat_example_dm_a", self.archived_from(h, res["next"]))
 
     def archived_from(self, h, cursor):
         chats = set()

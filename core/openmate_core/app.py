@@ -420,8 +420,10 @@ class ConnectorApp:
         if self.backend is None or self.store is None or not self.signed_in:
             return False
         chat = self.store.get_chat(chat_id) or {}
+        # a backend's ask_kinds raises when the request failed (WeChat); people_kinds otherwise
+        ask = getattr(self.backend, "ask_kinds", None) or self.backend.people_kinds
         try:
-            self.backend.people_kinds([chat.get("peer_id") or chat_id])
+            ask([chat.get("peer_id") or chat_id])
             return True
         except Exception as e:
             log.info("an account could not be looked up for the archive (%s)", e.__class__.__name__)
@@ -1157,10 +1159,11 @@ class ConnectorApp:
                     if r["chat_id"] not in tried:
                         more = True  # not asked about in this read (its asks are used up): the next read does
                         break
-                    if r["chat_id"] not in asked:
-                        more = False  # could not be asked (signed out): read again once signed in
+                    age = time.time() - float(r.get("received") or r.get("at") or 0)
+                    if r["chat_id"] not in asked and age < ARCHIVE_UNDECIDED_HOURS * 4 * 3600:
+                        more = False  # could not be asked (signed out, a failed request): read again later
                         break
-                    if time.time() - float(r.get("received") or r.get("at") or 0) < ARCHIVE_UNDECIDED_HOURS * 3600:
+                    if r["chat_id"] in asked and age < ARCHIVE_UNDECIDED_HOURS * 3600:
                         more = False  # the cursor stops before it: a later read goes on from this message
                         break
                     decided = False  # asked, and long undecided: left out (an official account's must not get in)

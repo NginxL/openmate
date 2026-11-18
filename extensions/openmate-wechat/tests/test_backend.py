@@ -411,7 +411,9 @@ class KindsLaterTest(Base):
 
         b._call = down
         with self.assertRaises(BackendError):
-            b.people_kinds(["custom_dm"])  # the archive must not take this as asked
+            b.ask_kinds(["custom_dm"])  # the archive must not take this as asked
+        self.assertEqual(b.people_kinds(["custom_dm"]), {"custom_dm": "user"},
+                         "自动代答's check: a failed request answers as the id looks")
         self.assertEqual(b.people_kinds(["custom_member"]), {"custom_member": "user"},
                          "a group member (no direct chat): as its id looks, no request")
 
