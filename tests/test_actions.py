@@ -162,6 +162,21 @@ class ActionTest(unittest.TestCase):
         s = self.h.sent()[-1]
         self.assertEqual((s["reply_to"], s["root"]), (inner.id, root.id))
 
+    def test_the_card_says_a_thread_reply_quotes_the_first_message(self):
+        root = self.h.world.push("chat_example_team", "user_example_a", "话题开头")
+        inner = self.h.world.push("chat_example_team", "user_example_b", "话题里的问题", root_id=root.id)
+        wait_until(lambda: self.h.app.store.message("chat_example_team", inner.id), what="stored")
+        args = {"chat": "chat_example_team", "text": "回答", "reply_to": inner.id}
+        d = self.h.c("actions.describe", name=CID + "_send", args=args)
+        self.assertIn("回复 示例同事乙：“话题里的问题”", d["summary"], "a service that quotes the picked one")
+        self.h.app.backend.thread_reply_quotes_root = True
+        d = self.h.c("actions.describe", name=CID + "_send", args=args)
+        self.assertIn("引用的是话题第一条 示例同事甲：“话题开头”", d["summary"])
+        self.assertNotIn("回复 示例同事乙：", d["summary"])
+        # the first message itself: quoted as it is
+        d = self.h.c("actions.describe", name=CID + "_send", args=dict(args, reply_to=root.id))
+        self.assertIn("回复 示例同事甲：“话题开头”", d["summary"])
+
     def test_uncertain_send_is_refused_after(self):
         args = {"chat": "chat_example_team", "text": "可能发出去了"}
         self.h.world.send_fail = "uncertain"

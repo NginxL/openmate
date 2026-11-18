@@ -45,10 +45,34 @@ class StarkMeshError(Exception):
         self.kind = kind
 
 
+class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to the same scheme, host and port, with the key; any other one is an HTTP error. The key
+    is an unredirected header, so it never rides along by itself."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        a, b = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(new.full_url)
+        try:
+            same = (a.scheme, a.hostname, a.port) == (b.scheme, b.hostname, b.port)
+        except ValueError:
+            same = False
+        if not same:
+            log.warning("StarkMesh redirected elsewhere: not followed, the key stays here")
+            return None
+        for k, v in req.unredirected_hdrs.items():
+            new.add_unredirected_header(k, v)
+        return new
+
+
+_OPENER = urllib.request.build_opener(SameOriginRedirects)
+
+
 class StarkMeshAPI:
-    def __init__(self, app, urlopen: Callable = urllib.request.urlopen):
+    def __init__(self, app, urlopen: Optional[Callable] = None):
         self.app = app
-        self._open = urlopen
+        self._open = urlopen or _OPENER.open
 
     @property
     def url(self) -> str:
@@ -64,7 +88,8 @@ class StarkMeshAPI:
         url = self.url + path + ("?" + urllib.parse.urlencode(query) if query else "")
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method, headers={
-            "x-api-key": self.key, "Accept": "application/json", "Content-Type": "application/json"})
+            "Accept": "application/json", "Content-Type": "application/json"})
+        req.add_unredirected_header("x-api-key", self.key)  # to this address only (SameOriginRedirects)
         try:
             with self._open(req, timeout=WAIT) as resp:
                 raw = resp.read()

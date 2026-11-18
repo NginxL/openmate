@@ -488,7 +488,16 @@ def _send_card(app, a: dict) -> tuple:
     lines = ["以你的身份发到" + target]
     if reply_to:
         quoted = app.store.message(chat_id, reply_to) if app.store is not None else None
-        if quoted is not None:
+        root = str((quoted or {}).get("root_id") or "")
+        if (quoted is not None and root and root != reply_to and (chat or {}).get("kind") != "dm"
+                and getattr(app.backend, "thread_reply_quotes_root", False)):
+            # what the message will really quote: the thread's first message, not the one picked
+            head = app.store.message(chat_id, root)
+            first = ("%s：“%s”" % (views.sender_of(head, app.me_name()), one_line(views.text_of(head), 80))
+                     if head is not None else "消息 %s" % root)
+            lines.append("回复到 %s 那条所在的话题里，引用的是话题第一条 %s（%s不能引用话题里的某一条）"
+                         % (views.sender_of(quoted, app.me_name()), first, p))
+        elif quoted is not None:
             lines.append("回复 %s：“%s”" % (views.sender_of(quoted, app.me_name()), one_line(views.text_of(quoted), 80)))
         else:
             lines.append("回复消息 %s" % reply_to)

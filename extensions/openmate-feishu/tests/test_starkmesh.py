@@ -268,5 +268,55 @@ class OverviewCardTest(unittest.TestCase):
         self.assertEqual(starkmesh.standing(s), ("没有可用号", "danger"))
 
 
+class RedirectTest(unittest.TestCase):
+    """The key goes to the address the user wrote only: a redirect elsewhere is not followed (an HTTP error)."""
+
+    def serve(self, answer):
+        import http.server
+        import threading
+
+        seen = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("x-api-key")))
+                code, headers, body = answer(self.path)
+                self.send_response(code)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return "http://127.0.0.1:%d" % srv.server_address[1], seen
+
+    def api(self, url):
+        app = types.SimpleNamespace(config={"starkmesh_url": url}, secrets={"starkmesh_key": "sk-test-only"})
+        return starkmesh.StarkMeshAPI(app)
+
+    def test_a_redirect_elsewhere_keeps_the_key(self):
+        ok = json.dumps({"code": 0, "data": {"x": 1}}).encode()
+        other, seen_other = self.serve(lambda path: (200, {}, ok))
+        here, seen = self.serve(lambda path: (302, {"Location": other + "/stolen"}, b""))
+        with self.assertRaises(starkmesh.StarkMeshError) as e:
+            self.api(here).call("GET", "/api/v1/admin/dashboard/stats")
+        self.assertIn("302", e.exception.message)
+        self.assertEqual(seen, [("/api/v1/admin/dashboard/stats", "sk-test-only")])
+        self.assertEqual(seen_other, [], "nothing reached the other address")
+
+    def test_a_redirect_on_the_same_address_keeps_working(self):
+        ok = json.dumps({"code": 0, "data": {"x": 1}}).encode()
+        here, seen = self.serve(lambda path: (200, {}, ok) if path == "/new" else (301, {"Location": "/new"}, b""))
+        self.assertEqual(self.api(here).call("GET", "/old"), {"x": 1})
+        self.assertEqual(seen, [("/old", "sk-test-only"), ("/new", "sk-test-only")])
+
+
 if __name__ == "__main__":
     unittest.main()

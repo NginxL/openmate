@@ -425,6 +425,7 @@ class LarkXBackend(Backend):
     render_version = RENDER_VERSION
     rerender_types = RERENDER_TYPES
     done_marks = True  # a chat's 完成
+    thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
     # timings (tests shorten them)
     poll_timeout = 0.2  # one QrLogin.wait round: a single poll (interval ≥ timeout), then back to the caller
