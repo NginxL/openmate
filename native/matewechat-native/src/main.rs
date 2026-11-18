@@ -597,6 +597,7 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
     let client = app.client()?;
     let own = app.own();
     let intended: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None); // the text this send registered
+    let sent_at = std::cell::Cell::new(0u32); // when this send was made (the time the receipt belongs to)
     let attempt = (|| -> Result<(String, Option<String>)> {
         if text.trim().is_empty() || text.len() > 16 * 1024 || text.contains('\0') {
             return Err(err("input", "消息内容是空的或太长"));
@@ -610,6 +611,7 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
             return Err(err("input", "key"));
         }
         let created_at = wire::unix_time()?;
+        sent_at.set(created_at);
         if let Some(q) = &quote {
             let reference = quote_reference(q, &chat, &own)?;
             let xml = wechat_protocol::quote_send::quote_xml(&own, &rendered, &reference)
@@ -649,7 +651,8 @@ fn op_send(app: &App, p: &Value) -> Result<Value> {
         Ok(("sent".into(), r.server_message_id))
     })();
     match attempt {
-        Ok((status, id)) => Ok(json!({"status": status, "message_id": id.unwrap_or_default(), "quoted": quote.is_some()})),
+        Ok((status, id)) => Ok(json!({"status": status, "message_id": id.unwrap_or_default(), "quoted": quote.is_some(),
+                                      "created_at": sent_at.get()})),
         Err(e) => {
             let (status, why) = send_outcome(&e);
             if status != "uncertain" {

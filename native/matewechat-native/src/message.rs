@@ -149,12 +149,18 @@ pub fn read_control(raw: &Raw, own: &str) -> Option<(String, u32)> {
     if root.tag_name().name() != "msg" {
         return None;
     }
-    let op = root.children().find(|n| n.is_element() && n.tag_name().name() == "op")?;
+    let ops: Vec<_> = root.children().filter(|n| n.is_element()).collect();
+    if ops.len() != 1 || ops[0].tag_name().name() != "op" {
+        return None; // exactly one operation, as the daemon requires
+    }
+    let op = ops[0];
     if !matches!(op.attribute("id"), Some("1") | Some("2") | Some("5")) {
         return None;
     }
     let chat = xml_text(op, &["username"])?;
-    let ok = !chat.is_empty() && chat.len() <= 512 && chat != own && chat != "fmessage" && !chat.chars().any(|c| c.is_control() || c.is_whitespace());
+    // the control is the account's own message to that very chat: one naming another chat is not taken
+    let ok = chat == raw.chat && !chat.is_empty() && chat.len() <= 512 && chat != own && chat != "fmessage"
+        && !chat.chars().any(|c| c.is_control() || c.is_whitespace());
     ok.then_some((chat, raw.created_at))
 }
 
@@ -370,6 +376,8 @@ mod tests {
         let xml = "<msg><op id='2'><username>1@chatroom</username><name>lastMessage</name><arg>x</arg></op></msg>";
         let r = Raw { chat: "1@chatroom", from: "wxid_me", outgoing: true, server_id: "9", message_type: 51, content: xml, created_at: 1_700_000_100, msgsource: None };
         assert_eq!(read_control(&r, "wxid_me"), Some(("1@chatroom".to_string(), 1_700_000_100)));
+        let elsewhere = Raw { chat: "2@chatroom", ..r };
+        assert_eq!(read_control(&elsewhere, "wxid_me"), None, "the outer chat must be the one it names");
         let other = Raw { from: "wxid_bob", outgoing: false, ..r };
         assert_eq!(read_control(&other, "wxid_me"), None);
         let op9 = Raw { content: "<msg><op id='9'><username>x</username></op></msg>", ..r };

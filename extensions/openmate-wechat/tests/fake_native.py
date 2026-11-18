@@ -83,14 +83,15 @@ def answer(req):
             return ok(status="not_sent", message="not sent")
         if "UNCERTAIN" in t:
             return ok(status="uncertain", message="no receipt")
-        return ok(status="sent", message_id="srv_%d" % rid)
+        return ok(status="sent", message_id="srv_%d" % rid, quoted=bool(req.get("quote")), created_at=1700000000)
     if op == "contacts":
         if any(not i for i in req.get("ids", [])):
             return fail("input", "Empty contact identity")
         biz = set(os.environ.get("FAKE_BUSINESS", "").split(","))
+        silent = set(os.environ.get("FAKE_NO_KIND", "").split(","))  # WeChat gave no flags for these
         return ok(contacts=[{"id": i, "nickname": ("群" + i.split("@")[0]) if i.endswith("@chatroom") else "昵称" + i[-1],
                              "remark": ("备注" + i[-1]) if i == "wxid_bob" else None,
-                             "verify_flag": 8 if i in biz else 0, "business": i in biz}
+                             "verify_flag": None if i in silent else (8 if i in biz else 0), "business": i in biz}
                             for i in req.get("ids", [])])
     if op == "room":
         if not isinstance(req.get("room_id"), str):

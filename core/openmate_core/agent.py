@@ -1038,6 +1038,7 @@ class AgentRunner:
             cur["state"] = "done"
             self.store.run_put(cur)
         self._end_reaction(run_id, "done")
+        me = None
         if post is not None and cur.get("kind") not in QUIET_KINDS:
             header = self.header
             me = self._model_of(cur, header) if header else ("", "")
@@ -1049,7 +1050,7 @@ class AgentRunner:
                     self.store.run_put(cur)
         if post is not None:
             mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, reply_to=cur["request_id"],
-                                  root=cur["root_id"] or cur["request_id"])
+                                  root=cur["root_id"] or cur["request_id"], model_effort=me)
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
                 cur["fallback"] = "sent" if mid else "failed"
@@ -1202,14 +1203,15 @@ class AgentRunner:
 
         return self.app.send_once(key, "agent", go)
 
-    def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "") -> str:
+    def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "",
+                   model_effort: Optional[tuple] = None) -> str:
         """Send text (with the header / end mark) into the run's chat once per key; the new message's id, "" when it
         failed. A run nobody asked for in the chat (自动代答, a document's comment) says nothing there of its own: a
         failure, a stop or a timeout is the user's to see in the app, never a line in someone else's group."""
         if run.get("kind") in QUIET_KINDS:
             log.info("%s %s: nothing posted for %s", run.get("kind"), run["id"], key.split(":", 1)[0])
             return ""
-        body = self.with_suffix(text, run)
+        body = self.with_suffix(text, run, model_effort)
         self._remember_post(body)
         try:
             res = self._send(run, key, body, reply_to, root)

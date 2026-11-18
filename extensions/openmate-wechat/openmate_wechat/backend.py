@@ -72,6 +72,9 @@ SCHEMA = (
 )
 
 
+GROUP_SQL = "(id LIKE '%@chatroom%' OR id LIKE '%@im.chatroom' OR id LIKE '%@qy_g')"
+
+
 def is_group(chat_id: str) -> bool:
     """An ordinary group (…@chatroom), a WeCom interop group (…@im.chatroom) or a WeCom group (…@qy_g)."""
     return "@chatroom" in chat_id or chat_id.endswith(("@im.chatroom", "@qy_g"))
@@ -220,14 +223,21 @@ class Store:
     def groups(self, limit: int) -> List[Tuple[str, str, int]]:
         """(id, name, members) of every group kept: the ones with messages, newest first, then the rest by name."""
         with self._mu:
-            return self._db.execute("SELECT id, name, members FROM chats WHERE id LIKE '%@chatroom' "
-                                    "ORDER BY last_at DESC, name = '', name, id LIMIT ?", (limit,)).fetchall()
+            return self._db.execute("SELECT id, name, members FROM chats WHERE " + GROUP_SQL +
+                                    " ORDER BY last_at DESC, name = '', name, id LIMIT ?", (limit,)).fetchall()
 
     def unnamed_groups(self, older_than: float, limit: int) -> List[str]:
         with self._mu:
             return [r[0] for r in self._db.execute(
-                "SELECT id FROM chats WHERE id LIKE '%@chatroom' AND name = '' AND named_at < ? "
+                "SELECT id FROM chats WHERE " + GROUP_SQL + " AND name = '' AND named_at < ? "
                 "ORDER BY last_at DESC LIMIT ?", (older_than, limit)).fetchall()]
+
+    def unclassified_people(self, known: set, limit: int) -> List[str]:
+        """Direct chats with no kind learnt yet (kept from before kinds were read): to look up in the background."""
+        with self._mu:
+            rows = self._db.execute("SELECT id FROM chats WHERE NOT (" + GROUP_SQL + ") ORDER BY last_at DESC LIMIT ?",
+                                    (limit * 4,)).fetchall()
+        return [r[0] for r in rows if r[0] not in known and kind_of(r[0]) == "user"][:limit]
 
     def last_incoming(self, chat: str) -> int:
         """When someone else last wrote in the chat (0: never, as far as kept here)."""
@@ -288,6 +298,7 @@ class WeChatBackend(Backend):
         self._groups_mu = threading.Lock()
         self._groups_busy = False
         self._groups_pending = ""  # "full" or "names": asked for while the worker was busy
+        self._kind_tried: set = set()  # direct chats asked about this run (WeChat may not say)
         self._groups_check_at = 0.0
         self._closed = False
         self._groups_full_at = 0.0  # the last time the contacts' group list was read (this run)
@@ -590,10 +601,13 @@ class WeChatBackend(Backend):
             out[cid] = (str(c.get("remark") or "") or nick, nick)
             if cid and not is_group(cid):
                 self.store.set_name(self._name_key(cid, ""), out[cid][0], nick)
-                if c.get("business"):
+                if c.get("verify_flag") is None:
+                    pass  # WeChat said nothing about what it is: whatever was known stays
+                elif c.get("business"):
                     BUSINESS.add(cid)
+                    PERSONS.discard(cid)
                     self.store.put("biz:" + cid, "1")
-                elif c.get("verify_flag") is not None or c.get("business") is False:
+                else:
                     PERSONS.add(cid)
                     self.store.put("person:" + cid, "1")
         return out
@@ -685,7 +699,8 @@ class WeChatBackend(Backend):
             last = self.store.last_incoming(cid)
             if not last:
                 continue
-            out[cid] = float(read) if read >= last else None
+            # the same second cannot tell which came first: then it still needs the user
+            out[cid] = float(read) if read > last else None
         return out
 
     def group_candidates(self, limit: int) -> List[Chat]:
@@ -744,6 +759,15 @@ class WeChatBackend(Backend):
                     for gid in pair:  # one WeChat would not name is tried again after NAME_TTL, the rest go on
                         self.store.set_chat_name(gid, found.get(gid, ("", ""))[0])
                     time.sleep(GROUP_NAME_PAUSE)  # gently: a person's account reading its own groups
+                # direct chats kept before kinds were read: learn person / official account (once per run each)
+                todo = self.store.unclassified_people(PERSONS | BUSINESS | self._kind_tried, 200)
+                for i in range(0, len(todo), 2):
+                    if self._closed or self.me != me:
+                        return
+                    pair = todo[i:i + 2]
+                    self._kind_tried.update(pair)
+                    self._lookup_names(pair)
+                    time.sleep(GROUP_NAME_PAUSE)
             except BackendError as e:
                 log.info("WeChat groups were not read now: %s", e.message)
             except Exception:
@@ -792,8 +816,8 @@ class WeChatBackend(Backend):
             name = ""
             if is_group(chat_id) and sender and not mine:
                 name = self._mention_name(sender, chat_id)  # their group nickname, shown in the quote too
-                if mention:  # answering someone in a group: @ them for real
-                    params["mentions"] = [{"id": sender, "name": name}]
+                if mention and (chat_id.endswith("@chatroom") or not ev.get("quotable")):
+                    params["mentions"] = [{"id": sender, "name": name}]  # answering someone in a group: @ them
             if ev.get("quotable"):  # a text message: quoted (anything else gets the plain answer)
                 params["quote"] = {"server_id": str(ev.get("id")), "sender": sender, "outgoing": mine,
                                    "display_name": name or (self.me_name if mine else sender),
@@ -812,13 +836,16 @@ class WeChatBackend(Backend):
         status = r.get("status")
         if status == "sent":
             mid = str(r.get("message_id") or "")
-            self._keep_own_send(chat_id, mid, text, params)
+            try:
+                self._keep_own_send(chat_id, mid, text, params, int(r.get("created_at") or 0))
+            except Exception:
+                log.exception("a sent WeChat message could not be kept here (it went out)")
             return mid
         if status in ("rejected", "not_sent"):
             raise SendRejected(str(r.get("message") or "微信没有接受这条消息"))
         raise BackendError("发送结果不确定：%s；不会自动重发" % (r.get("message") or "微信没有确认"), "unknown")
 
-    def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any]) -> None:
+    def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any], sent_at: int = 0) -> None:
         """WeChat does not echo this device's sends back: keep the sent message, and give it to the core as history
         (the inbox sees the reply, the conversation page and the knowledge base have it). Never acted on."""
         if not mid:
@@ -826,8 +853,9 @@ class WeChatBackend(Backend):
         names = [m.get("name") for m in params.get("mentions") or [] if m.get("name")]
         shown = "".join("@%s\u2005" % n for n in names) + text
         ev = {"event": "message", "origin": "local_send", "id": mid, "chat": chat_id, "group": is_group(chat_id),
-              "sender": self.me, "mine": True, "type": "TEXT", "text": shown, "at": int(time.time()),
-              "parent": str((params.get("quote") or {}).get("server_id") or "")}
+              "sender": self.me, "mine": True, "type": "TEXT", "text": shown, "at": sent_at or int(time.time()),
+              "parent": str((params.get("quote") or {}).get("server_id") or ""),
+              "quotable": True, "content": shown, "msgsource": ""}
         new, pos = self.store.add_message(ev)
         if new and self.on_history is not None:
             msg = self._message(ev, pos)

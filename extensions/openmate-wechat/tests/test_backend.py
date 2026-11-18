@@ -33,6 +33,8 @@ def msg(mid, chat, sender, text, origin="live", mine=False, at_me=False, at_all=
 
 class Base(unittest.TestCase):
     def setUp(self):
+        wb.BUSINESS.clear()  # what one test learnt is not the next one's
+        wb.PERSONS.clear()
         self.dir = tempfile.mkdtemp(prefix="matewechat-test-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.log = os.path.join(self.dir, "requests.jsonl")
@@ -284,6 +286,30 @@ class SendTest(Base):
         self.assertEqual(r["quote"]["outgoing"], True)
         self.assertNotIn("mentions", r)
 
+    def test_an_interop_group_answer_quotes_without_an_at(self):
+        self.b.store.add_message(msg("q7", "77@im.chatroom", "wxid_bob", "@我 问", at_me=True))
+        self.b.send("77@im.chatroom", "答复", reply_to="q7")
+        r = self.requests("send")[-1]
+        self.assertEqual(r["quote"]["server_id"], "q7")
+        self.assertNotIn("mentions", r, "WeChat takes a real @ inside a quote only in …@chatroom groups")
+
+    def test_an_own_send_is_kept_with_its_send_time_and_quotable(self):
+        kept = []
+        self.b.on_history = kept.extend
+        mid = self.b.send("1@chatroom", "记下", reply_to="q1")
+        deadline = time.time() + 3
+        while time.time() < deadline and not kept:
+            time.sleep(0.05)
+        ev = self.b.store.message(mid)[0]
+        self.assertEqual((ev["at"], ev["quotable"], ev["content"]), (1700000000, True, ev["text"]))
+
+    def test_keeping_an_own_send_failing_still_reports_it_sent(self):
+        def boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        self.b._keep_own_send = boom
+        self.assertTrue(self.b.send("1@chatroom", "照发"), "it went out: never an error, never sent again")
+
     def test_a_reply_in_another_chat_quotes_nothing(self):
         self.b.send("2@chatroom", "别处", reply_to="q1")
         r = self.requests("send")[-1]
@@ -347,6 +373,7 @@ class HistoryToCoreTest(Base):
 
     def test_kinds_learnt_from_wechat(self):
         os.environ["FAKE_BUSINESS"] = "cmb4008205555"
+        os.environ["FAKE_NO_KIND"] = "wxid_carl,wxid_dan"  # the fake reads its environment when it starts
         b = self.backend()
         b.restore({"state": {"k": "v1"}})
         b._lookup_names(["cmb4008205555", "wxid_bob"])
@@ -355,7 +382,11 @@ class HistoryToCoreTest(Base):
 
         self.assertFalse(openmate_wechat.archive_chat("cmb4008205555", None, {}), "a verified service account")
         self.assertTrue(openmate_wechat.archive_chat("wxid_bob", None, {}))
-        self.assertFalse(openmate_wechat.archive_chat("wxid_unknown", None, {}), "not known yet: out")
+        self.assertTrue(openmate_wechat.archive_chat("wxid_unknown", None, {}), "a person's id, not known as anything else")
+        wb.PERSONS.add("wxid_dan")
+        b._lookup_names(["wxid_carl", "wxid_dan"])
+        self.assertNotIn("wxid_carl", wb.PERSONS, "no flags: not taken for a person")
+        self.assertIn("wxid_dan", wb.PERSONS, "no flags this time: what was learnt stays")
         self.assertTrue(wb.is_group("123@im.chatroom") and wb.is_group("9@qy_g"))
         with self.assertRaises(BackendError):
             b.create_chat("9@qy_g")
@@ -377,6 +408,25 @@ class ReadTest(Base):
         self.assertEqual(b.chat_done_states(["wxid_bob"]), {"wxid_bob": None}, "a new message brings it back")
         b._on_read("wxid_bob", now - 100)
         self.assertEqual(b.store.get("read:wxid_bob"), str(now - 30), "an older read never moves it back")
+        b._on_read("wxid_bob", now)
+        self.assertEqual(b.chat_done_states(["wxid_bob"]), {"wxid_bob": None},
+                         "read in the very second of the last message: can't tell which came first, still open")
+
+    def test_old_direct_chats_get_their_kind_in_the_background(self):
+        os.environ["FAKE_BUSINESS"] = "cmb4008205555"
+        os.environ["FAKE_GROUPS"] = "[]"
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        for cid in ("wxid_old1", "cmb4008205555", "wxid_old2"):
+            b.store.add_message(msg("m-" + cid, cid, cid, "旧消息"))
+        b._groups_work(True)
+        asked = [i for r in self.requests("contacts") for i in r.get("ids", [])]
+        self.assertEqual(sorted(asked), ["cmb4008205555", "wxid_old1", "wxid_old2"])
+        self.assertTrue(all(len(r.get("ids", [])) <= 2 for r in self.requests("contacts")), "two per request")
+        self.assertEqual(wb.kind_of("cmb4008205555"), "bot")
+        self.assertIn("wxid_old1", wb.PERSONS)
+        b._groups_work(True)
+        self.assertEqual(len([i for r in self.requests("contacts") for i in r.get("ids", [])]), 3, "asked once")
 
 
 class GroupsTest(Base):
