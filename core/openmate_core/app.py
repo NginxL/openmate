@@ -1452,10 +1452,32 @@ class ConnectorApp:
             out.append(item)
         return {"chats": out}
 
+    def _history_take(self, chat_id: str, want: int, older_than=None, newer_than=None, inclusive=False) -> List[dict]:
+        """Up to want lines archive.changes would hand over (views.has_content decides, as there), oldest first: the
+        store picks by a slightly wider rule (other Unicode blanks), so a line it let through is passed over here."""
+        got: List[dict] = []
+        while len(got) < want:
+            ask = want - len(got)
+            rows = self.store.history_rows(chat_id, older_than=older_than, newer_than=newer_than, inclusive=inclusive,
+                                           limit=ask)
+            keep = [r for r in rows if views.has_content(r)]
+            if newer_than is not None:
+                got += keep
+                if len(rows) < ask:
+                    break
+                newer_than = rows[-1]["_key"]
+            else:
+                got = keep + got
+                if len(rows) < ask:
+                    break
+                older_than, inclusive = rows[0]["_key"], False
+        return got
+
     def m_archive_history(self, params: dict) -> dict:
-        """One page of a chat's stored messages, the lines archive.changes hands over only. Cursors are "position:seq"
-        (a Feishu topic reply shares its group's position, so the position alone would cut such a pair); a bare
-        position from elsewhere (a message's own) is taken too: before it, after it, or around it with all its lines."""
+        """One page of a chat's stored messages, the lines archive.changes hands over only, walked by when they were
+        said (a Feishu topic reply can share its group's position, and Persona's import stops at the first line past
+        its cutoff, so the order must be time's). Cursors are "when:seq"; around reads the line at the cursor and
+        older ones, then newer ones."""
         chat_id = str(params.get("chat") or "")
         if not chat_id:
             raise RPCError("archive.history 没有 chat")
@@ -1463,67 +1485,61 @@ class ConnectorApp:
         if len(marks) > 1:
             raise RPCError("before、after、around 最多给一个")
         want = _int(params.get("limit"), HISTORY_PAGE, 1, HISTORY_MOST)
-        key = None
+        mark, key = "", None
         if marks:
             (mark, raw), = marks.items()
-            key = _history_key(raw, low=(mark == "before"))
+            key = _history_key(raw)
         if self.store is None:
             return {"pace": {"stop": True, "reason": "扩展的本地存储没有打开（没有登录或设置有误），请先在连接器设置里处理"}}
         epoch = self._account_epoch
         me = self.me_name()
         chat = self.store.get_chat(chat_id)
         if chat is None or self.store.is_gone(chat_id) or not self._history_open(chat_id, chat):
+            if epoch != self._account_epoch:
+                return {"pace": {"retry_after_ms": 2000}}  # another account signing in: not a verdict on the chat
             return {"unreadable": True}  # never seen here, left, or kept out of the archive: skip it for good
         back: List[dict] = []
         fwd: List[dict] = []
-        if not marks:
-            back = self.store.history_rows(chat_id, older_than=None, limit=want)
-        elif mark == "before":
-            back = self.store.history_rows(chat_id, older_than=key, limit=want)
-        elif mark == "after":
-            fwd = self.store.history_rows(chat_id, newer_than=key, limit=want)
-        else:  # around: the lines at the position and older, then newer
-            back = self.store.history_rows(chat_id, older_than=key, limit=(want + 1) // 2)
-            fwd = self.store.history_rows(chat_id, newer_than=key, limit=want - len(back))
-        rows = back + fwd  # by (position, seq)
+        if mark == "after":
+            fwd = self._history_take(chat_id, want, newer_than=key)
+        elif mark == "around":
+            back = self._history_take(chat_id, (want + 1) // 2, older_than=key, inclusive=True)
+            fwd = self._history_take(chat_id, want - len(back), newer_than=key) if want > len(back) else []
+        else:
+            back = self._history_take(chat_id, want, older_than=key)
+        rows = back + fwd  # oldest first
         page: Dict[str, Any] = {}
         if rows:
-            low, high = _row_key(rows[0]), _row_key(rows[-1])
-            if self.store.history_rows(chat_id, older_than=low, limit=1):
+            low, high = rows[0]["_key"], rows[-1]["_key"]
+            if self._history_take(chat_id, 1, older_than=low):
                 page["more"] = True
-                page["older"] = "%d:%d" % low
-            if self.store.history_rows(chat_id, newer_than=high, limit=1):
-                page["newer"] = "%d:%d" % high
-            # by time on the page (oldest first, as Persona reads it), a missing time as the time it came in
-            dated = [dict(r, at=r.get("at") or r.get("received") or 0) for r in rows]
-            dated.sort(key=lambda r: (r["at"], r["position"], r.get("seq") or 0))
-            page["messages"] = [views.archive_message(r, me, self.platform.handle_kind) for r in dated]
+                page["older"] = _cursor(low)
+            if self._history_take(chat_id, 1, newer_than=high):
+                page["newer"] = _cursor(high)
+            page["messages"] = [views.archive_message(dict(r, at=r["_key"][0]), me, self.platform.handle_kind)
+                                for r in rows]
         if epoch != self._account_epoch:
             return {"pace": {"retry_after_ms": 2000}}  # another account signed in meanwhile: read this place again
         return page
 
 
-_KEY_MOST = (1 << 63) - 1  # SQLite's integers
+_SEQ_MOST = (1 << 63) - 1  # SQLite's integers
 
 
-def _history_key(raw: str, low: bool) -> tuple:
-    """A cursor ("position:seq") or a bare position as a (position, seq) bound. A bare position bounds below all of its
-    lines for before (low) and above them otherwise: before it, after it, or around it with every line it has."""
+def _cursor(key: tuple) -> str:
+    return "%r:%d" % (float(key[0]), int(key[1]))  # repr: the time reads back exactly
+
+
+def _history_key(raw: str) -> tuple:
+    """A cursor this connector answered ("when:seq") as a (when, seq) bound."""
     try:
-        if ":" in raw:
-            a, b = raw.split(":", 1)
-            pos, seq = int(a), int(b)
-        else:
-            pos, seq = int(raw), (-_KEY_MOST - 1 if low else _KEY_MOST)
+        a, b = raw.split(":", 1)
+        when, seq = float(a), int(b)
     except ValueError:
         raise RPCError("位置不是这个连接器给出的：%s" % raw[:40])
-    if not (-_KEY_MOST - 1 <= pos <= _KEY_MOST and -_KEY_MOST - 1 <= seq <= _KEY_MOST):
+    if when != when or when in (float("inf"), float("-inf")) or not (-_SEQ_MOST - 1 <= seq <= _SEQ_MOST):
         raise RPCError("位置超出范围：%s" % raw[:40])
-    return pos, seq
-
-
-def _row_key(r: dict) -> tuple:
-    return int(r["position"]), int(r.get("seq") or 0)
+    return when, seq
 
 
 def _int(v: Any, default: int, lo: int, hi: int) -> int:

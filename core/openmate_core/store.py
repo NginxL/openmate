@@ -56,6 +56,8 @@ _SCHEMA = [
     # the account's own lines and the @me it got, per chat: 需要我 finds the last of each without a scan
     "CREATE INDEX IF NOT EXISTS messages_chat_mine ON messages (chat_id, position, seq) WHERE mine = 1",
     "CREATE INDEX IF NOT EXISTS messages_chat_at_me ON messages (chat_id, position, seq) WHERE at_me = 1 AND mine = 0",
+    # history pages (history_rows) walk a chat by when its lines were said, a missing time as when one came in
+    "CREATE INDEX IF NOT EXISTS messages_chat_when ON messages (chat_id, (CASE WHEN at > 0 THEN at ELSE received END), seq)",
     """CREATE TABLE IF NOT EXISTS names (
         user_id TEXT NOT NULL,
         chat_id TEXT NOT NULL DEFAULT '',
@@ -101,7 +103,28 @@ _MESSAGE_COLUMNS = (
 # What archive.changes hands over (views.is_system / views.has_content) as SQL: not a system line, and some text that
 # is not only blanks, or some media.
 _ARCHIVABLE = ("type != 'SYSTEM' AND (trim(text, ' ' || char(9, 10, 11, 12, 13, 160, 12288)) != '' "
-               "OR media NOT IN ('', '[]'))")
+               "OR media NOT IN ('', '[]'))")  # wider than views.has_content (other blanks): the caller checks again
+_WHEN = "(CASE WHEN at > 0 THEN at ELSE received END)"  # as in the messages_chat_when index, word for word
+
+
+def history_sql(chat_id: str, older_than: Optional[tuple], newer_than: Optional[tuple], inclusive: bool, limit: int):
+    """Store.history_rows' query. The bound is a range on the time plus a tie on seq: SQLite then seeks the
+    messages_chat_when index to it (a row value would only filter)."""
+    cond, args = "chat_id = ?", [chat_id]
+    if newer_than is not None:
+        when, seq = float(newer_than[0]), int(newer_than[1])
+        cond += " AND %s >= ? AND (%s > ? OR seq > ?)" % (_WHEN, _WHEN)
+        args += [when, when, seq]
+        order = _WHEN + ", seq"
+    else:
+        if older_than is not None:
+            when, seq = float(older_than[0]), int(older_than[1])
+            cond += " AND %s <= ? AND (%s < ? OR seq %s ?)" % (_WHEN, _WHEN, "<=" if inclusive else "<")
+            args += [when, when, seq]
+        order = _WHEN + " DESC, seq DESC"
+    sql = ("SELECT " + _MESSAGE_COLUMNS + ", " + _WHEN + " AS _when FROM messages WHERE " + cond + " AND " + _ARCHIVABLE +
+           " ORDER BY " + order + " LIMIT ?")
+    return sql, args + [int(limit)]
 
 
 _INSERT_COLUMNS = ("chat_id, id, position, sender_id, sender_name, mine, type, text, at, root_id, thread_id, parent_id, "
@@ -495,23 +518,18 @@ class Store:
         return [_message_row(r) for r in rows]
 
     def history_rows(self, chat_id: str, *, older_than: Optional[tuple] = None, newer_than: Optional[tuple] = None,
-                     limit: int) -> List[dict]:
-        """Up to limit messages of chat that archive.changes would hand over (no system lines, something to read),
-        oldest first by (position, seq): the newest ones older than older_than (the newest of all when both bounds are
-        None), or the oldest ones newer than newer_than. A bound is a (position, seq) pair."""
-        cond, args = "chat_id = ? AND " + _ARCHIVABLE, [chat_id]
-        if newer_than is not None:
-            cond += " AND (position > ? OR (position = ? AND seq > ?))"
-            args += [int(newer_than[0]), int(newer_than[0]), int(newer_than[1])]
-            order = "position, seq"
-        else:
-            if older_than is not None:
-                cond += " AND (position < ? OR (position = ? AND seq < ?))"
-                args += [int(older_than[0]), int(older_than[0]), int(older_than[1])]
-            order = "position DESC, seq DESC"
-        rows = self._all("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE " + cond + " ORDER BY " + order + " LIMIT ?",
-                         args + [int(limit)])
-        out = [_message_row(r) for r in rows]
+                     inclusive: bool = False, limit: int) -> List[dict]:
+        """Up to limit lines of chat that may be archivable (_ARCHIVABLE: no system lines, not visibly empty), oldest
+        first by (when, seq), each with its key as "_key": the newest ones older than older_than (up to it with
+        inclusive; the newest of all when both bounds are None), or the oldest ones newer than newer_than. A bound
+        is a (when, seq) pair; when is the line's time, or the time it came in when it has none."""
+        sql, args = history_sql(chat_id, older_than, newer_than, inclusive, limit)
+        rows = self._all(sql, args)
+        out = []
+        for r in rows:
+            d = _message_row(r)
+            d["_key"] = (float(d.pop("_when") or 0), int(d["seq"]))
+            out.append(d)
         return out if newer_than is not None else out[::-1]
 
     def message_counts(self) -> Dict[str, int]:

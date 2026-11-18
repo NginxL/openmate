@@ -4,11 +4,17 @@ import os
 import sys
 import time
 import unittest
+from datetime import datetime
 
 from harness import ROOT, Harness, HubSideError, wait_until
 from openmate_core.backend import Chat, Message
+from openmate_core.store import history_sql
 
 BIG = "chat_example_history"
+
+
+def when(m: dict) -> float:
+    return datetime.fromisoformat(m["at"].replace("Z", "+00:00")).timestamp()
 
 
 def page_ok(test, q: dict, page: dict) -> None:
@@ -24,9 +30,14 @@ def page_ok(test, q: dict, page: dict) -> None:
     ids = [m["id"] for m in msgs]
     test.assertTrue(all(ids), "a message without an id")
     test.assertEqual(len(ids), len(set(ids)), "a message twice on a page")
-    ats = [m["at"] for m in msgs]
-    test.assertTrue(all(ats), "a message without a time")
+    test.assertTrue(all(m["at"] for m in msgs), "a message without a time")
+    ats = [when(m) for m in msgs]
     test.assertEqual(ats, sorted(ats), "oldest first")
+
+
+def cursor(store, chat_id: str, msg_id: str) -> str:
+    r = store.message(chat_id, msg_id)
+    return "%r:%d" % (float(r["at"] or r["received"]), r["seq"])
 
 
 class HistoryTest(unittest.TestCase):
@@ -36,7 +47,7 @@ class HistoryTest(unittest.TestCase):
         self.h.sign_in()
         wait_until(lambda: self.h.app._catchup_done.is_set(), what="catch-up")
         # 300 lines straight into the store: every 7th a system line, every 11th empty (read as nothing)
-        now = time.time()
+        self.now = now = time.time()
         rows = []
         for i in range(1, 301):
             kind = "SYSTEM" if i % 7 == 0 else "TEXT"
@@ -44,12 +55,40 @@ class HistoryTest(unittest.TestCase):
             rows.append(Message(id="msg_hist_%d" % i, chat_id=BIG, position=i, sender_id="user_example_a",
                                 sender_name="示例同事甲", text=text, type=kind, at=now - 10000 + i))
         self.h.app.store.add_messages(rows, from_history=True)
-        self.content = [i for i in range(1, 301) if i % 7 and i % 11]
+        self.content = ["msg_hist_%d" % i for i in range(1, 301) if i % 7 and i % 11]
 
-    def read(self, **q):
-        page = self.h.c("archive.history", chat=BIG, **q)
+    def read(self, chat=BIG, **q):
+        page = self.h.c("archive.history", chat=chat, **q)
         page_ok(self, q, page)
         return page
+
+    def back(self, chat=BIG, limit=40):
+        """Every line, reading back from the newest; pages must go back in time without overlapping."""
+        seen, q, last = [], {"limit": limit}, None
+        for _ in range(400):
+            page = self.read(chat, **q)
+            msgs = page.get("messages") or []
+            self.assertLessEqual(len(msgs), limit)
+            if msgs and last:
+                self.assertLessEqual(when(msgs[-1]), when(last[0]), "a page newer than the one read before it")
+            last = msgs or last
+            seen = [m["id"] for m in msgs] + seen
+            if not page.get("more"):
+                return seen
+            q = {"limit": limit, "before": page["older"]}
+        self.fail("never reached the start")
+
+    def forward(self, chat=BIG, limit=50, after="0.0:0"):
+        seen, q = [], {"limit": limit, "after": after}
+        for _ in range(400):
+            page = self.read(chat, **q)
+            got = [m["id"] for m in page.get("messages") or []]
+            seen += got
+            if not page.get("newer"):
+                return seen
+            self.assertTrue(got, "newer on an empty page")
+            q = {"limit": limit, "after": page["newer"]}
+        self.fail("never reached the newest")
 
     def test_chats_lists_what_is_stored(self):
         listed = self.h.c("history.chats")["chats"]
@@ -65,62 +104,63 @@ class HistoryTest(unittest.TestCase):
         self.h.app.store.chat_gone("chat_example_chatter")
         self.assertNotIn("chat_example_chatter", [c["id"] for c in self.h.c("history.chats")["chats"]])
 
-    def back(self, chat=BIG, limit=40):
-        seen, q = [], {"limit": limit}
-        for _ in range(400):
-            page = self.h.c("archive.history", chat=chat, **q)
-            page_ok(self, q, page)
-            got = [m["id"] for m in page.get("messages") or []]
-            self.assertLessEqual(len(got), limit)
-            seen = got + seen
-            if not page.get("more"):
-                return seen
-            q = {"limit": limit, "before": page["older"]}
-        self.fail("never reached the start")
+    def test_paging_back_and_forward_read_everything_once(self):
+        self.assertEqual(self.back(), self.content)
+        self.assertEqual(self.forward(), self.content)
+        for limit in (1, 3, 7):
+            self.assertEqual(self.back(limit=limit), self.content, "limit %d" % limit)
 
-    def forward(self, chat=BIG, limit=50, after="0"):
-        seen, q = [], {"limit": limit, "after": after}
-        for _ in range(400):
-            page = self.h.c("archive.history", chat=chat, **q)
-            page_ok(self, q, page)
-            got = [m["id"] for m in page.get("messages") or []]
-            seen += got
-            if not page.get("newer"):
-                self.assertTrue(got or not seen, "newer led to an empty page")
-                return seen
-            q = {"limit": limit, "after": page["newer"]}
-        self.fail("never reached the newest")
+    def test_order_is_time_not_position(self):
+        # a Feishu topic reply can share its group's position; one filled in late can be much older than its
+        # neighbours. Persona stops importing at the first line past its cutoff, so a page must never put an old line
+        # among new ones: 50 new lines, then an August reply on the newest position.
+        rows = [Message(id="msg_new_%d" % i, chat_id=BIG, position=400 + i, sender_id="user_example_b",
+                        text="新 %d" % i, at=self.now - 50 + i) for i in range(50)]
+        rows.append(Message(id="msg_old_reply", chat_id=BIG, position=449, sender_id="user_example_b", text="八月的回复",
+                            at=self.now - 100 * 86400))
+        self.h.app.store.add_messages(rows, from_history=True)
+        newest = [m["id"] for m in self.read(limit=50)["messages"]]
+        self.assertNotIn("msg_old_reply", newest)
+        self.assertEqual(newest[0], "msg_new_0")
+        everything = self.back(limit=50)
+        self.assertEqual(everything[0], "msg_old_reply")  # read last, as the oldest
+        self.assertEqual(sorted(everything), sorted(self.content + [r.id for r in rows]))
 
-    def test_paging_back_from_the_newest_reads_everything_once(self):
-        self.assertEqual(self.back(), ["msg_hist_%d" % i for i in self.content])
-
-    def test_paging_forward(self):
-        self.assertEqual(self.forward(), ["msg_hist_%d" % i for i in self.content])
-
-    def test_lines_sharing_a_position_are_never_cut(self):
-        # a Feishu topic reply takes its group's newest position: several lines share one, stored out of time order
-        now = time.time()
-        # 4 positions with 3 lines each; within a position the later-stored lines are older (a reply filled in late)
-        rows = [Message(id="msg_same_%d" % i, chat_id=BIG, position=500 + i // 3, sender_id="user_example_b",
-                        text="同位 %d" % i, at=now - 100 + (i // 3) * 10 - (i % 3)) for i in range(12)]
+    def test_lines_sharing_a_position_and_a_time(self):
+        rows = [Message(id="msg_same_%d" % i, chat_id=BIG, position=500, sender_id="user_example_b",
+                        text="同位 %d" % i, at=self.now - 5) for i in range(9)]
         self.h.app.store.add_messages(rows, from_history=False)
-        want = ["msg_hist_%d" % i for i in self.content] + ["msg_same_%d" % i for i in range(12)]
-        for limit in (1, 2, 3, 5):
-            self.assertEqual(sorted(self.back(limit=limit)), sorted(want), "limit %d back" % limit)
-            self.assertEqual(sorted(self.forward(limit=limit, after="300")), sorted(want[len(self.content):]),
-                             "limit %d forward" % limit)
-        page = self.read(around="501", limit=2)  # a bare position: around it with every line it has
-        self.assertTrue({"msg_same_3", "msg_same_4", "msg_same_5"} & {m["id"] for m in page["messages"]})
+        want = self.content + ["msg_same_%d" % i for i in range(9)]
+        for limit in (1, 2, 4):
+            self.assertEqual(self.back(limit=limit), want, "limit %d back" % limit)
+            self.assertEqual(self.forward(limit=limit), want, "limit %d forward" % limit)
+
+    def test_around_holds_the_line_at_the_cursor(self):
+        at = cursor(self.h.app.store, BIG, "msg_hist_100")
+        for limit in (1, 2, 10):
+            ids = [m["id"] for m in self.read(around=at, limit=limit)["messages"]]
+            self.assertIn("msg_hist_100", ids, "limit %d" % limit)
+            self.assertEqual(len(ids), limit)
+        page = self.read(around=at, limit=10)
+        self.assertTrue(page["more"])
+        self.assertTrue(page["newer"])
+        # a page's own older cursor, handed back as around, reads that line again
+        older = self.read(limit=2)["older"]
+        self.assertIn(self.content[-2], [m["id"] for m in self.read(around=older, limit=2)["messages"]])
 
     def test_cursors_never_lead_to_an_empty_page(self):
         now = time.time()
-        rows = [Message(id="msg_edge_%d" % i, chat_id="chat_example_edge", position=i, sender_id="user_example_a",
-                        text="" if i != 2 else "唯一一条", type="SYSTEM" if i == 3 else "TEXT", at=now - 10 + i)
-                for i in (1, 2, 3)]
-        self.h.world.add_chat(Chat("chat_example_edge", "group", "示例边界群"))
-        self.h.app.store.add_messages(rows, from_history=False)
         self.h.app.store.upsert_chat(Chat("chat_example_edge", "group", "示例边界群"))
-        page = self.h.c("archive.history", chat="chat_example_edge", limit=1)
+        rows = [Message(id="msg_edge_1", chat_id="chat_example_edge", position=1, sender_id="user_example_a", text="",
+                        at=now - 9),
+                Message(id="msg_edge_2", chat_id="chat_example_edge", position=2, sender_id="user_example_a",
+                        text="唯一一条", at=now - 8),
+                Message(id="msg_edge_3", chat_id="chat_example_edge", position=3, sender_id="user_example_a",
+                        text="示例同事丙 加入了群聊", type="SYSTEM", at=now - 7),
+                Message(id="msg_edge_4", chat_id="chat_example_edge", position=4, sender_id="user_example_a",
+                        text=" 　 ", at=now - 6)]  # only blanks: archive.changes leaves it out, so here too
+        self.h.app.store.add_messages(rows, from_history=False)
+        page = self.read("chat_example_edge", limit=1)
         self.assertEqual([m["id"] for m in page["messages"]], ["msg_edge_2"])
         self.assertNotIn("more", page)
         self.assertNotIn("newer", page)
@@ -130,21 +170,14 @@ class HistoryTest(unittest.TestCase):
                                                text="没有时间", at=0)], from_history=False)
         page = self.read(limit=1)
         self.assertEqual(page["messages"][0]["id"], "msg_no_time")
-        self.assertTrue(page["messages"][0]["at"])
-
-    def test_around_holds_the_position(self):
-        page = self.read(around="100", limit=10)
-        got = [int(m["position"]) for m in page["messages"]]
-        self.assertIn(100, got)
-        self.assertEqual(len(got), 10)
-        self.assertTrue(page["more"])
-        self.assertTrue(page["newer"])
+        self.assertGreater(when(page["messages"][0]), self.now - 60)
 
     def test_messages_have_the_archive_shape(self):
         page = self.read(limit=3)
         m = page["messages"][-1]
         self.assertEqual(m["id"], "msg_hist_300")
         self.assertEqual(m["text"], "第 300 条")
+        self.assertEqual(m["position"], "300")
         self.assertEqual(m["sender_name"], "示例同事甲")
         self.assertEqual(m["sender_handles"], [{"kind": "lark", "value": "user_example_a"}])
         self.assertNotIn("newer", page)  # the newest page
@@ -155,27 +188,34 @@ class HistoryTest(unittest.TestCase):
 
     def test_unreadable_and_mistakes(self):
         self.assertEqual(self.h.c("archive.history", chat="chat_nope"), {"unreadable": True})
-        self.h.app.store.chat_gone(BIG)
-        self.assertEqual(self.h.c("archive.history", chat=BIG), {"unreadable": True})
         with self.assertRaises(HubSideError):
-            self.h.c("archive.history", chat="chat_example_team", before="3", after="1")
-        with self.assertRaises(HubSideError):
-            self.h.c("archive.history", chat="chat_example_team", before="not-ours")
+            self.h.c("archive.history", chat="chat_example_team", before="1.0:3", after="1.0:1")
+        for bad in ("not-ours", "12", "x:1", "1.0:9223372036854775808", "nan:1", "inf:1", "1.0:"):
+            with self.assertRaises(HubSideError, msg=bad):
+                self.h.c("archive.history", chat="chat_example_team", before=bad)
         with self.assertRaises(HubSideError):
             self.h.c("archive.history")
-        for huge in ("9223372036854775808", "1:9223372036854775808", "x:1"):
-            with self.assertRaises(HubSideError):
-                self.h.c("archive.history", chat="chat_example_team", before=huge)
-        self.assertEqual(self.h.c("archive.history", chat="chat_example_team", around="9223372036854775807",
-                                  limit=4)["messages"][-1]["text"], "@示例用户 接口文档这周谁来更新？")
+        self.h.app.store.chat_gone(BIG)
+        self.assertEqual(self.h.c("archive.history", chat=BIG), {"unreadable": True})
 
     def test_start_of_a_short_chat(self):
-        page = self.h.c("archive.history", chat="chat_example_team", limit=50)
-        page_ok(self, {}, page)
+        page = self.read("chat_example_team", limit=50)
         self.assertNotIn("more", page)
         texts = [m["text"] for m in page["messages"]]
         self.assertNotIn("示例同事丙 加入了群聊", texts, "system lines stay out, as in archive.changes")
-        self.assertEqual(self.h.c("archive.history", chat="chat_example_team", before="1"), {})
+        self.assertEqual(self.h.c("archive.history", chat="chat_example_team", before="0.0:0"), {})
+        self.assertEqual(self.h.c("archive.history", chat="chat_example_team", after="%r:0" % (time.time() + 60)), {})
+
+    def test_deep_pages_seek_the_index(self):
+        store = self.h.app.store
+        for bounds in ({"older_than": (self.now, 5)}, {"older_than": (self.now, 5), "inclusive": True},
+                       {"newer_than": (self.now, 5)}):
+            sql, args = history_sql(BIG, bounds.get("older_than"), bounds.get("newer_than"),
+                                    bounds.get("inclusive", False), 1)
+            with store._lock:  # the store's own connection: how its history queries are planned
+                plan = " ".join(str(r[3]) for r in store._db.execute("EXPLAIN QUERY PLAN " + sql, args))
+            self.assertIn("messages_chat_when", plan)
+            self.assertIn("<expr>", plan, "the time bound seeks the index: " + plan)
 
 
 class UndeclaredTest(unittest.TestCase):
