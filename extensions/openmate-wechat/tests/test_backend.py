@@ -523,6 +523,18 @@ class SignOutTest(Base):
         self.assertFalse(b._persist({"k": "v2"}, b._native.epoch), "nothing sealed after the sign-out")
         self.assertEqual(sealed, [])
 
+    def test_a_restore_after_a_sign_out_opens_nothing_until_the_users_qr(self):
+        from openmate_core.backend import CredentialsExpired
+
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b.logout()
+        with self.assertRaises(CredentialsExpired):
+            b.restore({"state": {"k": "v1"}})  # credentials read before the sign-out
+        self.assertTrue(b._signed_out)
+        b.login_start()
+        self.assertFalse(b._signed_out, "the user's own QR sign-in ends it")
+
     def test_a_renewal_from_before_a_sign_out_is_never_sealed_after_it(self):
         b = self.backend()
         sealed = []

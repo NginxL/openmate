@@ -332,6 +332,25 @@ class AlignedWithFeishuTest(unittest.TestCase):
         self.assertNotIn("chat_example_dm_a", got, "undecided past the limit: left out, the archive goes on")
         self.assertNotIn(TEAM, got)
 
+    def test_chats_not_asked_about_yet_wait_for_the_next_read(self):
+        from openmate_core import app as core_app
+        from openmate_wechat import backend as wb
+
+        h = wechat(self)
+        most, core_app.ARCHIVE_ASK_MOST = core_app.ARCHIVE_ASK_MOST, 0  # no asks left in this read
+        self.addCleanup(setattr, core_app, "ARCHIVE_ASK_MOST", most)
+        hours, core_app.ARCHIVE_UNDECIDED_HOURS = core_app.ARCHIVE_UNDECIDED_HOURS, 0
+        self.addCleanup(setattr, core_app, "ARCHIVE_UNDECIDED_HOURS", hours)
+        res = h.c("archive.changes", cursor="", limit=100)
+        self.assertTrue(res["more"], "stopped before one not asked about: read on soon")
+        core_app.ARCHIVE_ASK_MOST = most  # the next reads ask again
+        wb.PERSONS.add("chat_example_dm_a")
+        for cid in ("chat_example_dm_b", "chat_example_dm_c", "chat_example_dm_d"):
+            wb.BUSINESS.add(cid)  # the others decided too, so the reads end
+            self.addCleanup(wb.BUSINESS.discard, cid)
+        self.addCleanup(wb.PERSONS.discard, "chat_example_dm_a")
+        self.assertIn("chat_example_dm_a", self.archived_from(h, res["next"]), "never skipped for its age unasked")
+
     def archived_from(self, h, cursor):
         chats = set()
         for _ in range(20):

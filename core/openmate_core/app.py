@@ -1149,10 +1149,13 @@ class ConnectorApp:
                 # the platform's rule (WeChat: no groups unless turned on, no official accounts)
                 decided = rule(r["chat_id"])
                 if decided is None:
+                    if r["chat_id"] not in asked:
+                        more = True  # not asked about in this read (its asks are used up): the next read does
+                        break
                     if time.time() - float(r.get("received") or r.get("at") or 0) < ARCHIVE_UNDECIDED_HOURS * 3600:
                         more = False  # the cursor stops before it: a later read goes on from this message
                         break
-                    decided = False  # never decided on: left out (an official account's must not get in)
+                    decided = False  # asked, and long undecided: left out (an official account's must not get in)
                 if not decided:
                     scanned = r["seq"]
                     continue

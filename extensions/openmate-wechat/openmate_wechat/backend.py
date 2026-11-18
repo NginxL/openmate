@@ -408,9 +408,10 @@ class WeChatBackend(Backend):
 
     def _begin_sign_in(self, n: Native, epoch: Optional[int] = None) -> bool:
         """A sign-in starts (the user's QR, or saved credentials restored): renewals from now on are this sign-in's.
-        A restore passes the epoch it started in: after a sign-out meanwhile it opens nothing (False)."""
+        A restore passes the epoch it started in; after a sign-out (meanwhile or before) it opens nothing (False):
+        only the user's own QR sign-in ends a sign-out."""
         with self._auth_mu:
-            if epoch is not None and epoch != self._auth_epoch:
+            if epoch is not None and (self._signed_out or epoch != self._auth_epoch):
                 return False
             self._signed_out = False
             n.epoch = self._auth_epoch
@@ -471,6 +472,8 @@ class WeChatBackend(Backend):
         if not isinstance(st, dict):
             raise CredentialsExpired(EXPIRED)
         with self._auth_mu:
+            if self._signed_out:
+                raise CredentialsExpired(EXPIRED)  # signed out here: saved credentials read before do not count
             epoch = self._auth_epoch  # a sign-out while this waits ends it: it never opens sealing again
         self._state = st
         self._keep_device(st.get("device"))
