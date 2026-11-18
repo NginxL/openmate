@@ -60,6 +60,7 @@ _SCHEMA = [
     # the groups the account wrote in (自动代答's list), and how many messages came today (the 今天 counts)
     "CREATE INDEX IF NOT EXISTS messages_spoke ON messages (chat_id, at) WHERE mine = 1 AND type != 'SYSTEM'",
     "CREATE INDEX IF NOT EXISTS messages_others_at ON messages (at, chat_id) WHERE mine = 0 AND type != 'SYSTEM'",
+    "CREATE INDEX IF NOT EXISTS messages_blank ON messages (at, chat_id) WHERE text = ''",
     # history pages (history_rows) walk a chat by when its lines were said, a missing time as when one came in
     "CREATE INDEX IF NOT EXISTS messages_chat_when ON messages (chat_id, (CASE WHEN at > 0 THEN at ELSE received END), seq)",
     """CREATE TABLE IF NOT EXISTS names (
@@ -156,7 +157,6 @@ def _chat_row(r: sqlite3.Row) -> dict:
 class Store:
     """Thread-safe: one connection behind one lock."""
 
-    pending_text = "\x00"  # the backend's text for a message held back for now (set by the app); never ''
 
     def __init__(self, path: str):
         self.path = path
@@ -348,10 +348,21 @@ class Store:
             return {}
         rows = self._all(
             "SELECT chat_id, MIN(position) AS lo, MAX(position) AS hi, COUNT(*) AS n, MAX(at) AS last FROM messages "
-            "WHERE type IN (%s) AND (text = '' OR text = ?) AND at >= ? AND chat_id NOT IN (SELECT chat_id FROM gone) "
-            "GROUP BY chat_id ORDER BY last DESC LIMIT ?"
-            % ",".join("?" * len(types)), types + [self.pending_text, since, limit])
+            "INDEXED BY messages_blank WHERE text = '' AND at >= ? AND type IN (%s) "
+            "AND chat_id NOT IN (SELECT chat_id FROM gone) GROUP BY chat_id ORDER BY last DESC LIMIT ?"
+            % ",".join("?" * len(types)), [since] + types + [limit])
         return {r["chat_id"]: (int(r["lo"]), int(r["hi"]), int(r["n"])) for r in rows}
+
+    def blank_rows(self, types, since: float, limit: int) -> List[Tuple[str, int]]:
+        """(chat, position) of the messages of these types stored with no text since then, the newest first (a few
+        each catch-up: every one has its turn as the newer ones fill or age out)."""
+        types = [str(t).upper() for t in types]
+        if not types:
+            return []
+        rows = self._all("SELECT chat_id, position FROM messages INDEXED BY messages_blank WHERE text = '' AND at >= ? "
+                         "AND type IN (%s) AND chat_id NOT IN (SELECT chat_id FROM gone) ORDER BY at DESC LIMIT ?"
+                         % ",".join("?" * len(types)), [since] + types + [limit])
+        return [(r["chat_id"], int(r["position"])) for r in rows]
 
     def get_chat(self, chat_id: str) -> Optional[dict]:
         r = self._one("SELECT * FROM chats WHERE id = ?", (chat_id,))
@@ -428,8 +439,7 @@ class Store:
                 )
                 if cur.rowcount != 1:
                     blank = db.execute("SELECT " + _INSERT_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ? "
-                                       "AND (text = '' OR text = ?) AND text != ?",
-                                       (m.chat_id, m.id, self.pending_text, m.text)).fetchone() if m.text else None
+                                       "AND text = ''", (m.chat_id, m.id)).fetchone() if (m.text or "").strip() else None
                     if blank is not None:
                         # stored with no text by an older reading: moved to the end (a new seq), so the archive's
                         # cursor, already past it, hands it over with its text now

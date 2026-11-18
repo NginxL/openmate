@@ -33,7 +33,7 @@ from .wire import Peer, RPCError
 log = logging.getLogger("openmate")
 
 EMPTY_PAGES = 6  # a re-read of the messages stored with no text: at most this many pages per chat
-PENDING_CHATS = 10  # at every catch-up, the chats with a message of the last day still empty or held, read again
+BLANK_MOST = 10  # at every catch-up and done round, this many messages of the last day still empty are read again
 
 PROTOCOL = 1
 THREAD_MOST = 50
@@ -131,6 +131,7 @@ class ConnectorApp:
         self._done_ask = False  # ask the service about every chat that needs the user (after a catch-up)
         self._done_wake = threading.Event()
         self._done_mu = threading.Lock()  # a round's store reads and writes; shutdown and an account switch wait for it
+        self._wipe_mu = threading.Lock()  # an account switch's wipe, and each write ingest makes after asking the service
         self._account_epoch = 0  # bumped when another account's sign-in wiped the store
         self.done_rounds = 0  # finished rounds (tests wait on it)
         self.ready = threading.Event()
@@ -254,8 +255,6 @@ class ConnectorApp:
             self.changed = Changed(self._emit_changed, self.timing.debounce)
             try:
                 self.backend = self._make_backend(self.config, self.data_dir)
-                if getattr(self.backend, "pending_text", ""):
-                    self.store.pending_text = self.backend.pending_text
                 self.backend.on_credentials = self._credentials_rotated
                 self.backend.on_credentials_sync = self._credentials_rotated_now
                 self.backend.on_history = self._history_from_backend
@@ -585,6 +584,11 @@ class ConnectorApp:
                 next_check = time.monotonic() + t.done_check
             if not (ask or heard) or self.link != "up":
                 continue
+            if ask:
+                try:
+                    self._read_blank_again(self._gen)
+                except Exception as e:
+                    log.info("reading again the messages stored empty failed (%s)", type(e).__name__)
             try:
                 n = self._done_round(None if ask else heard)
                 if n:
@@ -755,9 +759,10 @@ class ConnectorApp:
         prev = self.store.meta_get("account_id") if self.store is not None else None
         if prev and acct.id and prev != acct.id:
             with self._done_mu:  # a done round of the account before must not write into this one's
-                self.store.wipe_account_data()  # another account: forget the previous one's chats
-                with self.lock:
-                    self._account_epoch += 1
+                with self._wipe_mu:  # nor an ingest that asked the service before the switch
+                    self.store.wipe_account_data()  # another account: forget the previous one's chats
+                    with self.lock:
+                        self._account_epoch += 1
 
     def _remember_account(self, acct: Account) -> None:
         self.account = acct
@@ -899,8 +904,8 @@ class ConnectorApp:
                 if not again:
                     self.store.meta_set("render_version", version)
             elif tuple(getattr(self.backend, "rerender_empty", ()) or ()):
-                # the same reading: the ones of the last day still empty or held for review, read again (bounded)
-                self._read_blank_again(gen, time.time() - 86400.0, PENDING_CHATS, 2)
+                # the same reading: the messages of the last day still empty (held for review, or read too soon)
+                self._read_blank_again(gen)
             self.last_sync = time.time()
             self.mark_changed("inbox", "chats")
             self._ask_done()
@@ -910,30 +915,23 @@ class ConnectorApp:
             if not self.closing.is_set():
                 log.exception("history catch-up failed")
 
-    def _read_blank_again(self, gen: int, since: float, chats: int, pages: int) -> None:
-        """Read the messages stored with no text (or held for review) since then where they are, a few pages per chat;
-        a chat that cannot be read is passed over."""
-        t = self.timing
+    def _read_blank_again(self, gen: int) -> None:
+        """Read again, each where it is, the newest BLANK_MOST messages of the last day stored with no text (held for
+        review, or a link only a newer read shows); one that cannot be read is passed over."""
         empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
-        for chat_id, (lo, hi, _) in self.store.empty_positions(empty, since, chats).items():
-            before = hi + 1
+        for chat_id, pos in self.store.blank_rows(empty, time.time() - 86400.0, BLANK_MOST) if empty else []:
+            if gen != self._gen or self.link != "up":
+                return
             try:
-                for _ in range(pages):
-                    if gen != self._gen or self.link != "up":
-                        return
-                    got = self.backend.history(chat_id, before, t.rerender_messages)
-                    if gen != self._gen:
-                        return
-                    self.ingest(got, live=False)
-                    if not got:
-                        break
-                    before = min(m.position for m in got)
-                    if before <= lo:
-                        break
+                got = self.backend.history(chat_id, pos + 1, 2)
             except CredentialsExpired:
                 raise
             except BackendError as e:
-                log.info("reading again the messages held or empty: a chat could not be read (%s)", e.kind)
+                log.info("reading again a message stored empty: it could not be read (%s)", e.kind)
+                continue
+            if gen != self._gen:
+                return
+            self.ingest(got, live=False)
 
     def _caught_up_since(self) -> float:
         """Messages of a chat new to the store are kept from here: the last whole catch-up (less a margin), else the
@@ -983,6 +981,12 @@ class ConnectorApp:
     def ingest(self, msgs: List[Message], live: bool) -> List[dict]:
         if not msgs or self.store is None:
             return []
+        with self.lock:
+            epoch = self._account_epoch  # the account these messages were read for
+
+        def same() -> bool:  # under _wipe_mu: the store still that account's
+            with self.lock:
+                return epoch == self._account_epoch
         latest: Dict[str, float] = {}
         for m in msgs:  # a chat gone comes back with a newer message of someone's (joined again)
             if (m.type or "") != "SYSTEM" and (m.at or 0) > latest.get(m.chat_id, 0):
@@ -994,7 +998,11 @@ class ConnectorApp:
             # no name, or only the id as a stand-in (kept by older versions): ask the backend again
             if known is None or not known.get("name") or known.get("name") == chat_id:
                 try:
-                    self.store.upsert_chat(self.backend.chat_info(chat_id))
+                    info = self.backend.chat_info(chat_id)
+                    with self._wipe_mu:
+                        if not same():
+                            return []
+                        self.store.upsert_chat(info)
                 except BackendError:
                     pass
                 except Exception:
@@ -1019,8 +1027,14 @@ class ConnectorApp:
                             m.sender_name = ""
                         if m.sender_name:
                             self._names[m.sender_id] = m.sender_name
-                            self.store.put_name(m.sender_id, m.sender_name)
-        new = self.store.add_messages(msgs, from_history=not live)
+                            with self._wipe_mu:
+                                if same():
+                                    self.store.put_name(m.sender_id, m.sender_name)
+        with self._wipe_mu:
+            if not same():
+                log.info("%d message(s) read for an account signed out meanwhile: not stored", len(msgs))
+                return []
+            new = self.store.add_messages(msgs, from_history=not live)
         if new:
             self.mark_changed("inbox", "chats")
             if live and self.agent is not None:
@@ -1384,6 +1398,7 @@ class ConnectorApp:
     # ------------------------------------------------------------------ archive
 
     def m_archive_changes(self, params: dict) -> dict:
+        skip = set(getattr(self.backend, "unarchived_texts", ()) or ())
         cursor = str(params.get("cursor") or "")
         if cursor and not cursor.isdigit():
             raise RPCError("cursor 不是这个连接器给出的")
@@ -1439,8 +1454,8 @@ class ConnectorApp:
                     scanned = r["seq"]
                     continue
             scanned = r["seq"]
-            if views.is_system(r) or not views.has_content(r):
-                continue
+            if views.is_system(r) or not views.has_content(r) or (r.get("text") or "") in skip:
+                continue  # a text the service kept from this client (blocked) is never the knowledge base's
             batches.setdefault(r["chat_id"], []).append(r)
         me = self.me_name()
         out = []

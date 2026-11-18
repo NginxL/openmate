@@ -273,26 +273,49 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(store.message("chat_example_chatter", old.id)["text"], "示例文章 https://example.com/a")
         self.assertEqual(store.meta_get("render_version"), "9")
 
-    def test_a_held_text_is_read_again_at_a_catch_up_and_archived_once_it_reads(self):
+    def test_an_empty_text_is_read_again_at_a_catch_up_and_archived_once_it_reads(self):
         h = Harness(self)
         h.sign_in()
         wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
         store, backend = h.app.store, h.app.backend
-        backend.pending_text = store.pending_text = "[审核中]"
         backend.rerender_empty = ("TEXT",)
-        backend.render_version = store.meta_get("render_version") or ""
-        if not backend.render_version:
-            backend.render_version = "1"
-            store.meta_set("render_version", "1")
-        held = h.world.make("chat_example_team", "user_example_a", "[审核中]", ago=600)
-        store.add_messages([held], True)
-        cursor = max(r["seq"] for r in store.archive_rows(0, 100000))
+        backend.unarchived_texts = ("[拦下了]",)
+        backend.render_version = store.meta_get("render_version") or "1"
+        store.meta_set("render_version", backend.render_version)
+        held = h.world.make("chat_example_team", "user_example_a", "", ago=600)  # held for review: no text yet
+        blocked = h.world.make("chat_example_team", "user_example_b", "[拦下了]", ago=500)
+        store.add_messages([held, blocked], True)
+        cursor = ""
+        for _ in range(50):  # what the knowledge base reads meanwhile: neither of them
+            page = h.c("archive.changes", cursor=cursor)
+            self.assertNotIn("[拦下了]", str(page))
+            cursor = page.get("next") or cursor
+            if not page.get("more"):
+                break
         held.text = "审核通过的正文"  # the service lets it through
         h.app._catchup_done.clear()
         h.app._request_catch_up(h.app._gen)
         wait_until(lambda: h.app._catchup_done.is_set(), what="a catch-up")
         self.assertEqual(store.message("chat_example_team", held.id)["text"], "审核通过的正文")
-        self.assertEqual([r["text"] for r in store.archive_rows(cursor, 100) if r["id"] == held.id], ["审核通过的正文"])
+        self.assertIn("审核通过的正文", str(h.c("archive.changes", cursor=cursor)), "its first text in the archive")
+
+    def test_nothing_is_stored_for_an_account_signed_out_while_reading(self):
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        app = h.app
+        m = h.world.make("chat_example_new_one", "user_example_a", "读的时候还是 A")
+        real = app.backend.chat_info
+
+        def switched(chat_id):  # the read waits on the service while another account takes the store
+            with app.lock:
+                app._account_epoch += 1
+            return real(chat_id) if chat_id in h.world.chats else type(h.world.chats["chat_example_team"])(chat_id, "group", "x")
+
+        app.backend.chat_info = switched
+        self.addCleanup(setattr, app.backend, "chat_info", real)
+        self.assertEqual(app.ingest([m], live=False), [])
+        self.assertIsNone(app.store.message("chat_example_new_one", m.id))
 
     def test_a_text_that_comes_back_reaches_the_archive_again(self):
         h = Harness(self)

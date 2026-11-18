@@ -644,8 +644,8 @@ class ReadTest(Base):
         with self.assertLogs("openmate.larkx", level="INFO") as logs:
             msgs = self.b.history("660", None, 10)
         self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT, "blocked: said so, never worked around")
-        self.assertEqual(msgs[1].text, larkagentx.PENDING_TEXT, "under review: said so, read again by the core")
-        self.assertEqual(self.b.pending_text, larkagentx.PENDING_TEXT)
+        self.assertEqual(msgs[1].text, "", "under review: left empty (never archived), read again by the core")
+        self.assertEqual(self.b.unarchived_texts, (larkagentx.DLP_BLOCKED_TEXT,))
         self.assertTrue(any('"dlpReviewState": 3' in line for line in logs.output), logs.output)
 
     def test_a_held_text_is_not_shown_through_its_preview(self):
@@ -658,7 +658,7 @@ class ReadTest(Base):
             "2": {"id": "672", "contentState": {"dlpReviewState": 1}, "urlPreviewHangPointMap": hang}}}
         msgs = self.b.history("670", None, 10)
         self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT)
-        self.assertEqual(msgs[1].text, larkagentx.PENDING_TEXT, "not its preview link either")
+        self.assertEqual(msgs[1].text, "", "not its preview link either")
 
     def test_a_text_read_as_nothing_is_noted(self):
         empty = {"richText": {"elementIds": ["x"], "elements": {"dictionary": {"x": {"tag": 35, "property": b"\x08\x01"}}}}}

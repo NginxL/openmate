@@ -58,7 +58,6 @@ MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 RENDER_VERSION = "8"  # 7: a text whose content is empty takes the links of its preview hang points; 8: DLP marks
 DLP_IN_PROGRESS, DLP_BLOCK = (1, "IN_PROGRESS"), (3, "BLOCK")  # Message.ContentState.dlpReviewState
 DLP_BLOCKED_TEXT = "[飞书的安全策略拦下了这条消息，内容看不到]"
-PENDING_TEXT = "[飞书正在安全审核这条消息，内容暂时看不到]"  # read again by the core's catch-up until it reads
 RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
@@ -441,7 +440,7 @@ class LarkXBackend(Backend):
     render_version = RENDER_VERSION
     rerender_types = RERENDER_TYPES
     rerender_empty = RERENDER_EMPTY
-    pending_text = PENDING_TEXT
+    unarchived_texts = (DLP_BLOCKED_TEXT,)  # shown in the chat, never handed to the knowledge base
     done_marks = True  # a chat's 完成
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
@@ -1522,7 +1521,7 @@ class LarkXBackend(Backend):
                 note_flags(m.type, entity_flags(ent))
                 continue
             if dlp in DLP_IN_PROGRESS:
-                m.text = PENDING_TEXT  # held for review: said so; the core reads it again (pending_text)
+                m.text = ""  # held for review: left empty (never its preview link), read again by the core's catch-ups
                 note_flags(m.type, entity_flags(ent))
                 continue
             links = hang_links(ent)
