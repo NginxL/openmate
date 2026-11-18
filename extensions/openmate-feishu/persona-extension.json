@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.11.24",
+  "version": "0.11.25",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",

@@ -315,8 +315,8 @@ class WeChatBackend(Backend):
 
     def __init__(self, native_path: Any, data_dir: str, ack_text: str = "", voice_cmd: str = ""):
         """native_path: the program's path, or a callable that returns it (waiting for a download) or raises.
-        ack_text: the line put in the chat when a /agent or 自动代答 request is taken (the setting agent_ack_reaction);
-        WeChat has no reactions, so the core's "reaction" is this message."""
+        ack_text: the line put in the chat when the user's /agent request is taken (the setting agent_ack_reaction; never
+        for 自动代答: Platform.ack_auto is off for WeChat); WeChat has no reactions, so the core's "reaction" is this message."""
         self.ack_text = (ack_text or "").strip()
         self._native_path = native_path
         os.makedirs(data_dir, exist_ok=True)

@@ -41,6 +41,9 @@ class Platform:
     #: the service can edit a sent message (Backend.edit). Without it /agent sends no progress messages at all: each
     #: would be a new message in the chat, as the user
     can_edit: bool = True
+    #: an 自动代答 (someone else's @ of the user) gets the taken mark too. WeChat: no; its mark is a message of its own
+    #: in front of the whole group, while /agent (the user's own request) keeps it
+    ack_auto: bool = True
     #: connector methods this platform does not serve at all (a platform that offers less than the core can do):
     #: they are not in the method table, so the hub's call gets unknown_method whatever its manifest says
     methods_off: Tuple[str, ...] = ()

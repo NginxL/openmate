@@ -638,8 +638,10 @@ class AgentRunner:
             self._fail(run["id"], "没能启动 Agent：扩展内部错误")
 
     def _start_run(self, run: dict, row: dict) -> None:
-        if run.get("kind") not in GUEST_KINDS or self._guest_supported():  # never "处理中" for what cannot start
+        if run.get("kind") not in GUEST_KINDS:
             self._ack_request(run)
+        elif self._guest_supported() and (run.get("kind") != "auto" or self.app.platform.ack_auto):
+            self._ack_request(run)  # never "处理中" for what cannot start
         try:
             self._start(run, row)
         except Exception:
