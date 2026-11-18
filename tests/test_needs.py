@@ -26,6 +26,9 @@ class TalkClosedTest(unittest.TestCase):
         self.assertFalse(talk_closed([msg("好的", mine=True), msg("https://example.com/approval/1", at=30), msg("给点一波", at=40)]),
                          "a request")
         self.assertFalse(talk_closed([msg("好的", mine=True), msg("另一件事", at=2 * 3600)]), "hours later: a new thing")
+        self.assertFalse(talk_closed([msg("早上很暖和啊", mine=True), msg("外面冷", at=30), msg("[视频]", at=6 * 3600),
+                                      msg("小伙子太周正了", at=6 * 3600 + 30)]),
+                         "an answer soon after, then new lines hours later: those need the user")
         self.assertFalse(talk_closed([msg("好的", mine=True)] + [msg("第%d句" % i, at=60 + i) for i in range(4)]), "a long answer")
         self.assertFalse(talk_closed([msg("在吗"), msg("有空吗")]), "the user never spoke")
         self.assertFalse(talk_closed([msg("在吗", mine=True)]), "the user spoke last: nothing to close")
