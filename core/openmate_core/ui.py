@@ -576,7 +576,7 @@ class ChatsPage(Page):
             title = "找群：搜索全部 %d 个群" % total
             if version >= 3:
                 r = row(title, "按群名搜索，打开或关掉自动代答", "", key="groups:open")
-                r["action"] = {"push": {"ui": getattr(self.app.platform, "chats_page", CHATS_PAGE),
+                r["action"] = {"id": "groups:open", "push": {"ui": getattr(self.app.platform, "chats_page", CHATS_PAGE),
                                         "state": state_text({"groups": 1}), "title": "自动代答 · 找群"}}
             else:
                 r = row(title, "按群名搜索，打开或关掉自动代答", "", "groups:open", key="groups:open")
@@ -808,6 +808,9 @@ def check_view(view: dict, compact: bool = False) -> List[str]:
                 keys.add(k)
             if item.get("type") == "row" and not item.get("title"):
                 problems.append(where + ": a row needs a title")
+            act = item.get("action")
+            if act is not None and not (isinstance(act, dict) and str(act.get("id") or "")):
+                problems.append(where + ": action.id: shorter than 1 (a push needs an id too)")
             if item.get("type") == "stat_grid" and not 1 <= len(item.get("stats") or []) <= 6:
                 problems.append(where + ": 1–6 stats")
             if item.get("type") == "link" and not str(item.get("url") or "").startswith("https://"):
