@@ -253,8 +253,8 @@ class FilteredMessagesTest(unittest.TestCase):
         self.h.sign_in()
         wait_until(lambda: self.h.app._catchup_done.is_set(), what="catch-up")
 
-    def stamp(self, i: int) -> str:
-        return _dt.datetime.fromtimestamp(self.base + i * 60).strftime("%Y-%m-%d %H:%M")
+    def stamp(self, i: int) -> str:  # in the hub's time zone, as the tool reads it (not the machine's: CI runs in UTC)
+        return _dt.datetime.fromtimestamp(self.base + i * 60, self.h.app.tz).strftime("%Y-%m-%d %H:%M")
 
     def test_query_keeps_only_matching_messages(self):
         text = self.h.tool("messages", chat="chat_example_team", query="周会")
@@ -291,7 +291,7 @@ class FilteredMessagesTest(unittest.TestCase):
         self.assertRegex(text, r"还没看完，接着往前：before=\d+")
 
     def test_a_date_until_is_the_whole_day_and_bad_times_say_so(self):
-        day = _dt.datetime.fromtimestamp(self.base + 999 * 60).strftime("%Y-%m-%d")
+        day = _dt.datetime.fromtimestamp(self.base + 999 * 60, self.h.app.tz).strftime("%Y-%m-%d")
         self.assertIn("闲聊 第999条", self.h.tool("messages", chat="chat_long", until=day, limit=1))
         with self.assertRaises(HubSideError) as e:
             self.h.tool("messages", chat="chat_long", since="上周三")
