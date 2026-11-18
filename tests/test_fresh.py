@@ -161,5 +161,30 @@ class BoundedWaitTest(unittest.TestCase):
             f.get(wait=1.0)
 
 
+class FreshKeysTest(unittest.TestCase):
+    def test_a_failure_is_said_for_a_while_and_another_key_reads_anew(self):
+        from openmate_core.ui import Fresh
+
+        now = [1000.0]
+        key = ["day1"]
+        reads = []
+
+        def read():
+            reads.append(key[0])
+            if key[0] == "day1":
+                raise ValueError("cli failed")
+            return "events of " + key[0]
+
+        f = Fresh(read, 30.0, 900.0, clock=lambda: now[0], key=lambda: key[0], spawn=lambda fn: fn())
+        with self.assertRaises(ValueError):
+            f.get(wait=1.0)
+        with self.assertRaises(ValueError):
+            f.get(wait=1.0)  # said again, not read again at once
+        self.assertEqual(reads, ["day1"])
+        key[0] = "day2"  # a new day: its own read, not yesterday's failure
+        self.assertEqual(f.get(wait=1.0), "events of day2")
+        self.assertEqual(reads, ["day1", "day2"])
+
+
 if __name__ == "__main__":
     unittest.main()

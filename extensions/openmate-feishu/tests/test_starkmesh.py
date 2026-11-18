@@ -296,6 +296,52 @@ class ManyAccountsTest(unittest.TestCase):
         self.assertIn("还有 210 个账号", acc.get("footer", ""))
 
 
+class OddGatewayTest(unittest.TestCase):
+    def test_a_gateway_that_ignores_page_lists_each_account_once(self):
+        same = [dict(ACCOUNTS[0], id=500 + i, name="claude-x%03d" % i) for i in range(200)]
+        asked = []
+
+        def opener(req, timeout=None):
+            u = req.full_url
+            if "/admin/accounts/usage" in u:
+                ids = json.loads(req.data.decode())["account_ids"]
+                asked.append(len(ids))
+                data = {"usage": {str(i): {"five_hour": win(0, 600)} for i in ids}, "errors": {}}
+            elif "/admin/accounts" in u:
+                data = {"items": same}  # every page the same, no total
+            else:
+                data = STATS
+            return io.BytesIO(json.dumps({"code": 0, "data": data}).encode())
+
+        page, _ = make(gateway=opener)
+        view = page.render({"ui_version": 9})
+        self.assertFalse(check_view(view), check_view(view))
+        self.assertEqual(len(page.mesh.read().accounts), 200)
+
+    def test_the_usage_of_every_account_in_batches(self):
+        many = [dict(ACCOUNTS[0], id=700 + i, name="claude-y%03d" % i) for i in range(250)]
+        asked = []
+
+        def opener(req, timeout=None):
+            u = req.full_url
+            if "/admin/accounts/usage" in u:
+                ids = json.loads(req.data.decode())["account_ids"]
+                asked.append(len(ids))
+                data = {"usage": {str(i): {"five_hour": win(0, 600)} for i in ids}, "errors": {}}  # only those asked
+            elif "/admin/accounts" in u:
+                q = dict(x.split("=") for x in u.split("?", 1)[1].split("&"))
+                p, size = int(q["page"]), int(q["page_size"])
+                data = {"items": many[(p - 1) * size: p * size], "total": len(many)}
+            else:
+                data = STATS
+            return io.BytesIO(json.dumps({"code": 0, "data": data}).encode())
+
+        page, _ = make(gateway=opener)
+        snap = page.mesh.read()
+        self.assertEqual(asked, [200, 50])
+        self.assertEqual(len(snap.usage), 250)
+
+
 class RedirectTest(unittest.TestCase):
     """The key goes to the address the user wrote only: a redirect elsewhere is not followed (an HTTP error)."""
 

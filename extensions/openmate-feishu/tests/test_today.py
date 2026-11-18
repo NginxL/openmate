@@ -219,15 +219,34 @@ class TodayTest(unittest.TestCase):
         needs_tile = [t for t in status["tiles"] if t["title"] == "需要我"][0]
         self.assertEqual(needs_tile["badge"]["text"], "读不全", "the inbox could not be read: not 清空")
 
+    def test_the_inbox_version_names_the_change(self):
+        now = [NOW]
+        answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
+        answers["/api/v1/inbox"] = {"items": [dict(PERSONA["/api/v1/inbox"]["items"][0], version="v1")]}
+        page, _, _ = make(answers=answers, clock=lambda: now[0])
+        aid = rows(body(page.render({"ui_version": 6}))[0])[1]["actions"][0]["action"]["id"]
+        answers["/api/v1/inbox"] = {"items": [dict(PERSONA["/api/v1/inbox"]["items"][0], version="v2")]}  # same time
+        now[0] += 700
+        page.render({"ui_version": 6})
+        self.assertIn("新变化", page.action({"action": {"id": aid}, "ui_version": 6})["toast"])
+
+    def test_a_free_reminder_is_no_meeting_here_either(self):
+        free = {"event_id": "f1", "summary": "提醒", "free_busy_status": "free", "self_rsvp_status": "accept",
+                "start_time": {"datetime": "2026-11-16T09:00:00+08:00"}, "end_time": {"datetime": "2026-11-16T12:00:00+08:00"}}
+        page, _, _ = make(runner=Runner({"ok": True, "data": [free]}))
+        view = page.render({"ui_version": 6})
+        self.assertNotIn("会议中", str(view))
+
     def test_marked_done(self):
         now = [NOW]
         answers = {k: (dict(v) if isinstance(v, dict) else v) for k, v in PERSONA.items()}
         page, card, _ = make(answers=answers, clock=lambda: now[0])
         view = page.render({"ui_version": 6})
         needs = rows(body(view)[0])
-        self.assertEqual([r["actions"][0]["action"]["id"].split("|")[0] for r in needs[:-1]],
-                         ["done:wait:s1", "done:inbox:i1", "done:ask:t1", "done:chat:c1", "done:chat:c2"])
-        self.assertEqual(needs[1]["actions"][0]["action"]["id"], "done:inbox:i1|2026-11-16T01%3A00%3A00Z",
+        from openmate_core.ui import parse_done
+        self.assertEqual([parse_done(r["actions"][0]["action"]["id"])[0] for r in needs[:-1]],
+                         ["wait:s1", "inbox:i1", "ask:t1", "chat:c1", "chat:c2"])
+        self.assertEqual(parse_done(needs[1]["actions"][0]["action"]["id"]), ("inbox:i1", "2026-11-16T01:00:00Z"),
                          "with the version the page showed")
         self.assertTrue(all(r["actions"][0]["title"] == "处理完" for r in needs[:-1]))
         self.assertFalse(any("actions" in r for r in card.render({"ui_version": 6})["sections"][1]["items"]))
@@ -385,7 +404,7 @@ class TodayTest(unittest.TestCase):
     def test_a_slow_draw_says_where_the_time_went(self):
         page, _, _ = make()
         with self.assertLogs("openmate.today", "INFO") as logs:
-            page.persona.read = lambda: (__import__("time").sleep(0.35), dict(PERSONA_PARTS))[1]
+            page.persona.read = lambda wait=None: (__import__("time").sleep(0.35), dict(PERSONA_PARTS))[1]
             page.render({"ui_version": 6})
         self.assertIn("today took", logs.output[0])
         self.assertIn("Persona 3", logs.output[0])

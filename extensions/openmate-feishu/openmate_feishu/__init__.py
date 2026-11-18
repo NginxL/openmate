@@ -62,6 +62,22 @@ def _agenda_pages(app):
     wechat = today.PeerToday(app)  # openmate-wechat's chats, when it is installed beside this one
     mesh = starkmesh.StarkMeshPage(app, starkmesh.StarkMesh(app))
     board = agents.AgentsRead(app)
+
+    def drawn_again(*contributions):
+        # a first read a page did not wait for ("正在读取") is in: those pages draw again now, not in 30 s
+        def tell():
+            peer = getattr(app, "peer", None)
+            for c in contributions:
+                try:
+                    peer.notify("ui.invalidate", {"contribution": c})
+                except Exception:
+                    pass
+        return tell
+
+    shared._fresh.on_ready = drawn_again(agenda.PAGE, agenda.CARD, today.PAGE, today.CARD)
+    persona._fresh.on_ready = drawn_again(today.PAGE, today.CARD)
+    mesh.mesh._fresh.on_ready = drawn_again(starkmesh.PAGE, starkmesh.CARD, today.PAGE)
+    board._fresh.on_ready = drawn_again(agents.PAGE, agents.CARD, today.PAGE)
     return {
         agenda.PAGE: agenda.CalendarPage(app, shared), agenda.CARD: agenda.CalendarPage(app, shared, card=True),
         today.PAGE: today.TodayPage(app, shared, persona, mesh=mesh, agents=board, wechat=wechat),

@@ -234,26 +234,32 @@ class StarkMesh:
 
     def _read(self) -> Snapshot:
         accounts: List[dict] = []
-        for page in range(1, ACCOUNT_PAGES + 1):  # every page, not the first 200 taken as all
+        seen = set()
+        total = 0
+        for page in range(1, ACCOUNT_PAGES + 1):  # every page, each account once (a gateway may ignore page)
             data = self.api.call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": 200}) or {}
             items = [a for a in (data.get("items") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
-            accounts += items
+            new = [a for a in items if str(a.get("id")) not in seen]
+            seen.update(str(a.get("id")) for a in new)
+            accounts += new
             total = int(data.get("total") or 0) if isinstance(data, dict) else 0
-            if len(items) < 200 or (total and len(accounts) >= total):
+            if not new or (total and len(accounts) >= total) or (not total and len(items) < 200):
                 break
         ids = [int(a["id"]) for a in accounts if str(a.get("platform") or "") == "anthropic" and a.get("id") is not None]
         usage: Dict[str, dict] = {}
-        if ids:
+        for i in range(0, len(ids), 200):  # the usage of every account, 200 at a time
             got = self.api.call("POST", "/api/v1/admin/accounts/usage/batch",
-                                body={"account_ids": ids[:200], "force": False, "refresh_claude": False}) or {}
-            usage = {str(k): v for k, v in (got.get("usage") or {}).items() if isinstance(v, dict)}
+                                body={"account_ids": ids[i:i + 200], "force": False, "refresh_claude": False}) or {}
+            usage.update({str(k): v for k, v in (got.get("usage") or {}).items() if isinstance(v, dict)})
         try:
             stats = self.api.call("GET", "/api/v1/admin/dashboard/stats") or {}
         except StarkMeshError as e:
             if e.kind != "auth":  # a key without dashboard.read still shows the quota
                 raise
             stats = {}
-        return Snapshot(accounts, usage, stats if isinstance(stats, dict) else {}, self.clock())
+        snap = Snapshot(accounts, usage, stats if isinstance(stats, dict) else {}, self.clock())
+        snap.total = max(total, len(accounts))  # the gateway's count, when it said one beyond what was read
+        return snap
 
 
 def money(v) -> str:
@@ -386,7 +392,9 @@ class StarkMeshPage(Page):
             rows.append(row(str(a.get("name") or a.get("id")), sub, "", key="a:%s" % a.get("id"),
                             badge={"text": text, "tone": tone}))
             rows += self.account_bars(a, s)
-        accounts = {"title": "账号 · %d" % len(s.accounts), "items": rows or [empty("没有账号", "", version)]}
+        total = getattr(s, "total", len(s.accounts))
+        title = "账号 · %d" % len(s.accounts) if total <= len(s.accounts) else "账号 · 读到 %d / %d" % (len(s.accounts), total)
+        accounts = {"title": title, "items": rows or [empty("没有账号", "", version)]}
         if len(listed) > ACCOUNTS_MOST:
             accounts["footer"] = "还有 %d 个账号（都能用的排在后面），完整列表在 StarkMesh 后台" % (len(listed) - ACCOUNTS_MOST)
         updated = "数据读于 %s" % when(s.now, self.app.tz)

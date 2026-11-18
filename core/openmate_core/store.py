@@ -53,6 +53,9 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS messages_chat_position ON messages (chat_id, position)",
     "CREATE INDEX IF NOT EXISTS messages_chat_root ON messages (chat_id, root_id)",
     "CREATE INDEX IF NOT EXISTS messages_id ON messages (id)",
+    # the account's own lines and the @me it got, per chat: 需要我 finds the last of each without a scan
+    "CREATE INDEX IF NOT EXISTS messages_chat_mine ON messages (chat_id, position, seq) WHERE mine = 1",
+    "CREATE INDEX IF NOT EXISTS messages_chat_at_me ON messages (chat_id, position, seq) WHERE at_me = 1 AND mine = 0",
     """CREATE TABLE IF NOT EXISTS names (
         user_id TEXT NOT NULL,
         chat_id TEXT NOT NULL DEFAULT '',
@@ -321,7 +324,15 @@ class Store:
         p = rows[0]["p"] if rows else None
         return None if p is None else int(p)
 
-    def chats_since(self, since: float, limit: int) -> List[dict]:
+    def chats_since(self, since: float, limit: int, only: Optional[Iterable[str]] = None) -> List[dict]:
+        """Chats active since then (none the account left), the most recent first; with only, just those ids."""
+        if only is not None:
+            ids = sorted({str(i) for i in only})
+            if not ids:
+                return []
+            rows = self._all("SELECT * FROM chats WHERE last_at >= ? AND id IN (%s) AND id NOT IN (SELECT chat_id FROM gone) "
+                             "ORDER BY last_at DESC, id LIMIT ?" % ",".join("?" * len(ids)), [since] + ids + [limit])
+            return [_chat_row(r) for r in rows]
         rows = self._all("SELECT * FROM chats WHERE last_at >= ? AND id NOT IN (SELECT chat_id FROM gone) "
                          "ORDER BY last_at DESC, id LIMIT ?", (since, limit))
         return [_chat_row(r) for r in rows]
@@ -439,13 +450,17 @@ class Store:
         """The chat's last limit messages (oldest first), and before them its newest @me the account has not answered
         when later chatter pushed it out of them: a mention stays a mention however busy the group is."""
         rows = self.messages_before(chat_id, None, limit)
-        if not rows or any(r.get("mine") or r.get("at_me") for r in rows):
-            return rows
+        if not rows or len(rows) < limit or any(r.get("mine") and r.get("type") != "SYSTEM" for r in rows):
+            return rows  # the whole chat, or the account spoke in it: the window says it all
+        first = rows[0]
+        mine = self._one("SELECT position, seq FROM messages WHERE chat_id = ? AND mine = 1 AND type != 'SYSTEM' "
+                         "ORDER BY position DESC, seq DESC LIMIT 1", (chat_id,))
+        lo = (int(mine["position"]), int(mine["seq"])) if mine is not None else (-1, -1)
         r = self._one(
-            "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND at_me = 1 AND mine = 0 AND position < ? "
-            "AND position > COALESCE((SELECT MAX(position) FROM messages WHERE chat_id = ? AND mine = 1), -1) "
+            "SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND at_me = 1 AND mine = 0 "
+            "AND (position < ? OR (position = ? AND seq < ?)) AND (position > ? OR (position = ? AND seq > ?)) "
             "ORDER BY position DESC, seq DESC LIMIT 1",
-            (chat_id, int(rows[0]["position"]), chat_id))
+            (chat_id, int(first["position"]), int(first["position"]), int(first["seq"]), lo[0], lo[0], lo[1]))
         return ([_message_row(r)] + rows) if r is not None else rows
 
     def messages_after(self, chat_id: str, position: int, limit: int) -> List[dict]:

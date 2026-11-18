@@ -118,8 +118,9 @@ class AgentsRead:
     def warm(self) -> None:
         self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
-    def read(self) -> List[dict]:
-        return self._fresh.get()
+    def read(self, wait: Optional[float] = None) -> List[dict]:
+        """The sessions; with wait, a first read is waited for that long at most (NotYet after)."""
+        return self._fresh.get(wait)
 
     def _read(self) -> List[dict]:
         hub = getattr(self.app, "hub", None)

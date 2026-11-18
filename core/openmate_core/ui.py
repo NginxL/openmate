@@ -85,15 +85,23 @@ def done_action(key: str, version: Optional[str] = None) -> dict:
 
 
 def done_id(key: str, version: Optional[str] = None) -> str:
-    return "done:" + key + ("" if version is None else "|" + urllib.parse.quote(str(version), safe=""))
+    """done:<key> (any version), or done2:<key>:<version> (the one the page showed), both parts quoted."""
+    if version is None:
+        return "done:" + key
+    return "done2:%s:%s" % (urllib.parse.quote(key, safe=""), urllib.parse.quote(str(version), safe=""))
 
 
-def split_done(rest: str) -> Tuple[str, Optional[str]]:
-    """(the thing, the version the page showed or None) of what follows "done:" (a page drawn before versions)."""
-    ident, sep, v = rest.rpartition("|")
-    if not sep:
-        return rest, None
-    return ident, urllib.parse.unquote(v)
+def parse_done(aid: str) -> Optional[Tuple[str, Optional[str]]]:
+    """(the key, the version the page showed or None) of a 处理完 action; None for another action."""
+    if aid.startswith("done2:"):
+        key, _, v = aid[6:].partition(":")
+        return urllib.parse.unquote(key), urllib.parse.unquote(v)
+    if aid.startswith("done:"):
+        return aid[5:], None  # a page from before versions: the key as it is
+    return None
+
+
+FAILED_KEEP = 60.0  # a failed first read is said for this long before a draw tries again
 
 
 class NotYet(Exception):
@@ -184,8 +192,9 @@ class Fresh:
         self._reading = threading.Lock()  # one read at a time
         self._kept: Optional[Tuple[float, Any, Any]] = None  # (read at, key, value)
         self._busy = False
-        self._cold: Optional[threading.Event] = None  # a first read under way for a bounded get(wait)
-        self._cold_error: Optional[BaseException] = None
+        self._cold: Optional[Tuple[Any, threading.Event, dict]] = None  # (key, done, its result) of a bounded read
+        self._failed: Optional[Tuple[Any, float, BaseException]] = None  # (key, when, error) of the last failed one
+        self.on_ready: Optional[Callable[[], None]] = None  # told when a read a page did not wait for is in
 
     def _usable(self, k, within: float) -> bool:
         kept = self._kept
@@ -222,36 +231,52 @@ class Fresh:
 
     def _bounded(self, k, wait: float) -> Any:
         with self._mu:
-            ev = self._cold
-            start = ev is None
+            failed = self._failed
+            if failed is not None and failed[0] == k and self.clock() - failed[1] < FAILED_KEEP:
+                raise failed[2]  # failed a moment ago: said, not tried again at once
+            cold = self._cold
+            start = cold is None or cold[0] != k  # a read for another key (yesterday's) is not this one
             if start:
-                ev = self._cold = threading.Event()
-                self._cold_error = None
+                cold = self._cold = (k, threading.Event(), {})
+        _, ev, box = cold
 
         def run():
+            waited = [False]
             try:
                 with self._reading:
                     with self._mu:
                         done = self._usable(k, self.ahead)
                     if not done:
                         self._keep(k, self.read())
-            except BaseException as e:
                 with self._mu:
-                    self._cold_error = e
+                    if self._failed is not None and self._failed[0] == k:
+                        self._failed = None
+            except BaseException as e:
+                box["error"] = e
+                with self._mu:
+                    self._failed = (k, self.clock(), e)
             finally:
                 with self._mu:
-                    self._cold = None
+                    if self._cold is not None and self._cold[1] is ev:
+                        self._cold = None
+                    waited[0] = not box.get("taken")
                 ev.set()
+            if waited[0] and "error" not in box and self.on_ready is not None:
+                try:
+                    self.on_ready()  # a page showed 正在读取: it draws again now
+                except Exception:
+                    pass
 
         if start:
             self.spawn(run)
-        ev.wait(max(0.0, wait))
+        done = ev.wait(max(0.0, wait))
         with self._mu:
+            if done:
+                box["taken"] = True
             if self._usable(k, self.stale):
                 return self._kept[2]
-            err = self._cold_error if ev.is_set() else None
-        if err is not None:
-            raise err
+        if done and box.get("error") is not None:
+            raise box["error"]
         raise NotYet(self.name)
 
     def _again(self) -> None:
@@ -350,10 +375,7 @@ class ChatsToday:
             return out
         oldest = time.time() - self.needs_hours() * 3600.0
         since = min(time.time() - app.timing.inbox_window, oldest)  # needs_hours may go back further (7 days)
-        if only is not None:
-            chats = [c for c in (app.store.get_chat(i) for i in sorted(only)) if c is not None and (c.get("last_at") or 0) >= since]
-        else:
-            chats = app.store.chats_since(since, app.timing.inbox_most)
+        chats = app.store.chats_since(since, app.timing.inbox_most if only is None else len(only), only=only)
         for chat in chats:
             if only is not None and chat["id"] not in only:
                 continue
@@ -399,6 +421,8 @@ class ChatsToday:
         out = fresh
         out.sort(key=lambda t: -t["_at"])
         marked = app.store.dismissed(t["_done_key"] for t in out) if out else {}
+        for t in out:
+            t["_mark"] = marked.get(t["_done_key"])
         self.done = [t for t in out if marked.get(t["_done_key"]) == t["_version"]]
         return [t for t in out if marked.get(t["_done_key"]) != t["_version"]]
 
@@ -410,7 +434,8 @@ class ChatsToday:
             if t["_chat"]["id"] == chat_id:
                 if version is not None and version != t["_version"]:
                     return "newer"
-                app.store.dismiss(t["_done_key"], t["_version"])
+                if t.get("_mark") != t["_version"] and not app.store.dismiss_if(t["_done_key"], t["_version"], t.get("_mark")):
+                    return "none"  # marked meanwhile (another page, the service's 完成): as it is now
                 if hasattr(app, "mark_changed"):
                     app.mark_changed("inbox")  # the badge counts again
                 return "ok"
@@ -525,8 +550,9 @@ class ChatsPage(Page):
                 return self._chat(str(state["chat"]), version)
             return self._overview(version)
 
-        if aid.startswith("done:chat:"):
-            chat_id, seen = split_done(aid[len("done:chat:"):])
+        done = parse_done(aid)
+        if done is not None and done[0].startswith("chat:"):
+            chat_id, seen = done[0][len("chat:"):], done[1]
             got = self.data.dismiss(chat_id, seen)
             if got == "newer":
                 return {"toast": "这个会话又有新消息了，先看一下", "view": here()}
@@ -750,6 +776,9 @@ class ChatsPage(Page):
         chat = app.store.get_chat(chat_id) if app.store is not None else None
         if chat is None:
             return self._overview(version)
+        # the need first, the lines after: the button's version is never a message the lines do not show (one that
+        # came between is shown, and a 处理完 on the older version leaves it to come back)
+        need = next((t for t in ChatsToday(app).needs(only={chat_id}) if t["_chat"]["id"] == chat_id), None)
         rows = [r for r in app.store.messages_before(chat_id, None, THREAD_LINES)
                 if views.has_content(r) and not views.is_system(r)]
         me = app.me_name()
@@ -758,9 +787,12 @@ class ChatsPage(Page):
         if not items:
             items = [empty("最近没有消息", "", version)]
         top = [{"type": "button", "title": "返回", "action": {"id": "back"}}]
-        need = next((t for t in self.data.needs(only={chat_id}) if t["_chat"]["id"] == chat_id), None)
         if need is not None:  # this chat's need only (not every chat's), with the version shown
             top.append({"type": "button", "title": "处理完", "action": {"id": done_id("chat:" + chat_id, need["_version"])}})
+            if need.get("_version") and need["_version"] not in {r["id"] for r in rows}:
+                # an @me older than the lines shown: say which one the button is for
+                items.insert(0, row("要处理的 @我", "%s：%s" % (need.get("sender") or "", need.get("preview") or ""),
+                                    when(need.get("_at") or 0, app.tz), key="need-at"))
         return {"title": views.chat_name(chat, chat_id), "state": state_text({"chat": chat_id}), "refresh_after": REFRESH,
                 "sections": [{"items": top}, {"title": views.where(app.platform.name, chat, chat_id), "items": items}]}
 

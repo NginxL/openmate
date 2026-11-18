@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openmate_core.hub import HubError
 from openmate_core import views
-from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, Page, day_start, done_action, empty, row, split_done, stat, state_of,
+from openmate_core.ui import (CHATS_PAGE, ChatsToday, Fresh, NotYet, Page, day_start, done_action, empty, parse_done, row, stat, state_of,
                               state_text, tile, when)
 
 from openmate_core import agents as agents_mod
@@ -50,6 +50,10 @@ PEER = "openmate-wechat"  # the extension whose chats 今天 shows too
 PEER_NAME = "微信"
 PEER_WAIT = 3.0  # a draw waits this long at most for WeChat's read (the rest of the page does not wait for it)
 CAL_WAIT = 5.0  # …and for a first read of the calendar (Persona gives a page 20 seconds in all)
+PAGE_WAIT_OPEN = 12.0  # an 打开 waits this long at most for the calendar
+RENDER_BUDGET = 14.0  # every read of one draw together: started at once, each waited for out of what is left
+PERSONA_WAIT = 9.0
+AGENTS_WAIT = 6.0
 LINES_MOST = 20  # a WeChat chat's lines on its page here
 
 
@@ -77,11 +81,20 @@ class PersonaToday:
     def warm(self) -> None:
         self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
-    def read(self) -> dict:
+    def read(self, wait: Optional[float] = None) -> dict:
+        """Persona's side; with wait, a first read is waited for that long at most (then it says it is reading)."""
         try:
-            return self._fresh.get()
+            return self._fresh.get(wait)
         except Partial as p:
             return p.out
+        except NotYet:
+            return {"waiting": [], "working": [], "inbox": [], "todos": [], "missing": ["Persona（正在读取）"],
+                    "degraded": []}
+
+    @property
+    def last_missing(self) -> List[str]:
+        """What the latest read (this draw's, or the one behind it) could not read: a kept whole read is not 清空."""
+        return list(getattr(self, "_last_missing", []))
 
     def _read(self) -> dict:
         parts: Dict[str, Any] = {}
@@ -102,7 +115,9 @@ class PersonaToday:
                 parts[key] = e
 
         if getattr(self.app, "hub", None) is None or not getattr(self.app.hub, "available", False):
-            raise Partial({"waiting": [], "working": [], "inbox": [], "todos": [], "missing": ["拿不到 Persona hub 的地址或令牌"]})
+            self._last_missing = ["拿不到 Persona hub 的地址或令牌"]
+            raise Partial({"waiting": [], "working": [], "inbox": [], "todos": [], "missing": ["拿不到 Persona hub 的地址或令牌"],
+                           "degraded": []})
         threads = [threading.Thread(target=run, args=(k, f), daemon=True) for k, f in jobs.items()]
         for t in threads:
             t.start()
@@ -120,8 +135,15 @@ class PersonaToday:
                 out[key] = [s for s in (v.get("sessions") or []) if isinstance(s, dict)]
             elif key == "inbox":
                 out[key] = [i for i in (v.get("items") or []) if isinstance(i, dict)]
+                triage = v.get("triage") if isinstance(v.get("triage"), dict) else {}
+                unread = [str(s.get("name") or s.get("source") or "") for s in triage.get("sources") or []
+                          if isinstance(s, dict) and s.get("read_error")]
+                if unread:  # the list came, but a mail account in it was not read this round
+                    out.setdefault("degraded", []).append("收件箱的 %s" % "、".join(x for x in unread if x) or "部分来源")
             else:
                 out[key] = [t for t in (v.get("todos") or []) if isinstance(t, dict) and not t.get("done_at")]
+        out.setdefault("degraded", [])
+        self._last_missing = list(out["missing"]) + list(out["degraded"])
         if out["missing"]:
             raise Partial(out)
         return out
@@ -255,7 +277,7 @@ def version_of(d: dict, *fields: str) -> str:
 
 # kind: (the list in PersonaToday.read, its id field, the fields that change when it needs the user again)
 DONE_KINDS = {"wait": ("waiting", "session_id", ("state_since", "updated_at")),
-              "inbox": ("inbox", "id", ("updated_at", "created_at", "at")),
+              "inbox": ("inbox", "id", ("version", "updated_at", "created_at", "at")),
               "ask": ("todos", "id", ("updated_at", "created_at"))}
 
 
@@ -303,11 +325,11 @@ class TodayPage(Page):
     def title(self, now) -> str:
         return "今天 · %s 周%s" % (now.strftime("%m月%d日").lstrip("0"), WEEKDAYS[now.weekday()])
 
-    def _calendar(self, now) -> Tuple[List[Event], List[Event], int, str]:
+    def _calendar(self, now, wait: float = CAL_WAIT) -> Tuple[List[Event], List[Event], int, str]:
         """(today's events still to come or on now, invitations waiting for an answer, how many in the next six days,
         why it is missing or "")."""
         try:
-            events = self.agenda.events(CAL_WAIT)
+            events = self.agenda.events(wait)
         except CalendarError as e:
             return [], [], 0, e.message
         tomorrow = _dt.datetime.fromtimestamp(day_start(self.app.tz, now.timestamp()), self.app.tz) + _dt.timedelta(days=1)
@@ -325,21 +347,35 @@ class TodayPage(Page):
         if not self.card and state.get("wx") and self.wechat is not None:
             return self._wx_chat(str(state["wx"]), version, now, str(state.get("acct") or ""))
         t0 = time.monotonic()
+        deadline = t0 + RENDER_BUDGET
+
+        def left() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         wx_box: Dict[str, Any] = {}
         wx_thread = None
         if self.wechat is not None:  # read beside Persona's, not after it
             wx_thread = threading.Thread(target=lambda: wx_box.update(v=self.wechat.read()), name="openmate-peer-read",
                                          daemon=True)
             wx_thread.start()
-        p = self.persona.read()
+        # every slow read starts now, side by side (each answers at once from what it keeps, or reads behind)
+        kicks = [lambda: self.agenda.events(0.0)]
+        if self.agents is not None and not self.card:
+            kicks.append(lambda: self.agents.read(0.0))
+        for kick in kicks:
+            try:
+                kick()
+            except Exception:
+                pass
+        p = self.persona.read(min(PERSONA_WAIT, left()))
         if wx_thread is not None:
-            wx_thread.join(PEER_WAIT + 0.5)
+            wx_thread.join(min(PEER_WAIT + 0.5, left()))
         wx = wx_box.get("v") if self.wechat is not None else None
         if self.wechat is not None and wx is None:
             wx = {"state": "unreachable"}
         t1 = time.monotonic()
         chat_needs = self._safe(self.chats.needs, None)
-        self.chats_failed = chat_needs is None
+        chats_failed = chat_needs is None  # this draw's own: never another draw's
         if chat_needs is None:
             chat_needs = []
         counts = self._safe(lambda: self.chats.counts(chat_needs), None) or {
@@ -347,13 +383,13 @@ class TodayPage(Page):
             "dms": sum(1 for t in chat_needs if t["kind"] == "dm"), "messages": 0, "chats": 0}
         groups = [] if self.card else self._safe(self.chats.active_groups, [])
         t2 = time.monotonic()
-        today, pending, later, cal_missing = self._calendar(now)
+        today, pending, later, cal_missing = self._calendar(now, min(CAL_WAIT, left()))
         t3 = time.monotonic()
         if t3 - t0 > SLOW:
             log.info("%s took %dms: Persona %dms, chats %dms, calendar %dms", CARD if self.card else PAGE,
                      (t3 - t0) * 1000, (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000)
         d = Day(self, version, now, p, chat_needs, counts, groups, today, pending, later, cal_missing, wx=wx,
-                all_needs=bool(state.get("all")))
+                all_needs=bool(state.get("all")), chats_failed=chats_failed, deadline=deadline)
         return d.card() if self.card else d.full(state)
 
     @staticmethod
@@ -369,7 +405,7 @@ class TodayPage(Page):
         aid = str(a.get("id") if isinstance(a, dict) else a or "")
         if aid.startswith("open:"):
             try:
-                events = self.agenda.events()
+                events = self.agenda.events(PAGE_WAIT_OPEN)
             except CalendarError as e:
                 return {"toast": e.message}
             for e in events:
@@ -384,9 +420,10 @@ class TodayPage(Page):
             return {"push": {"ui": PAGE, "state": state_text({"wx": chat_id, "acct": acct}), "title": self._wx_title(chat_id)}}
         if aid == "needs:all":
             return {"view": self.render(dict(params, state=state_text({"all": 1})))}
-        if aid.startswith("done:"):
-            kind, _, rest = aid[5:].partition(":")
-            ident, seen = split_done(rest)
+        done = parse_done(aid)
+        if done is not None:
+            kind, _, ident = done[0].partition(":")
+            seen = done[1]
             got = self.chats.dismiss(ident, seen) if kind == "chat" else self._dismiss(kind, ident, seen)
             if got == "newer":
                 return {"toast": "这一件又有新变化了，先看一下", "view": self.render(params)}
@@ -446,7 +483,10 @@ class TodayPage(Page):
                 now = version_of(d, *fields)
                 if seen is not None and seen != now:
                     return "newer"  # it changed since the page was drawn: not hidden by that 处理完
-                store.dismiss("%s:%s" % (kind, ident), now)
+                key = "%s:%s" % (kind, ident)
+                prev = store.dismissed([key]).get(key)
+                if prev != now and not store.dismiss_if(key, now, prev):
+                    return "none"  # marked meanwhile: as it is now
                 return "ok"
         return "none"
 
@@ -552,7 +592,7 @@ class Day:
     需要我 across, then 日程 | 飞书今天, 正在跑的 Agent | 待办 once the apps lay sections out in columns)."""
 
     def __init__(self, page: TodayPage, version, now, p, chat_needs, counts, groups, today, pending, later, cal_missing,
-                 wx: Optional[dict] = None, all_needs: bool = False):
+                 wx: Optional[dict] = None, all_needs: bool = False, chats_failed: bool = False, deadline: Optional[float] = None):
         self.page, self.version, self.now, self.p = page, version, now, p
         self.all_needs = all_needs
         # WeChat: None when it is not installed here (or the hub refused the call); else its read (state …)
@@ -564,14 +604,18 @@ class Day:
         self.icons = version >= 6
         self.links = version >= 3  # push (another page on top) came with UI version 3
         self.v8 = version >= 8  # a page of cards side by side (layout columns), with icons and links on the cards
-        self.current = [e for e in today if not e.all_day and e.start <= now]
-        self.upcoming = [e for e in today if not e.all_day and e.start > now]
+        busy = [e for e in today if not e.all_day and not getattr(e, "free", False)]  # one marked free is no meeting
+        self.current = [e for e in busy if e.start <= now]
+        self.upcoming = [e for e in busy if e.start > now]
         # what needs the user: status "action" (absent once done); an older manager says only the tier, and lists the
         # items done in the last days too
         self.inbox_needs = [i for i in p["inbox"] if not (i.get("done_at") or i.get("dismissed") or i.get("superseded"))
                             and (str(i.get("status") or "") == "action" if "status" in i
                                  else str(i.get("tier") or "") in NEEDS_TIERS)]
-        self.partial = bool(p.get("missing")) or bool(getattr(page, "chats_failed", False))
+        self.partial_names = list(p.get("missing") or []) + list(p.get("degraded") or []) + \
+            [x for x in page.persona.last_missing if x not in (p.get("missing") or [])] + (["飞书会话"] if chats_failed else [])
+        self.partial = bool(self.partial_names)
+        self.deadline = deadline
         self.asks = [t for t in p["todos"] if t.get("ask")]
         self.todos = [t for t in p["todos"] if not t.get("ask")]
         self.done = len(getattr(page.chats, "done", []) or [])
@@ -592,7 +636,7 @@ class Day:
         self.due_today = [t for t in p["todos"] if (todo_due(t, tz)[0] or end_of_day) < end_of_day]
         self.needs_total = len(p["waiting"]) + len(self.inbox_needs) + len(chat_needs) + len(self.wx_needs) + len(self.asks)
         if cal_missing:
-            self.cal_line = "读不到"
+            self.cal_line = "正在读取" if "正在读取" in cal_missing else "读不到"
         elif self.current:
             self.cal_line = "会议中，%s 结束" % max((e.end or e.start) for e in self.current).strftime("%H:%M")
         elif self.upcoming:
@@ -636,6 +680,15 @@ class Day:
 
     def _done(self, key: str, version: Optional[str] = None) -> Optional[List[dict]]:
         return [done_action(key, version)] if self.icons else None  # a row's menu came with UI version 6
+
+    def nothing_words(self) -> str:
+        """What an empty 需要我 says: 没有 only when every source was read."""
+        unread = ([PEER_NAME] if self.wx_unknown else []) + [x for x in self.partial_names if x]
+        if unread == [PEER_NAME]:
+            return "%s暂时读不到，其他的没有要你处理的事" % PEER_NAME
+        if unread:
+            return "读到的来源暂时没有要你处理的事；%s暂时读不到" % "、".join(dict.fromkeys(unread))
+        return "没有要你处理的事"
 
     def needs_rows(self) -> List[dict]:
         out = []
@@ -684,7 +737,7 @@ class Day:
         else:
             head = [self._tiles(blocks, "blocks")]
         rows = [{k: x for k, x in r.items() if k not in ("action", "actions")} for r in self.needs_rows()[:3]]  # a card only shows
-        nothing = empty("微信暂时读不到，其他的没有要你处理的事" if self.wx_unknown else "没有要你处理的事", "", v)
+        nothing = empty(self.nothing_words(), "", v)
         return {"sections": [{"items": head}, {"items": rows or [nothing]}], "refresh_after": REFRESH}
 
     # ---- the page
@@ -799,7 +852,8 @@ class Day:
         if read is None:
             return self.agents_card()
         try:
-            board = agents_mod.Board(read.read(), self.now.timestamp(), self.page.app.tz)
+            left = max(0.0, (self.deadline or time.monotonic() + AGENTS_WAIT) - time.monotonic())
+            board = agents_mod.Board(read.read(min(AGENTS_WAIT, left)), self.now.timestamp(), self.page.app.tz)
         except Exception as e:
             log.info("the Agent block could not be read: %s", e.__class__.__name__)
             return self.agents_card()

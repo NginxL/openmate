@@ -311,8 +311,9 @@ class CalendarPage(Page):
 
     def _stats(self, now, today: List[Event], events: List[Event], version: int) -> dict:
         timed = [e for e in today if not e.all_day]
-        current = [e for e in timed if e.start <= now and (e.end or e.start) > now and not e.free]
-        upcoming = [e for e in timed if e.start > now]
+        busy = [e for e in timed if not e.free]  # one marked free is listed, but is neither a meeting nor the next
+        current = [e for e in busy if e.start <= now and (e.end or e.start) > now]
+        upcoming = [e for e in busy if e.start > now]
         nxt = upcoming[0] if upcoming else None
         stats = [stat("今天", "%d 个" % len(today), "已过 %d 个" % sum(1 for e in timed if (e.end or e.start) <= now) if timed else "")]
         stats.append(stat("下一个", nxt.start.strftime("%H:%M") if nxt else "—", nxt.title if nxt else "今天没有了"))
@@ -365,7 +366,7 @@ class CalendarPage(Page):
         aid = str(a.get("id") if isinstance(a, dict) else a or "")
         if aid.startswith("open:"):
             try:
-                events = self.agenda.events()
+                events = self.agenda.events(PAGE_WAIT)
             except CalendarError as e:
                 return {"toast": e.message}
             for e in events:

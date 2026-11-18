@@ -33,7 +33,7 @@ class DoneTest(unittest.TestCase):
         view = self.page(h)
         rows = [s for s in view["sections"] if s.get("title") == "需要我"][0]["items"]
         aid = rows[0]["actions"][0]["action"]["id"]
-        self.assertTrue(aid.startswith("done:chat:chat_example_dm_a|"), aid)  # with the version the page showed
+        self.assertTrue(aid.startswith("done2:chat%3Achat_example_dm_a:"), aid)  # with the version the page showed
         self.assertEqual({k: v for k, v in rows[0]["actions"][0].items() if k != "action"},
                          {"title": "处理完", "icon": "check", "swipe": True})
         out = self.act(h, aid)
