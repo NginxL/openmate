@@ -215,7 +215,7 @@ class WeChatBackend(Backend):
         self.me = ""
         self.me_name = ""
         self._gen = 0
-        self._ready = False  # the running program has the sign-in (restored or just signed in)
+        self._ready_for: Optional[Native] = None  # the program that has the sign-in (restored or just signed in)
 
     # ---------------------------------------------------------------- the program
 
@@ -229,9 +229,9 @@ class WeChatBackend(Backend):
         with self._mu:
             n = self._native
             if n is not None and n.alive():
-                if restore and not self._ready and self._state is not None:
+                if restore and self._ready_for is not n and self._state is not None:
                     self._call(n, "restore", 20, state=self._state)  # started for a QR: give it the sign-in first
-                    self._ready = True
+                    self._ready_for = n
                 return n
             n = Native(self._path(wait), self._persist)
             try:
@@ -249,8 +249,14 @@ class WeChatBackend(Backend):
                     n.close()
                     raise
             self._native = n  # only now: a program that could not take the sign-in is never reused
-            self._ready = restore and self._state is not None
+            self._ready_for = n if (restore and self._state is not None) else None
             return n
+
+    def _mark_ready(self, n: Native) -> None:
+        """n took the sign-in: only that program counts as signed in (a later one started meanwhile does not)."""
+        with self._mu:
+            if self._native is n:
+                self._ready_for = n
 
     def _call(self, n: Native, op: str, timeout: float, **params: Any) -> dict:
         try:
@@ -311,7 +317,7 @@ class WeChatBackend(Backend):
         if not isinstance(st, dict):
             raise BackendError("登录完成了，但没有拿到登录信息", "unknown")
         self._state = st
-        self._ready = True
+        self._mark_ready(n)
         acct = self._adopt(r.get("account") or {})
         return LoginDone(credentials={"v": 1, "state": st}, account=acct)
 
@@ -322,7 +328,7 @@ class WeChatBackend(Backend):
         self._state = st
         n = self._link(restore=False)
         r = self._call(n, "restore", 20, state=st)
-        self._ready = True
+        self._mark_ready(n)
         return self._adopt(r.get("account") or {})
 
     def _adopt(self, account: dict) -> Account:

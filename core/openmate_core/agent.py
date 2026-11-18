@@ -291,12 +291,29 @@ class AgentRunner:
                 marks.append(lead)
         return marks
 
+    def _header_patterns(self) -> List["re.Pattern"]:
+        """The configured headers as whole-line patterns: their fixed words, {model} and {effort} anything."""
+        out = []
+        for h in (self.header, self.auto_header):
+            t = (h or "").lstrip("> ").strip()
+            parts = re.split(r"\{[a-z_]+\}", t)
+            if not "".join(parts).strip(" ·"):
+                continue  # nothing fixed to recognise it by
+            out.append(re.compile(".+?".join(re.escape(p) for p in parts)))
+        return out
+
     def is_agent_text(self, text: str) -> bool:
         t = (text or "").rstrip()
         for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
             if s and t.endswith(s):
                 return True
-        return ai_marked(self._mark_view(t), self._header_marks())
+        if getattr(self.app.platform, "mark_view", None) is None:
+            return ai_marked(t, self._header_marks())  # Feishu: as it always read
+        # WeChat: after the real @s, the built-in marks or a whole configured header on the first or last line
+        first, last = mark_lines(self._mark_view(t))
+        if ai_marked(self._mark_view(t), AI_MARKS[:2]):
+            return True
+        return any(p.fullmatch(first) or p.fullmatch(last) for p in self._header_patterns())
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
@@ -314,7 +331,7 @@ class AgentRunner:
             return
         if self.is_agent_text(text) or self._echo(text):
             return
-        body = strip_leading_mentions(text).strip()
+        body = strip_leading_mentions(self._mark_view(text)).strip()
         if body.lower() in STOP_WORDS:
             if self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"])):
                 threading.Thread(target=self._on_stop, args=(row,), name="openmate-agent-stop", daemon=True).start()
@@ -397,7 +414,7 @@ class AgentRunner:
             if why:
                 log.info("自动代答: not answered (%s); left for the user", why)
                 return
-            run = self._new_run(row, strip_leading_mentions(text).strip(), now)
+            run = self._new_run(row, strip_leading_mentions(self._mark_view(text)).strip(), now)
             run["kind"] = "auto"
             run["asker"] = row.get("sender_name") or ""
             self.store.run_put(run)
@@ -1154,8 +1171,9 @@ class AgentRunner:
             # what took the one reply: a reply, a fallback being sent, or a fallback / timeout notice in the send
             # journal (sent or uncertain; one that surely failed is released, a quiet run's is never posted)
             posted = lambda what: self.store.send_get("agent:%s:%s" % (cur["id"], what)) is not None  # noqa: E731
+            quiet = cur.get("kind") in QUIET_KINDS  # a run that never posts a fallback or a timeout notice
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
-                or (cur.get("fallback") == "claimed" and cur.get("kind") not in QUIET_KINDS) \
+                or (not quiet and (cur.get("fallback") == "claimed" or cur["state"] == "timeout")) \
                 or posted("fallback") or posted("timeout")
             if not self._can_edit() and answered:
                 done = self.store.send_get(key)

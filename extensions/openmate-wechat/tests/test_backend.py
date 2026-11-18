@@ -222,6 +222,18 @@ class LoginLostTest(Base):
         self.assertEqual(b.login_poll("qr"), "expired")
 
 
+class ReadyTest(Base):
+    def test_a_program_started_for_a_qr_is_given_the_sign_in_before_listening(self):
+        b = self.backend([{"event": "link", "up": True}])
+        b.restore({"state": {"k": "v1"}})
+        b._native.close()
+        time.sleep(0.3)
+        b.login_start()  # a new program, started without the sign-in
+        self.listen(b, lambda g, l, e: l or e)
+        ops = [r["op"] for r in self.requests() if r.get("op") in ("restore", "login_start", "listen")]
+        self.assertEqual(ops, ["restore", "login_start", "restore", "listen"])
+
+
 class ProtocolTest(Base):
     def test_a_program_of_another_protocol_is_not_used(self):
         os.environ["FAKE_PROTOCOL"] = "1"

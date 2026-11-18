@@ -437,7 +437,7 @@ fn heartbeat_interval(next: u32) -> Duration {
 fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &AtomicBool, gen: u64) -> Result<()> {
     let mut conn = client.open_push_connection_blocking()?;
     let beat = conn.heartbeat(cursor)?;
-    resync(app, &mut conn, cursor, 6, "catchup", gen, stop)?; // what came while away: stored, never acted on
+    drain(app, &mut conn, cursor, 6, "catchup", gen, stop)?; // what came while away: stored, never acted on
     app.out.line(&json!({"event": "link", "gen": gen, "up": true}));
     let mut next_beat = Instant::now() + heartbeat_interval(beat.next_interval);
     loop {
@@ -448,37 +448,20 @@ fn session(app: &App, client: &NativeClient, cursor: &mut Vec<u8>, stop: &Atomic
             let beat = conn.heartbeat(cursor)?;
             next_beat = Instant::now() + heartbeat_interval(beat.next_interval);
             if beat.selector & 7 != 0 {
-                resync(app, &mut conn, cursor, 7, "live", gen, stop)?;
+                drain(app, &mut conn, cursor, 7, "live", gen, stop)?;
             }
         }
         if let Some(n) = conn.poll(Duration::from_secs(1))? {
             if n.command != 356 {
                 // 356 is a contact change; names are read when shown
-                resync(app, &mut conn, cursor, 1, "live", gen, stop)?;
+                drain(app, &mut conn, cursor, 1, "live", gen, stop)?;
             }
         }
     }
 }
 
-/// A drain; when the server reset the cursor in it, one more full drain from the new cursor as catch-up, so nothing
-/// it sends again on the new baseline is taken as live.
-fn resync(
-    app: &App,
-    conn: &mut wechat_protocol::AccountPushConnection,
-    cursor: &mut Vec<u8>,
-    scene: u32,
-    origin: &str,
-    gen: u64,
-    stop: &AtomicBool,
-) -> Result<()> {
-    if drain(app, conn, cursor, scene, origin, gen, stop)? {
-        log("the server reset the sync cursor: catching up on the new baseline");
-        drain(app, conn, cursor, 6, "catchup", gen, stop)?;
-    }
-    Ok(())
-}
-
-/// Sync until the server says there is no more; true when it reset the cursor on the way.
+/// Sync until the server says there is no more. After a reset (-2006) everything up to the first normal last page
+/// from the new cursor is catch-up (history the server sends again, never a request); a reset on that page goes on.
 fn drain(
     app: &App,
     conn: &mut wechat_protocol::AccountPushConnection,
@@ -487,19 +470,18 @@ fn drain(
     origin: &str,
     gen: u64,
     stop: &AtomicBool,
-) -> Result<bool> {
+) -> Result<()> {
     let own = app.own();
     let mut origin = origin;
-    let mut reset = false;
-    for _ in 0..8 {
+    for _ in 0..16 {
         let had_cursor = !cursor.is_empty();
         let batch = conn.sync(cursor, scene)?;
-        if batch.code == -2006 || (had_cursor && batch.cursor.is_empty()) {
+        let reset = batch.code == -2006 || (had_cursor && batch.cursor.is_empty());
+        if reset {
             origin = "catchup"; // the server reset the cursor: what it sends again is history, never a request
-            reset = true;
         }
         if stop.load(Ordering::SeqCst) {
-            return Ok(false); // a stopped listener says nothing more
+            return Ok(()); // a stopped listener says nothing more
         }
         for command in &batch.commands {
             if command.id != 5 {
@@ -539,11 +521,11 @@ fn drain(
         *cursor = batch.cursor.clone();
         // after the batch's messages: the backend stores the cursor once it has handled them
         app.out.line(&json!({"event": "cursor", "gen": gen, "cursor": B64.encode(&*cursor)}));
-        if !batch.continuation {
-            return Ok(reset);
+        if !batch.continuation && !reset {
+            return Ok(()); // a normal last page: the next drain is live again
         }
     }
-    bail!("too many sync pages in a row")
+    bail!("too many sync pages or resets in a row")
 }
 
 // ---------------------------------------------------------------- sends

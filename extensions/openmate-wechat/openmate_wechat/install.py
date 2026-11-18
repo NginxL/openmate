@@ -21,12 +21,12 @@ from typing import Optional
 
 log = logging.getLogger("openmate.wechat.install")
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 URL = "https://github.com/NginxL/openmate/releases/download/matewechat-native-v{version}/{name}"
 ASSETS = {
     ("darwin", "arm64"): {
-        "name": "matewechat-native-0.1.2-darwin-arm64",
-        "sha256": "600389978e7b4cb1eacf8b1e0d7dbc3fef46b0e19141d750625f29c326816857",
+        "name": "matewechat-native-0.1.3-darwin-arm64",
+        "sha256": "038ba32834fd7fea608b57b405f999911daf22144b7234aef4aae1404aa415cb",
         "size": 8010496,
     },
 }

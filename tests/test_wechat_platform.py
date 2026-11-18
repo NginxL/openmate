@@ -128,6 +128,40 @@ class OneReplyTest(unittest.TestCase):
         self.assertEqual(running(h, person)["kind"], "auto", "a person's question about robots is answered")
 
 
+class MarksAndMentionsTest(unittest.TestCase):
+    def test_a_custom_header_is_matched_whole(self):
+        h = wechat(self, auto_reply_header="【{model} 代答】", agent_mark_position="top")
+        h.app.store.autoreply_set(TEAM, True)
+        h.world.push(TEAM, "user_example_b", "@示例用户\u2005【某模型 代答】\n已经好了", at_me=True)
+        time.sleep(0.4)
+        self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
+        person = h.world.push(TEAM, "user_example_b", "@示例用户\u2005【紧急】今天能发版吗？", at_me=True)
+        self.assertEqual(running(h, person)["kind"], "auto", "a person's 【紧急】 is a question")
+
+    def test_a_header_that_starts_with_a_placeholder_is_seen(self):
+        h = wechat(self, auto_reply_header="> {model} · [智能代答]", agent_mark_position="top")
+        h.app.store.autoreply_set(TEAM, True)
+        h.world.push(TEAM, "user_example_b", "@示例用户\u2005> 某模型 · [智能代答]\n好了", at_me=True)
+        time.sleep(0.4)
+        self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
+
+    def test_agent_after_a_mention_of_a_name_with_spaces(self):
+        h = wechat(self)
+        msg = ask(h, "@Bob Smith\u2005/agent 整理一下")
+        self.assertEqual(running(h, msg)["request_text"], "整理一下")
+
+    def test_a_late_reply_after_a_timeout_notice_is_refused(self):
+        h = wechat(self)
+        msg = ask(h, "/agent 慢活")
+        run = running(h, msg)
+        cur = h.app.store.run_get(run["id"])
+        cur["state"] = "timeout"  # the timeout thread took it; its notice is on the way
+        h.app.store.run_put(cur)
+        with self.assertRaises(Exception) as c:
+            h.tool("agent_reply", request=run["id"], text="终于好了")
+        self.assertIn("只回复一次", str(c.exception))
+
+
 class FeishuUnchangedTest(unittest.TestCase):
     """What the shared core keeps doing for Feishu (it can edit): progress, and more than one /agent reply."""
 
