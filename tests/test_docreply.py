@@ -12,7 +12,7 @@ URL = "https://example.feishu.cn/docx/ExampleDoc001"
 
 
 def make(test, **cfg):
-    config = {"agent": True}
+    config = {"agent": True, "auto_reply_docs": True}
     config.update(cfg)
     h = Harness(test, config=config)
     h.sign_in()
@@ -29,6 +29,45 @@ def mention(h, mid="dn1", who="user_example_b", text="@示例用户 这一段的
 def doc_run(h, mid="dn1"):
     return wait_until(lambda: next((r for r in h.app.store.runs_since(0, 50) if r["request_id"] == mid and r["state"] == "running"), None),
                       what="the document run")
+
+
+class DocSafetyTest(unittest.TestCase):
+    def test_off_unless_turned_on(self):
+        h = make(self, auto_reply_docs=None)  # never saved: the manifest's default
+        mention(h)
+        time.sleep(0.4)
+        self.assertEqual(h.http.starts(), [], "/agent alone never answers documents")
+
+    def test_not_when_lark_cli_writes_as_someone_else(self):
+        h = make(self)
+        h.world.doc_writer = "另一个账号"
+        mention(h)
+        time.sleep(0.4)
+        self.assertEqual(h.http.starts(), [])
+        h.world.doc_writer = ""  # nobody signed in there
+        mention(h, "dn2")
+        time.sleep(0.4)
+        self.assertEqual(h.http.starts(), [])
+
+    def test_a_reply_that_may_have_gone_is_never_sent_again_and_one_that_went_is_recorded(self):
+        h = make(self)
+        mention(h)
+        run = doc_run(h)
+        h.world.doc_reply_uncertain = True
+        with self.assertRaises(HubSideError):
+            h.tool("agent_reply", request=run["id"], text="第一次")
+        h.world.doc_reply_uncertain = False
+        with self.assertRaises(HubSideError) as e:
+            h.tool("agent_reply", request=run["id"], text="第一次")
+        self.assertIn("结果不确定", e.exception.message)
+        self.assertEqual(len(h.world.doc_replies), 1, "sent once, never again")
+        mention(h, "dn3", comment="c3")
+        run3 = doc_run(h, "dn3")
+        h.tool("agent_reply", request=run3["id"], text="好的")
+        wait_until(lambda: any(r.get("target") == {"doc": URL, "comment": "c3"} for r in h.hub.sent_records),
+                   what="the reply in the hub's ledger")
+        rec = [r for r in h.hub.sent_records if r.get("target") == {"doc": URL, "comment": "c3"}][0]
+        self.assertEqual(rec.get("setting"), "auto_reply_docs")
 
 
 class DocReplyTest(unittest.TestCase):

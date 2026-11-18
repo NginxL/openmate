@@ -34,6 +34,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 from . import views
+from .backend import BackendError
 from .hub import HubError
 from .textutil import clip, local_stamp, strip_leading_mentions
 from .wire import RPCError
@@ -196,7 +197,7 @@ class AgentRunner:
         pos = str(cfg.get("agent_mark_position") or "end").strip().lower()
         self.mark_position = pos if pos in MARK_POSITIONS else "end"
         self.auto = bool(cfg.get("auto_reply", True))
-        self.auto_docs = bool(cfg.get("auto_reply_docs", True))
+        self.auto_docs = bool(cfg.get("auto_reply_docs", False))  # its own switch: /agent alone never answers documents
         self.auto_header = parse_header(cfg.get("auto_reply_header") if cfg.get("auto_reply_header") is not None else AUTO_HEADER)
         try:
             self.auto_most = max(1, int(cfg.get("auto_reply_daily_most") or 20))
@@ -473,6 +474,17 @@ class AgentRunner:
         kind = people.kind_now(m.from_id) if people is not None and m.from_id else ""
         if kind != "user":
             log.info("文档代答: not answered (the sender is %s)", kind or "unknown")
+            return
+        backend = self.app.backend
+        writer = ""
+        try:
+            writer = (backend.doc_writer_name() or "").strip() if backend is not None else ""
+        except Exception as e:
+            log.info("文档代答: who lark-cli writes as is unknown (%s)", type(e).__name__)
+        me = (self.app.me_name() or "").strip()
+        if not writer or not me or writer != me:
+            # the reply goes out through lark-cli: only when it is signed in as this very account
+            log.warning("文档代答: not answered (lark-cli writes as %s, not this account)", "someone else" if writer else "nobody")
             return
         doc_chat = "doc:" + hashlib.sha256(m.doc_url.encode("utf-8")).hexdigest()[:16]
         asker = m.from_name
@@ -1222,8 +1234,14 @@ class AgentRunner:
                 raise RPCError("不知道这条评论的 id，回复不了：请到文档里看一下")
             try:
                 rid = backend.reply_doc_comment(run["doc_url"], run["comment_id"], body)
-            except Exception as e:
-                raise RPCError("评论回复没发出去：%s" % (getattr(e, "message", "") or e.__class__.__name__))
+            except BackendError as e:
+                if e.kind == "uncertain":
+                    raise  # it may be in the document: the journal keeps it uncertain, never sent again
+                raise RPCError("评论回复没发出去：%s" % (e.message or e.kind))  # surely not sent: may be tried again
+            # anything else may have posted it: the journal keeps it uncertain too
+            self.app.record_sent("", body, str(rid or ""), setting="auto_reply_docs",
+                                 summary="文档代答以你的身份回复了文档《%s》里的评论" % (run.get("doc_title") or "（无标题）"),
+                                 target={"doc": run["doc_url"], "comment": run["comment_id"]})
             return {"text": "已回复", "message_ref": rid}
 
         return self.app.send_once(key, "agent", go)

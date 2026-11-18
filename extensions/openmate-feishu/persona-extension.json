@@ -146,8 +146,8 @@
       "auto_reply_docs": {
         "type": "boolean",
         "title": "文档评论代答",
-        "description": "有人在飞书文档或知识库的评论里 @ 你时，AI 直接以你的身份在那条评论下回复，不用确认（要先打开 /agent；用 lark-cli 发回复）。",
-        "default": true
+        "description": "有人在飞书文档或知识库的评论里 @ 你时，AI 直接以你的身份在那条评论下回复，不用确认（要先打开 /agent；用 lark-cli 发回复）。默认关。打开后，每次回复前会核对 lark-cli 登录的是不是同一个飞书账号，不是就不回。",
+        "default": false
       },
       "auto_reply_daily_most": {
         "type": "integer",

@@ -1181,6 +1181,19 @@ class LarkXBackend(Backend):
     def doc_text(self, doc_url: str, most: int) -> str:
         return self.cli.fetch_doc(doc_url, most) if self.cli is not None else ""
 
+    def doc_writer_name(self) -> str:
+        if self.cli is None:
+            return ""
+        now = time.monotonic()
+        with self._lock:
+            hit = getattr(self, "_doc_writer", None)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        name = self.cli.user_name()
+        with self._lock:
+            self._doc_writer = (now + (600.0 if name else 60.0), name)
+        return name
+
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
         if self.cli is None:
             raise BackendError("没有 lark-cli，回复不了文档评论", "unsupported")

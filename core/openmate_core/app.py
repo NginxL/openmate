@@ -345,15 +345,17 @@ class ConnectorApp:
     # ------------------------------------------------------------------ the sent-as-user ledger
 
     def record_sent(self, chat_id: str, text: str, message_ref: str, reply_to: str = "", root: str = "",
-                    session_id: str = "", machine_id: str = "", setting: str = "", summary: str = "") -> None:
+                    session_id: str = "", machine_id: str = "", setting: str = "", summary: str = "",
+                    target: Optional[Dict[str, Any]] = None) -> None:
         """Tell the hub about a message sent in the user's name without the hub's gate (sent.record, which the
         manifest's sends_as_user allows), in the background: the send happened, so a failed record never undoes it.
         A gated write (actions.do) and the user's own Inbox Send are recorded by the hub, never here."""
-        target = {"chat": chat_id}
-        if root:
-            target["thread"] = root
-        if reply_to:
-            target["reply_to"] = reply_to
+        if target is None:  # a chat's message; a document's comment says its own target
+            target = {"chat": chat_id}
+            if root:
+                target["thread"] = root
+            if reply_to:
+                target["reply_to"] = reply_to
         params: Dict[str, Any] = {"contribution": self.cid, "target": target, "text": (text or "")[:SENT_TEXT_MOST]}
         for k, v in (("summary", summary), ("message_ref", message_ref), ("session_id", session_id),
                      ("machine_id", machine_id), ("setting", setting)):

@@ -213,6 +213,24 @@ class AgendaTest(unittest.TestCase):
         with self.assertRaises(agenda.CalendarError) as e:
             cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
         self.assertEqual(e.exception.kind, "uncertain")
+        runner.raise_ = None
+        for said in ("", "Traceback (most recent call last): ..."):  # it ran, and said nothing readable
+            runner.answer = said
+            with self.assertRaises(agenda.CalendarError) as e:
+                cli.add_reply("https://example.feishu.cn/wiki/W1", "c1", "好")
+            self.assertEqual(e.exception.kind, "uncertain", "the reply may be in the document")
+
+    def test_who_lark_cli_writes_as(self):
+        runner = Runner({"identity": "user", "identities": {"user": {"available": True, "userName": "示例用户"},
+                                                            "bot": {"available": True}}})
+        _, _, _, fake = pages(runner=runner)
+        cli = agenda.LarkCLI({"lark_cli": fake, "lark_cli_profile": "persona"}, run=runner)
+        self.assertEqual(cli.user_name(), "示例用户")
+        self.assertEqual(runner.calls[-1][0], [fake, "--profile", "persona", "auth", "status"])
+        runner.answer = {"identities": {"user": {"available": False, "userName": "示例用户"}}}
+        self.assertEqual(cli.user_name(), "", "no user signed in: nobody")
+        runner.answer = "not json"
+        self.assertEqual(cli.user_name(), "")
 
     def test_read_once_a_minute(self):
         now = [NOW]

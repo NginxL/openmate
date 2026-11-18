@@ -48,6 +48,8 @@ class FixtureWorld:
         self.reactions: List[Tuple[str, str, str]] = []  # (chat, message, reaction) put by react
         self.doc_replies: List[Tuple[str, str, str]] = []  # (doc url, comment id, text) by reply_doc_comment
         self.doc_reply_fail = False
+        self.doc_reply_uncertain = False  # reply_doc_comment: the reply may have gone (BackendError "uncertain")
+        self.doc_writer: Optional[str] = None  # who doc replies go out as (doc_writer_name); None: the account itself
         self.doc_texts: Dict[str, str] = {}  # doc url → its text, for doc_text
         self.doc_listener: Optional[Callable] = None
         self.done: Dict[str, float] = {}  # chats in the service's 完成 → when they went there (a new message reopens)
@@ -337,12 +339,18 @@ class FixtureBackend(Backend):
         with self.world.lock:
             return self.world.doc_texts.get(doc_url, "")[:most]
 
+    def doc_writer_name(self) -> str:
+        w = self.world
+        return w.me.name if w.doc_writer is None else w.doc_writer
+
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
         w = self.world
         with w.lock:
             if w.doc_reply_fail or not comment_id:
                 raise BackendError("这条评论回复不了", "unavailable")
             w.doc_replies.append((doc_url, comment_id, text))
+            if w.doc_reply_uncertain:  # it went, but the answer did not come back
+                raise BackendError("lark-cli 回复评论超时了", "uncertain")
             return "reply_%d" % len(w.doc_replies)
 
     def react(self, chat_id: str, message_id: str, reaction: str) -> None:

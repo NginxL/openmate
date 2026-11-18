@@ -121,9 +121,9 @@ class LarkCLI:
         except OSError:
             raise CalendarError("lark-cli 启动不了", "missing")
         try:
-            d = json.loads(p.stdout or "{}")
-        except ValueError:
-            raise CalendarError("lark-cli 的回答看不懂（版本不对？）", "failed")
+            d = json.loads(p.stdout or "")
+        except ValueError:  # it ran and said nothing readable: the reply may be in the document
+            raise CalendarError("lark-cli 回复评论后的回答看不懂；回复可能已经发出，请到文档里看一下", "uncertain")
         if not isinstance(d, dict) or not d.get("ok"):
             err = d.get("error") if isinstance(d, dict) and isinstance(d.get("error"), dict) else {}
             kind = "%s %s" % (err.get("type") or "", err.get("subtype") or "")
@@ -133,6 +133,24 @@ class LarkCLI:
             raise CalendarError("lark-cli 回复评论失败（%s）" % (kind.strip() or "原因不明"), "failed")
         data = d.get("data") if isinstance(d.get("data"), dict) else {}
         return str(data.get("reply_id") or data.get("id") or "")
+
+    def user_name(self) -> str:
+        """Who lark-cli acts as for the user (its signed-in user's name), "" when it can't tell."""
+        b = self.bin()
+        if not b:
+            return ""
+        args = [b] + (["--profile", self.profile] if self.profile else []) + ["auth", "status"]
+        env = dict(os.environ)
+        env["PATH"] = os.path.dirname(b) + os.pathsep + env.get("PATH", "")
+        try:
+            p = self._run(args, capture_output=True, text=True, timeout=20, env=env, stdin=subprocess.DEVNULL)
+            d = json.loads(p.stdout or "{}")
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return ""
+        user = ((d.get("identities") or {}).get("user") or {}) if isinstance(d, dict) else {}
+        if not isinstance(user, dict) or not user.get("available"):
+            return ""
+        return str(user.get("userName") or "").strip()
 
     def agenda(self, start: _dt.datetime, end: _dt.datetime) -> List[dict]:
         b = self.bin()
