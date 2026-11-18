@@ -296,12 +296,15 @@ class SendTest(Base):
     def test_an_own_send_is_kept_with_its_send_time_and_quotable(self):
         kept = []
         self.b.on_history = kept.extend
-        mid = self.b.send("1@chatroom", "记下", reply_to="q1")
+        mid = self.b.send("1@chatroom", "记下")
+        quoting = self.b.send("1@chatroom", "答复", reply_to="q1")
         deadline = time.time() + 3
-        while time.time() < deadline and not kept:
+        while time.time() < deadline and len(kept) < 2:
             time.sleep(0.05)
         ev = self.b.store.message(mid)[0]
-        self.assertEqual((ev["at"], ev["quotable"], ev["content"]), (1700000000, True, ev["text"]))
+        self.assertEqual((ev["at"], ev["quotable"], ev["content"]), (1700000000, True, "记下"))
+        self.assertFalse(self.b.store.message(quoting)[0]["quotable"],
+                         "a quote reply went out as WeChat's quote message: never quoted back as plain text")
 
     def test_keeping_an_own_send_failing_still_reports_it_sent(self):
         def boom(*a, **k):
