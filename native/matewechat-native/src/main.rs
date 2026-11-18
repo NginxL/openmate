@@ -886,7 +886,8 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
         .unwrap_or_else(|| vec![0]);
     let mut catalog_wait = 0u32;
     let resumed = cursor != vec![0u8];
-    let mut first = true; // only the stopping point it started from can be one the server refuses
+    let mut first = true;
+    let mut stuck = false; // the stopping point it was given could not be read from (refused, or a busy server)
     // the backend leaves the catalog out while the server's pause is not over
     let read_catalog = p.get("catalog").and_then(Value::as_bool).unwrap_or(true);
     for _ in 0..(if read_catalog { 100 } else { 0 }) {
@@ -901,10 +902,10 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
                 log(&format!("group catalog read failed: {e:#}"));
-                if resumed && first {
-                    cursor = vec![0]; // the stopping point it was given was refused: the next read starts over
-                }
-                break; // later pages: the last good stopping point is kept (a busy server, the network)
+                // the stopping point is kept either way (a failure does not prove it refused); the backend starts
+                // over after the same one failed a few reads in a row
+                stuck = resumed && first;
+                break;
             }
             Err(_) => {
                 log("group catalog read timed out");
@@ -945,7 +946,7 @@ fn op_groups(app: &App, p: &Value) -> Result<Value> {
     Ok(json!({"groups": groups.into_iter().collect::<Vec<_>>(), "complete": complete, "contacts": total,
               "catalog": catalog, "catalog_complete": catalog_complete, "names": names,
               "catalog_cursor": if catalog_complete { String::new() } else { B64.encode(&cursor) },
-              "catalog_wait": catalog_wait, "catalog_read": read_catalog}))
+              "catalog_wait": catalog_wait, "catalog_read": read_catalog, "catalog_stuck": stuck}))
 }
 
 // ---------------------------------------------------------------- media

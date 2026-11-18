@@ -109,7 +109,8 @@ def answer(req):
                   catalog_complete=os.environ.get("MATEWECHAT_FAKE_CATALOG_PART", "") == "",
                   catalog_cursor=os.environ.get("MATEWECHAT_FAKE_CATALOG_PART", ""),
                   catalog_wait=int(os.environ.get("MATEWECHAT_FAKE_CATALOG_WAIT", "0")),
-                  catalog_read=req.get("catalog", True))
+                  catalog_read=req.get("catalog", True),
+                  catalog_stuck=bool(req.get("catalog_cursor")) and os.environ.get("MATEWECHAT_FAKE_CATALOG_STUCK") == "1")
     if op == "media":  # file_id says what the CDN gives: EXPIRED fails, WXGF is WeChat's own format, else by quality
         if os.environ.get("MATEWECHAT_FAKE_NO_MEDIA"):
             return fail("unsupported", "不认识的操作 media")

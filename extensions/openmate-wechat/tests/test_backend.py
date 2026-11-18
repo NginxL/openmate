@@ -611,6 +611,20 @@ class GroupCatalogTest(Base):
         b._groups_work(True)
         self.assertEqual(self.requests("groups")[-1].get("catalog_cursor"), "Y3Vyc29y", "goes on from where it stopped")
 
+    def test_a_stopping_point_that_keeps_failing_starts_over_after_a_few_reads(self):
+        os.environ["MATEWECHAT_FAKE_CATALOG_PART"] = "cGFnZTI="
+        os.environ["MATEWECHAT_FAKE_CATALOG_STUCK"] = "1"
+        spacing, wb.GROUPS_SPACING = wb.GROUPS_SPACING, 0.0
+        self.addCleanup(setattr, wb, "GROUPS_SPACING", spacing)
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        b._groups_work(True)  # first read: from the start, stops with a stopping point
+        for _ in range(wb.CATALOG_STUCK_MOST - 1):
+            b._groups_work(True)
+            self.assertEqual(b.store.get("catalog_cursor"), "cGFnZTI=", "a failure alone keeps the stopping point")
+        b._groups_work(True)
+        self.assertEqual(b.store.get("catalog_cursor"), "", "the same one failed reads in a row: start over")
+
     def test_the_catalog_waits_out_the_pause_the_server_asked_for(self):
         os.environ["MATEWECHAT_FAKE_CATALOG_PART"] = "cGFnZTI="
         os.environ["MATEWECHAT_FAKE_CATALOG_WAIT"] = "900"
