@@ -647,15 +647,21 @@ class WeChatBackend(Backend):
                 log.exception("the core did not take a WeChat read")
 
     def chat_done_states(self, chat_ids: List[str]) -> Dict[str, Optional[float]]:
-        """A chat counts as done when it was read on the phone after the last message from someone else."""
+        """Done (its time) when the chat was read on the phone after the last message from someone else; None only
+        when a read is known and a message came after it. A chat with no read seen here is left out: not knowing is
+        not "not done" (a None would undo the user's own 恢复 on the WeChat page)."""
         out: Dict[str, Optional[float]] = {}
         for cid in chat_ids:
             try:
                 read = int(self.store.get("read:" + cid) or 0)
             except ValueError:
                 read = 0
+            if not read:
+                continue
             last = self.store.last_incoming(cid)
-            out[cid] = float(read) if read and last and read >= last else None
+            if not last:
+                continue
+            out[cid] = float(read) if read >= last else None
         return out
 
     def group_candidates(self, limit: int) -> List[Chat]:

@@ -338,7 +338,8 @@ class ReadTest(Base):
         b.restore({"state": {"k": "v1"}})
         self.listen(b, lambda g, l, e: hints)
         self.assertEqual(hints, [{"wxid_bob": float(now - 30)}])
-        self.assertEqual(b.chat_done_states(["wxid_bob", "wxid_ann"]), {"wxid_bob": float(now - 30), "wxid_ann": None})
+        self.assertEqual(b.chat_done_states(["wxid_bob", "wxid_ann"]), {"wxid_bob": float(now - 30)},
+                         "no read seen: left out, never None")
         b.store.add_message(msg("r2", "wxid_bob", "wxid_bob", "还有一件事", at=now))
         self.assertEqual(b.chat_done_states(["wxid_bob"]), {"wxid_bob": None}, "a new message brings it back")
         b._on_read("wxid_bob", now - 100)
