@@ -1385,7 +1385,7 @@ class LarkXBackend(Backend):
         # it, and in a group known as an ordinary one: else (a thread-first group, or not known) the old reading.
         marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
         if (in_thread and marks is not None and marks.get("thread_known") and marks.get("thread_type") != THREAD_REPLY
-                and (marks.get("plain_group") or self._plain_group(client, chat_id, d.get("chat_type")))):
+                and (marks.get("plain_group") or self._plain_group(client, chat_id, d.get("chat_type"), me_id))):
             in_thread = False
         topic_root = not root and d.get("scope") == "topic" and anchor == msg_id  # a thread-first group's root
         thread_id = anchor if in_thread else (msg_id if topic_root else "")
@@ -1455,24 +1455,26 @@ class LarkXBackend(Backend):
         except Exception:
             return False
 
-    def _plain_group(self, client, chat_id: str, chat_type=None) -> bool:
-        """Whether the chat is known as an ordinary group (not thread-first): the chats read (while still fresh), else
-        its own record read now (and kept), which must say a group (entities.Chat.Type GROUP) in no thread mode. Not
-        known (a failure, no type, the push's chat type says thread-first, an account no longer signed in): False."""
-        if chat_type in (3, "TOPIC_GROUP") or client is None:
+    def _plain_group(self, client, chat_id: str, chat_type, me_id: str) -> bool:
+        """Whether the chat is known as an ordinary group (not thread-first), for the account me_id while it is the
+        one signed in: the chats read (while still fresh), else its own record read now (and kept), which must say a
+        group (entities.Chat.Type GROUP) in no thread mode. Not known (a failure, no type, the push's chat type says
+        thread-first, another account or none signed in): False."""
+        if chat_type in (3, "TOPIC_GROUP") or client is None or not me_id:
             return False
         with self._lock:
-            if self._client is not client:
+            me = self._me
+            if me is None or me.id != me_id:
                 return False
             hit = self._chats.get(chat_id)
         if hit is not None and hit[0] > time.monotonic():
             return hit[1].kind == "group" and not hit[1].topic
         try:
-            info, chat = self._chat_read(client, chat_id)
+            info, chat = self._chat_read(client, chat_id, me)
         except Exception:
             return False
         with self._lock:
-            if self._client is not client:  # signed out or another account while it was read
+            if not self._still(me):  # signed out or another account while it was read (the same one again is it)
                 return False
         return "type" in info and chat.kind == "group" and not chat.topic
 
@@ -1673,7 +1675,7 @@ class LarkXBackend(Backend):
             except Exception as e:
                 raise self._net(e, "读取历史消息")
             got = got or []
-            self._history_marks(client, chat_id, got)
+            self._history_marks(client, chat_id, got, me.id)
             for d in got:
                 m = self._message(d, me.id, client)
                 if m is not None and (before_position is None or m.position < before_position):
@@ -1683,7 +1685,7 @@ class LarkXBackend(Backend):
         self._fill_blank(client, chat_id, msgs)
         return msgs
 
-    def _history_marks(self, client, chat_id: str, got: list) -> None:
+    def _history_marks(self, client, chat_id: str, got: list, me_id: str) -> None:
         """History carries no thread marks (pushed_threads), and a quote in the main stream no one replied to in its
         thread reads as a reply in that thread (its anchor is its root): for those a page has, the entities are asked
         once and their threadMessageType kept as the marks (_message reads them as a push's). One that does not carry
@@ -1693,7 +1695,7 @@ class LarkXBackend(Backend):
             if (isinstance(d, dict) and "_placement" not in d and _id(d.get("root_id"))
                     and _id(d.get("anchor")) == _id(d.get("root_id")) and _int(d.get("position")) > 0):
                 maybe[_id(d.get("msg_id"))] = d
-        if not maybe or not self._plain_group(client, chat_id, next(iter(maybe.values())).get("chat_type")):
+        if not maybe or not self._plain_group(client, chat_id, next(iter(maybe.values())).get("chat_type"), me_id):
             return
         try:
             raw = self._answer(client.api("messages.PullMessagesByPositionsRequest", {

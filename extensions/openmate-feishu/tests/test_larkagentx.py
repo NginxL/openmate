@@ -380,19 +380,23 @@ class MappingTest(Base):
             "chats": {"512": {"id": "512", "type": 2, "name": "示例群", "chatMode": 3}}, "orderedChatIds": ["512"]}
         self.b.recent_chats(5)
         self.assertEqual(self.m(chat_id="512", msg_id="128", _placement=none, **bare).root_id, "90")
-        # an account signed out while the record was read: not known
+        # signed out while the record was read: not known; the same account signed in again (a new client) is it
         S.chats["514"] = {"id": "514", "type": 2, "name": "示例群"}
-        client, read = self.b._client, self.b._chat_read
-        def away(c, chat_id, me=None):
-            got = read(c, chat_id, me)
-            self.b._client = object()
+        me, read = self.b._me, self.b._chat_read
+        def away(c, chat_id, who=None):
+            got = read(c, chat_id, who)
+            self.b._me = None
             return got
         self.b._chat_read = away
-        self.assertFalse(self.b._plain_group(client, "514"))
-        self.b._client, self.b._chat_read = client, read
-        # an account no longer signed in asks nothing
+        self.assertFalse(self.b._plain_group(self.b._client, "514", 2, ME))
+        self.b._me, self.b._chat_read = me, read
+        self.b._chats.pop("514", None)
+        again = type("Again", (), {"get_chat_info": staticmethod(self.b._client.get_chat_info)})()
+        self.assertTrue(self.b._plain_group(again, "514", 2, ME), "the same account's new client")
+        # another account, or none, asks nothing
         n = len(S.chat_info_calls)
-        self.assertFalse(self.b._plain_group(object(), "513"))
+        self.assertFalse(self.b._plain_group(self.b._client, "513", 2, "other"))
+        self.assertFalse(self.b._plain_group(self.b._client, "513", 2, ""))
         self.assertEqual(len(S.chat_info_calls), n)
         self.assertEqual(self.m(chat_id="504", chat_type=1, root_id="90", anchor="90", content_data=t).placement, "",
                          "a direct chat")
