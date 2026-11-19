@@ -3,12 +3,12 @@ environment's PERSONA_HUB_URL / PERSONA_HUB_TOKEN). Only the routes /agent needs
 asks for (docs/extensions/extensions.md "Hub API: scopes"):
 
     assistant.ask   POST /api/v1/assistant/conversations, POST …/conversations/{id}/stop
-    agents.control  POST /api/v1/sessions/{mid}/{sid}/messages, …/interrupt
+    agents.control  POST /api/v1/sessions/{mid}/{sid}/messages (a conversation's, or a task's Agent's), …/interrupt
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
                     GET  /api/v1/sessions?machine_id=&session_id= (the session's status)
     kb.read         GET  /api/v1/kb/chats/{id}/context
     inbox.read      GET  /api/v1/inbox (the 今天 page)
-    todos.read      GET  /api/v1/todos (the 今天 page)
+    todos.read      GET  /api/v1/todos (the 今天 page; /agent: the open task its conversation handed out)
     (none)          GET  /api/v1/health, the hub's one route without authentication: is the hub reachable now?
 
 The manager relays these to the hub. While its bus connection is down it answers 503 manager_offline (nothing was sent);
@@ -198,6 +198,11 @@ class HubAPI:
             if isinstance(row, dict) and row.get("session_id") == session_id:
                 return row
         return None
+
+    def todos(self) -> List[dict]:
+        """Every to-do, as the hub lists them (`origin`: the conversation that handed it out; `done_at`; `agents`)."""
+        res = self.request("GET", "/api/v1/todos", timeout=30) or {}
+        return [t for t in (res.get("todos") or []) if isinstance(t, dict)] if isinstance(res, dict) else []
 
     def stop_conversation(self, session_id: str) -> dict:
         return self.request("POST", "/api/v1/assistant/conversations/%s/stop" % _seg(session_id), {})

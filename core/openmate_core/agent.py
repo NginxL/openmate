@@ -10,6 +10,12 @@ instead (never both). A turn ends at its turn_duration item; Claude Code does no
 answered and then stayed quiet for `agent_settle` has ended its turn too when its status says done or idle. /stop, /停止 or /停 in the thread (or quoting the request) stops it. Runs are kept in the store,
 so a restart goes on waiting for the running ones.
 
+A follow-up in a thread whose conversation handed its work to a task (a to-do it opened, still open, with an Agent on
+it) goes straight to that Agent (`agent_forward`, on by default): the thread is told it was handed on, and the task's
+result comes back the usual way (the task notice into the conversation, which replies with the request it knows; that
+reply goes under the follow-up). The conversation gets it instead when the to-do is closed, its Agent released or
+offline, more than one task is open, the lookup fails, or the follow-up says 问 Persona / 问助手.
+
 How it shows in the chat: the request gets a 🤔 when it is taken (agent_ack_reaction), swapped for ✅ when the turn
 ended (agent_done_reaction) or ❌ when it failed or timed out (agent_fail_reaction); a /stop just takes the 🤔 away.
 Progress the Agent marks as such (progress=true) goes into one message that is edited in place instead of a new message
@@ -76,6 +82,9 @@ def ai_marked(text: str, marks) -> bool:
     return any(m and (first.startswith(m) or last.startswith(m)) for m in marks)
 PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
+FORWARDED_NOTE = "已转给正在做这件事的 Agent"
+ASK_ASSISTANT = re.compile(r"问\s*(?:persona|助手)", re.IGNORECASE)  # a follow-up the conversation is asked, not the task
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # what agents.control refuses in a message (newline, tab kept)
 ACTIVE = ("starting", "running")
 PROMPT_MOST = 30000
 CONTEXT_MESSAGES = 40
@@ -199,6 +208,7 @@ class AgentRunner:
         self.header = parse_header(cfg.get("agent_reply_header"))
         pos = str(cfg.get("agent_mark_position") or "end").strip().lower()
         self.mark_position = pos if pos in MARK_POSITIONS else "end"
+        self.forward = bool(cfg.get("agent_forward", True))  # a follow-up goes to the task's Agent (see the docstring)
         self.auto = bool(cfg.get("auto_reply", True))
         self.auto_docs = bool(cfg.get("auto_reply_docs", False))  # its own switch: /agent alone never answers documents
         self.auto_header = parse_header(cfg.get("auto_reply_header") if cfg.get("auto_reply_header") is not None else AUTO_HEADER)
@@ -728,6 +738,10 @@ class AgentRunner:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
         prev = None if run.get("start_op") else self._previous(run)  # one with an operation: a new conversation
+        if prev is not None and self._may_forward(run):
+            target = self._forward_target(prev)
+            if target is not None and self._forward(run, row, prev, target, epoch):
+                return  # handed to the task's Agent (or failed, and said so): the conversation is not asked
         if run.get("start_prompt"):
             prompt = run["start_prompt"]  # the very request sent before
         else:
@@ -889,6 +903,167 @@ class AgentRunner:
             self.store.run_put(cur)
             return cur
 
+    # ---------------------------------------------------------------- a follow-up to the task's Agent
+
+    def _may_forward(self, run: dict) -> bool:
+        """The user's own follow-up that may go to the task's Agent: switched on, not someone else's (a guest run),
+        never one already sent to a conversation (a start under an operation), and not one asking the assistant."""
+        return (self.forward and run.get("kind") not in GUEST_KINDS and not run.get("start_op")
+                and not run.get("start_prompt") and not ASK_ASSISTANT.search(run.get("request_text") or ""))
+
+    def _forward_target(self, prev: dict) -> Optional[dict]:
+        """The Agent at work on what prev's conversation handed out: the one open to-do it opened (`origin`), with an
+        Agent on it (not released, removed or failed to start) that is not offline. None (the conversation is asked)
+        when there is none, more than one, or the hub cannot tell."""
+        conv = prev.get("session_id") or ""
+        if not conv or not self.hub.available:
+            return None
+        try:
+            todos = self.hub.todos()
+        except HubError as e:
+            log.info("/agent follow-up: the to-dos could not be read (HTTP %s %s): the conversation is asked", e.status, e.code)
+            return None
+        found = []
+        for t in todos:
+            if t.get("origin") != conv or t.get("done_at") or (t.get("kind") or "") not in ("", "todo"):
+                continue
+            agents = [a for a in t.get("agents") or [] if isinstance(a, dict) and a.get("machine_id") and a.get("session_id")
+                      and not a.get("released_at") and not a.get("dismissed_at") and not a.get("start_error")]
+            if agents:
+                found.append((t, agents[0]))  # the hub lists the active ones first, the latest linked first
+        if len(found) != 1:
+            if found:
+                log.info("/agent follow-up: %d open tasks from the conversation: the conversation is asked", len(found))
+            return None
+        todo, a = found[0]
+        try:
+            srow = self.hub.session_row(a["machine_id"], a["session_id"])
+        except HubError as e:
+            log.info("/agent follow-up: the task's Agent could not be looked up (HTTP %s): the conversation is asked", e.status)
+            return None
+        if not srow or srow.get("status") == "offline" or srow.get("state") == "offline":
+            return None  # gone (closed, or its computer away): the conversation knows what to do
+        on = srow.get("todo")
+        if isinstance(on, dict) and on.get("id") and on["id"] != todo.get("id"):
+            return None  # moved to another to-do meanwhile
+        return {"todo_id": str(todo.get("id") or ""), "machine_id": a["machine_id"], "session_id": a["session_id"]}
+
+    def _forward_text(self, run: dict, row: Optional[dict], target: dict) -> str:
+        """The follow-up as the task's Agent gets it: where it was asked (to answer it, the conversation needs nothing
+        of this), the message it quotes, then the words."""
+        app, store, p = self.app, self.app.store, self.app.platform.name
+        chat_id = run["chat_id"]
+        row = row or store.message(chat_id, run["request_id"]) or {"id": run["request_id"]}
+        loc = "%s，chat=%s，消息 id=%s，时间 %s" % (views.where(p, store.get_chat(chat_id), chat_id), chat_id,
+                                              run["request_id"], local_stamp(row.get("at") or run["created"], app.tz))
+        if run.get("root_id"):
+            loc += "，在话题里（根消息 id=%s）" % run["root_id"]
+        lines = [
+            "我在%s里追问了你正在做的这件事（待办 %s）。OpenMate 直接把它转给了你，没有经过 Persona 助手。" % (p, target["todo_id"]),
+            "- 位置：" + loc,
+        ]
+        quoted = store.message(chat_id, row["parent_id"]) if row.get("parent_id") else None
+        if quoted is not None:
+            lines.append("- 引用的消息（id=%s）：%s" % (quoted["id"], clip(views.log_line(quoted, app.tz, app.me_name()), 2000)))
+        lines.append("- 做完后照常汇报，Persona 会把结果发回这个话题；不要自己往%s里发消息。" % p)
+        text = _block("context", "%s里的追问" % p, "\n".join(lines)) + "\n" + (run["request_text"] or self.prefix)
+        return _CONTROL.sub("", text)
+
+    def _forward(self, run: dict, row: Optional[dict], prev: dict, target: dict, epoch: Optional[int] = None) -> bool:
+        """Send the follow-up to the task's Agent (agents.control), once (the hub sends each client_msg_id once, so a
+        try whose answer was lost is sent again as it is); then the thread is told. False when the hub refused it with
+        nothing sent: the conversation is asked instead. True otherwise, the run forwarded, stopped or failed."""
+        t = self.app.timing
+        deadline = time.time() + t.agent_hub_wait
+        cmid = "openmate-" + run["id"]
+        text = self._forward_text(run, row, target)
+        maybe = False
+        while True:
+            if self._stop.is_set() or self._state(run["id"]) in ("stopped", ""):
+                return True
+            if not self._hub_up(run["id"], deadline):
+                if not self._stop.is_set() and self._state(run["id"]) != "stopped":
+                    self._fail(run["id"], "这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复，这条追问没有转给正在做这件事的 Agent。"
+                                          "网络恢复后请重新发送。" % _span(t.agent_hub_wait))
+                return True
+            if not self._may_submit(run, epoch):
+                return True
+            try:
+                self.hub.send_message(target["machine_id"], target["session_id"], text, cmid)
+                break
+            except HubError as e:
+                log.warning("/agent follow-up could not reach the task's Agent: HTTP %s %s", e.status, e.code)
+                if not e.transient:
+                    if not maybe:
+                        return False  # refused, nothing sent: the conversation is asked
+                    self._fail(run["id"], "没能确认这条追问有没有转给正在做这件事的 Agent：%s。%s" % (e.message or "hub 拒绝了", CHECK))
+                    return True
+                if not e.unsent:
+                    maybe = True
+                if time.time() >= deadline:
+                    self._fail(run["id"], "没能把这条追问转给正在做这件事的 Agent：%s，等了 %s。%s"
+                               % (_hub_words(e), _span(t.agent_hub_wait), CHECK if maybe else "请稍后重新发送。"))
+                    return True
+                self._stop.wait(min(t.agent_hub_probe, max(0.0, deadline - time.time())))
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"])
+            if cur is None:
+                return True  # wiped by another account's sign-in meanwhile: nothing is said for it
+            # the conversation's thread still: a later follow-up finds it, /stop stops the conversation and its tasks
+            cur.update({"machine_id": prev.get("machine_id") or "", "session_id": prev.get("session_id") or "",
+                        "forward": dict(target), "continued": prev["id"], "ours_seen": True})
+            stopped = cur["state"] == "stopped"
+            if not stopped:
+                cur["state"] = "forwarded"
+            if not self.store.run_put(cur):
+                return True
+        if stopped:  # /stop arrived while it was sent: what it stops, as a /stop after it would
+            try:
+                self.hub.stop_conversation(cur["session_id"])
+            except HubError:
+                pass
+            return True
+        log.info("/agent follow-up handed to the task's Agent (to-do %s)", target["todo_id"])
+        self._end_reaction(run["id"], "done")  # taken: the note says where it went
+        mid = self._post_once(cur, "agent:%s:forwarded" % run["id"], FORWARDED_NOTE, **self._where(cur))
+        if mid:
+            with self._lock(run["id"]):
+                cur = self.store.run_get(run["id"])
+                if cur is not None:
+                    cur["notice_id"] = mid  # a /stop quoting it finds the run (in the main stream there is no thread)
+                    self.store.run_put(cur)
+        return True
+
+    def _asked_last(self, run: dict) -> dict:
+        """The latest request of the thread the conversation itself was asked: run, or the one before the follow-ups
+        that went to the task's Agent (their words are in the thread's messages since)."""
+        seen = set()
+        while run.get("forward") and run.get("continued") and run["id"] not in seen:
+            seen.add(run["id"])
+            before = self.store.run_get(run["continued"])
+            if before is None:
+                break
+            run = before
+        return run
+
+    def _answered_follow_up(self, run: dict) -> dict:
+        """The run a reply with run's request id answers. Once run's turn ended, the conversation speaks again only
+        for a task notice; when the thread's newest request in that conversation is a follow-up that went to the
+        task's Agent and has no answer yet, the notice answers it, under it. Otherwise run itself."""
+        if run.get("kind") in GUEST_KINDS or run["state"] in ACTIVE or not run.get("session_id"):
+            return run
+        for r in self.store.runs_in_thread(run["chat_id"], run["thread_key"]):  # the newest first
+            if r["created"] <= run["created"]:
+                break
+            if r.get("session_id") != run["session_id"]:
+                continue
+            if (r.get("forward") and r["state"] == "forwarded" and not r.get("replies") and not r.get("reply_inflight")
+                    and time.time() - r["created"] <= self.app.timing.agent_keep):
+                log.info("an /agent reply after its turn answers the follow-up handed to the task's Agent")
+                return r
+            break
+        return run
+
     def _supersede(self, prev_id: str, run_id: str, epoch: Optional[int] = None) -> bool:
         """A newer request goes on in the same conversation: the turn's end is the newer one's to answer, so the older
         run stops waiting (and can never post a fallback for the same turn). Its reply tool keeps working. False (and
@@ -982,7 +1157,7 @@ class AgentRunner:
                 rows = store.messages_before(chat_id, upto, CONTEXT_MESSAGES + 1)
             title = "最近 %d 条消息" % CONTEXT_MESSAGES
         if prev is not None:
-            prev_row = store.message(chat_id, prev["request_id"])
+            prev_row = store.message(chat_id, self._asked_last(prev)["request_id"])
             if prev_row is not None:
                 rows = [r for r in rows if r["position"] > prev_row["position"]]
                 title = "上次请求之后的消息"
@@ -1444,6 +1619,7 @@ class AgentRunner:
             raise RPCError("这个 /agent 请求已经交给另一个会话处理了，这里不用再回复")
         if run["state"] in ("stopped", "failed"):
             raise RPCError("这个 /agent 请求已经停止了，不再回复")
+        run = self._answered_follow_up(run)
         if time.time() - run["created"] > self.app.timing.agent_keep:
             raise RPCError("这个 /agent 请求已经过期了")
         if not text.strip():

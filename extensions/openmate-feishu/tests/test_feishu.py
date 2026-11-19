@@ -69,7 +69,7 @@ class ManifestTest(unittest.TestCase):
     def test_configuration(self):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
-                                       "agent_machine", "agent_launcher", "agent_reply_header", "agent_mark_position", "agent_ack_reaction",
+                                       "agent_machine", "agent_launcher", "agent_forward", "agent_reply_header", "agent_mark_position", "agent_ack_reaction",
                                        "agent_done_reaction", "agent_fail_reaction",
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
                                        "auto_reply_header",
@@ -89,6 +89,7 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue(re.match(props["larkx_commit"]["pattern"], d["larkx_commit"]))
         self.assertEqual([c["const"] for c in props["region"]["oneOf"]], ["feishu", "lark"])
         self.assertIs(d["agent"], False)
+        self.assertIs(d["agent_forward"], True, "a follow-up goes to the task's Agent unless switched off")
         self.assertEqual(props["agent_machine"]["format"], "machine")
         self.assertEqual(props["agent_launcher"]["format"], "launcher")
         self.assertEqual((d["agent_reply_header"], d["agent_ack_reaction"], d["agent_reply_suffix"]),

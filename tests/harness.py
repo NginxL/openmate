@@ -214,6 +214,8 @@ class FakeHubHTTP:
         self.ops: Dict[str, dict] = {}  # X-Persona-Op-Id of conversation starts → their receipt (assistant_start_ops)
         self.start_pending = 0  # the next this many asks about a start find it still under way (202 pending)
         self.start_unknown = False  # the next start ends with nobody knowing whether it started (202 unknown)
+        self.todos: List[dict] = []  # GET /api/v1/todos (todos.read): the to-dos, as the hub lists them
+        self.todos_status: Optional[int] = None  # an HTTP status GET /api/v1/todos answers instead (403: no todos.read)
         self._n = itertools.count(1)
         hub = self
 
@@ -283,6 +285,25 @@ class FakeHubHTTP:
         """The turn ends without a turn_duration item (Claude Code does not always write one): only the status says."""
         with self.lock:
             self.sessions[sid]["working"] = False
+
+    def add_agent(self, sid: str, machine: str = "mac-agent", working: bool = True) -> dict:
+        """An Agent's session a task runs in (not a conversation /agent started)."""
+        with self.lock:
+            s = self.sessions[sid] = {"machine": machine, "items": [], "working": working, "stopped": False}
+            return s
+
+    def add_todo(self, todo_id: str, origin: str, agents, title: str = "小任务", **kw) -> dict:
+        """A to-do the conversation `origin` dispatched, with its Agents [(machine, session)] (active ones)."""
+        t = {"id": todo_id, "title": title, "origin": origin, "done_at": None,
+             "agents": [{"machine_id": m, "session_id": s, "linked_at": "2026-11-19T00:00:00Z", "source": "spawned"}
+                        for m, s in agents]}
+        t.update(kw)
+        with self.lock:
+            self.todos.append(t)
+        return t
+
+    def messages_to(self, mid: str, sid: str) -> List[dict]:
+        return self.posts("/api/v1/sessions/%s/%s/messages" % (mid, sid))
 
     def session_rows(self) -> List[dict]:
         with self.lock:
@@ -362,6 +383,10 @@ class FakeHubHTTP:
                 s["stopped"], s["working"] = True, False
                 tasks = s.get("tasks") or []
                 return 200, {"conversation": was, "tasks": tasks, "already": not was and not tasks}
+            if method == "GET" and p == "/api/v1/todos":
+                if self.todos_status:
+                    return self.todos_status, {"error": "refused", "code": "forbidden"}
+                return 200, {"todos": [dict(t) for t in self.todos]}
             if method == "GET" and p == "/api/v1/sessions":
                 sid, mid = query.get("session_id"), query.get("machine_id")
                 s = self.sessions.get(sid or "")
