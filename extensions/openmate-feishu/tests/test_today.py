@@ -2,6 +2,7 @@
 
 import datetime as dt
 import os
+import re
 import sys
 import tempfile
 import types
@@ -407,7 +408,11 @@ class TodayTest(unittest.TestCase):
             page.persona.read = lambda wait=None: (__import__("time").sleep(0.35), dict(PERSONA_PARTS))[1]
             page.render({"ui_version": 6})
         self.assertIn("today took", logs.output[0])
-        self.assertIn("Persona 3", logs.output[0])
+        # the Persona part took the 350 ms it slept, give or take: a busy machine overshoots (macOS CI: 400+ ms)
+        total = re.search(r"took (\d+)ms", logs.output[0])
+        part = re.search(r"Persona (\d+)ms", logs.output[0])
+        self.assertTrue(total and part, logs.output[0])
+        self.assertTrue(300 <= int(part.group(1)) <= int(total.group(1)), logs.output[0])  # a part within the whole
 
 
 PERSONA_PARTS = {"waiting": [], "working": [], "inbox": [], "todos": [], "missing": []}
