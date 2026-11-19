@@ -338,6 +338,18 @@ class MappingTest(Base):
         quote = self.m(root_id="90", parent_id="95", anchor="104", scope="topic", msg_id="104", content_data=t)
         self.assertEqual(quote.placement, "chat", "a quote in the main stream")
         self.assertEqual(self.m(content_data=t).placement, "chat", "a plain group message")
+        # a quote in the main stream no one replied to in its thread has no threadId: the anchor is its root
+        bare = dict(root_id="90", parent_id="90", anchor="90", scope="topic", content_data=t)
+        none = dict(alone, thread_type=0)
+        q = self.m(msg_id="111", _placement=none, **bare)
+        self.assertEqual((q.placement, q.root_id, q.thread_id, q.parent_id), ("chat", "", "", "90"),
+                         "a live push says a quote in the main stream, not a thread reply")
+        rooted = self.m(msg_id="112", _placement=dict(alone, thread_type=1), **bare)  # a quote that opened a thread
+        self.assertEqual((rooted.placement, rooted.root_id), ("chat", ""))
+        self.assertEqual(self.m(msg_id="113", **bare).root_id, "90", "read from history: no marks, the old reading")
+        S.thread_chats.add("505")
+        topic = self.m(chat_id="505", msg_id="115", _placement=none, **bare)
+        self.assertEqual((topic.placement, topic.root_id), ("thread", "90"), "a thread-first group keeps the old reading")
         self.assertEqual(self.m(chat_id="504", chat_type=1, root_id="90", anchor="90", content_data=t).placement, "",
                          "a direct chat")
         self.b._peers["501"] = "7003"  # known as a direct chat, though the push did not say so
@@ -358,6 +370,19 @@ class MappingTest(Base):
             self.m(msg_id=str(1000 + i), _placement=sync, **thread)
         self.assertEqual(len(self.b._synced), larkagentx.SYNCED_KEEP, "only the newest are remembered")
         self.assertIn(str(1000 + larkagentx.SYNCED_KEEP + 4), self.b._synced)
+
+    def test_a_quote_of_a_thread_root_shows_in_the_main_stream(self):
+        # quoting, in the main stream, a message that is already a thread's root: its threadId is that thread's
+        # (the anchor is the root), and only threadMessageType tells it from a reply in the thread
+        from larkx._fake import text_data
+
+        none = {"thread_type": 0, "send_to_chat": False, "sync_type": 0, "sync_related": "", "sync_root": ""}
+        opened = dict(root_id="120", parent_id="120", anchor="120", scope="topic", content_data=text_data("x"))
+        q = self.m(msg_id="121", _placement=none, **opened)
+        self.assertEqual((q.placement, q.root_id, q.thread_id, q.parent_id), ("chat", "", "", "120"),
+                         "a quote of a thread's root shows in the main stream")
+        r = self.m(msg_id="122", _placement=dict(none, thread_type=2), **opened)
+        self.assertEqual((r.placement, r.root_id, r.thread_id), ("thread", "120", "120"), "a reply in that thread")
 
     def test_positions_always_grow(self):
         from larkx._fake import text_data
@@ -815,6 +840,34 @@ class ReadTest(Base):
         with self.assertRaises(BackendError) as e:
             self.b.history("404", None, 5)
         self.assertEqual(e.exception.kind, "not_found")
+
+    def test_history_tells_a_quote_from_a_thread_reply(self):
+        from larkx._fake import text_data
+
+        S.chats["620"] = {"id": "620", "type": 2, "name": "示例群", "lastMessagePosition": 4}
+        base = {"chat_id": "620", "chat_type": 2, "msg_type": 4, "from_id": "7002", "create_time": 1763000000,
+                "scope": "topic", "content": "", "content_data": text_data("x"), "at_me": False}
+        S.history["620"] = {
+            1: dict(base, msg_id="301", position=1, root_id="", parent_id="", anchor="", scope="chat"),
+            2: dict(base, msg_id="302", position=2, root_id="301", parent_id="301", anchor="301"),  # a quote
+            3: dict(base, msg_id="303", position=3, root_id="301", parent_id="301", anchor="301"),  # sent to chat
+            4: dict(base, msg_id="304", position=4, root_id="301", parent_id="301", anchor="301"),  # no mark
+        }
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {
+            "2": {"id": "302", "threadMessageType": 0}, "3": {"id": "303", "threadMessageType": "THREAD_REPLY",
+                                                                "sendToChat": True}, "4": {"id": "304"}}}
+        msgs = {m.id: m for m in self.b.history("620", None, 10)}
+        self.assertEqual((msgs["302"].root_id, msgs["302"].thread_id, msgs["302"].parent_id), ("", "", "301"),
+                         "a quote in the main stream")
+        self.assertEqual((msgs["303"].root_id, msgs["303"].placement), ("301", "thread_chat"), "a reply in the thread")
+        self.assertEqual(msgs["304"].root_id, "301", "no mark: the old reading")
+        asked = [d for c, d in S.api_calls if c == "messages.PullMessagesByPositionsRequest"]
+        self.assertEqual([d["positions"] for d in asked], [[2, 3, 4]], "asked once, only for those")
+        S.api_calls.clear()
+        S.history["621"] = {1: dict(S.history["620"][2], chat_id="621", position=1)}
+        S.chats["621"] = dict(S.chats["620"], id="621", lastMessagePosition=1)
+        S.api_answers["messages.PullMessagesByPositionsRequest"] = ValueError("down")
+        self.assertEqual([m.root_id for m in self.b.history("621", None, 10)], ["301"], "a failed read: the old way")
 
     def test_recent_chats_newest_first(self):
         S.api_answers["chats.PullRecentChatsRequest"] = {

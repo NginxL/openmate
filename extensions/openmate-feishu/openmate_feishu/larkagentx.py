@@ -311,6 +311,20 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
     return out
 
 
+_MARK_NAMES = {"THREAD_ROOT": 1, "THREAD_REPLY": 2, "SYNC_TO_CHAT_TARGET": 1, "SYNC_TO_CHAT_SOURCE": 2}
+
+
+def entity_marks(entity: dict) -> dict:
+    """pushed_threads' marks of one message entity as LarkClient.api answers it (a dict; enums as numbers or names)."""
+    def num(v) -> int:
+        return _MARK_NAMES.get(v, 0) if isinstance(v, str) and not v.isdigit() else _int(v)
+
+    return {"thread_type": num(entity.get("threadMessageType")), "send_to_chat": bool(entity.get("sendToChat")),
+            "sync_type": num(entity.get("syncToChatMessageType")),
+            "sync_related": _id(entity.get("syncToChatRelatedMessageId")),
+            "sync_root": _id(entity.get("syncToChatThreadRootId"))}
+
+
 def synced_mark(marks: Optional[dict]) -> str:
     """How a message's marks (pushed_threads) say it also went to the main stream: "sync" (the syncToChat marks),
     "send" (sendToChat), "" (it did not, or nothing is known)."""
@@ -1361,11 +1375,18 @@ class LarkXBackend(Backend):
         # as its threadId; a reply that quotes in the main stream has its own id there (every message in an
         # ordinary group may open a thread), so its root is only the quoted chain's.
         in_thread = bool(root) and anchor == root
+        # A quote in the main stream may have no threadId yet (no one replied in its thread), so the anchor falls back
+        # to its root; a live push's marks tell: only a thread reply is in a thread (not in a thread-first group,
+        # where the old reading stays; asked only for such a quote, LarkAgentX keeps the answer).
+        marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
+        if (in_thread and marks is not None and marks.get("thread_type") != THREAD_REPLY
+                and not self._topic_group(client, chat_id, True)):
+            in_thread = False
         topic_root = not root and d.get("scope") == "topic" and anchor == msg_id  # a thread-first group's root
         thread_id = anchor if in_thread else (msg_id if topic_root else "")
         sender = _id(d.get("from_id"))
         placement = self._placement(d, chat_id, msg_id, in_thread, topic_root, bool(me_id) and sender == me_id, client)
-        marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else {}
+        marks = marks or {}
         # a copy in the main stream: of the reply it names, else of one it does not (still a copy, never a command)
         same_as = (marks.get("sync_related") or msg_id) if marks.get("sync_type") == SYNC_TARGET else ""
         if sender and sender != me_id and _int(d.get("chat_type")) == CHAT_P2P:
@@ -1625,7 +1646,9 @@ class LarkXBackend(Backend):
                 raise
             except Exception as e:
                 raise self._net(e, "读取历史消息")
-            for d in got or []:
+            got = got or []
+            self._history_marks(client, chat_id, got)
+            for d in got:
                 m = self._message(d, me.id, client)
                 if m is not None and (before_position is None or m.position < before_position):
                     out[m.id] = m
@@ -1633,6 +1656,30 @@ class LarkXBackend(Backend):
         msgs = sorted(out.values(), key=lambda m: (m.position, m.at))[-limit:]
         self._fill_blank(client, chat_id, msgs)
         return msgs
+
+    def _history_marks(self, client, chat_id: str, got: list) -> None:
+        """History carries no thread marks (pushed_threads), and a quote in the main stream no one replied to in its
+        thread reads as a reply in that thread (its anchor is its root): for those a page has, the entities are asked
+        once and their threadMessageType kept as the marks (_message reads them as a push's). One that does not carry
+        it, a thread-first group, or a failed read: the old reading."""
+        maybe = {}
+        for d in got:
+            if (isinstance(d, dict) and "_placement" not in d and _id(d.get("root_id"))
+                    and _id(d.get("anchor")) == _id(d.get("root_id")) and _int(d.get("position")) > 0):
+                maybe[_id(d.get("msg_id"))] = d
+        if not maybe or self._topic_group(client, chat_id, True):
+            return
+        try:
+            raw = self._answer(client.api("messages.PullMessagesByPositionsRequest", {
+                "chatId": str(chat_id), "positions": sorted({_int(d.get("position")) for d in maybe.values()})}),
+                "读取历史消息")
+        except Exception as e:
+            log.info("the thread marks of a history page could not be read (%s)", type(e).__name__)
+            return
+        for v in (raw.get("messages") or {}).values():
+            d = maybe.get(_id(v.get("id"))) if isinstance(v, dict) else None
+            if d is not None and "threadMessageType" in v:
+                d["_placement"] = entity_marks(v)
 
     def _fill_blank(self, client, chat_id: str, msgs: List[Message]) -> None:
         """A text or post read as nothing: the message's own entity is asked for once more and its preview hang points
