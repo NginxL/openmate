@@ -272,7 +272,7 @@ class AgentRunner:
             (again if how else lost).append((run, how))
         with self._mu:
             for run, _ in again:
-                self._turns.setdefault((run["chat_id"], run["thread_key"]), []).append(run["id"])
+                self._enqueue(run)
         for run, how in again:
             threading.Thread(target=self._resume, args=(run, how), name="openmate-agent-start", daemon=True).start()
         for run, _ in lost:
@@ -491,7 +491,7 @@ class AgentRunner:
             run["queued"] = True  # waiting its turn: nothing sent yet (a restart starts it again)
             self.store.run_put(run)
             with self._mu:  # its turn among the thread's requests: they start in the order they were asked
-                self._turns.setdefault((run["chat_id"], run["thread_key"]), []).append(run["id"])
+                self._enqueue(run)
         self._prune()
         threading.Thread(target=self._start_run, args=(run, row, epoch), name="openmate-agent-start",
                          daemon=True).start()
@@ -770,6 +770,21 @@ class AgentRunner:
             self._start_run_now(run, row, epoch)
         finally:
             self._turn_done(run)
+
+    def _enqueue(self, run: dict) -> None:
+        """Queue run among its thread's requests by when it was asked (self._mu held): one a restart takes in late, or
+        a live one heard before it, still keeps its place."""
+        q = self._turns.setdefault((run["chat_id"], run["thread_key"]), [])
+        if run["id"] in q:
+            return
+        at = float(run.get("created") or 0)
+        i = len(q)
+        while i > 0:
+            before = self.store.run_get(q[i - 1])
+            if before is None or float(before.get("created") or 0) <= at:
+                break
+            i -= 1
+        q.insert(i, run["id"])
 
     def _wait_turn(self, run: dict) -> None:
         """Wait until the thread's requests asked before run have started (handed on, or in their conversation), so
@@ -1276,6 +1291,7 @@ class AgentRunner:
                 self._stop_conversation(conv)
             return True
         log.info("/agent follow-up handed to the task's Agent (to-do %s)", target["todo_id"])
+        self._turn_done(run)  # its start is over: the thread's next request goes on while the note goes out
         self._forward_noted(run_id)
         return True
 
@@ -2198,6 +2214,12 @@ class AgentRunner:
                 return
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
+        if before == "starting" and not cur.get("session_id"):
+            # not yet in its conversation (waiting its turn, or on its way): the thread's conversation it was about
+            # to go on in is what a /stop in the thread stops
+            p = self._previous(cur)
+            if p is not None and p.get("session_id"):
+                cur = dict(cur, machine_id=p.get("machine_id") or "", session_id=p["session_id"])
         for other in (self._same_conversation(cur) if before != "stopped" else []):
             # what this stop stops at the hub is theirs too: a turn still running, a follow-up handed to the task's
             # Agent and waiting for its result (an earlier stop that reached nothing here stops nothing more)

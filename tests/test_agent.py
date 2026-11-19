@@ -520,6 +520,19 @@ class StopTest(unittest.TestCase):
         self.assertEqual(len([st for st in h2.http.starts() if st["op"] == "op-example-1"]) >= 1, True)
         self.assertEqual(len({st["op"] for st in h2.http.starts()}), 1, "one conversation")
 
+    def test_the_turns_keep_the_order_asked_whatever_order_they_are_queued_in(self):
+        h = agent(self)
+        now = time.time()
+        runs = [{"id": "omr_%020d" % i, "chat_id": "chat_example_team", "request_id": "m%d" % i, "thread_key": "t",
+                 "state": "starting", "created": now + i, "replies": 0, "reply_inflight": 0, "reply_ids": []}
+                for i in range(3)]
+        for r in runs:
+            h.app.store.run_put(r)
+        with h.app.agent._mu:
+            for r in (runs[2], runs[0], runs[1]):  # a live one heard before a restart took in older ones
+                h.app.agent._enqueue(r)
+        self.assertEqual(h.app.agent._turns[("chat_example_team", "t")], [r["id"] for r in runs])
+
     def test_a_request_cut_off_while_it_waited_its_turn_starts_again(self):
         h = agent(self)
         first = ask(h, "/agent 第一个")
