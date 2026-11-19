@@ -173,7 +173,7 @@ class ForwardTest(unittest.TestCase):
         wait_until(lambda: h.http.messages_to("mac-agent", "agent-1"), what="the follow-up at the Agent")
         wait_until(lambda: run_of(h, b).get("noted"), what="the follow-up handed on, the thread told")
         self.assertEqual(run_of(h, b)["state"], "forwarded")
-        self.assertEqual(run_of(h, c)["state"], "running")
+        wait_until(lambda: run_of(h, c)["state"] == "running", what="c running (sent, then written)")
 
     def test_held_for_approval_is_handed_on(self):
         h, first, run1, sid = dispatched(self)
