@@ -882,7 +882,7 @@ class AgentRunner:
                     self._fail(run["id"], "这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复，这个 /agent 请求没有开始处理。"
                                           "网络恢复后请重新发送。" % _span(t.agent_hub_wait))
                 return
-            attempt = time.time()
+            attempt = 0.0  # when this try's request went out (right before the call)
             try:
                 if prev is not None:
                     mid, sid = prev["machine_id"], prev["session_id"]
@@ -890,6 +890,7 @@ class AgentRunner:
                         baseline = self._latest_seq(mid, sid)
                     if not self._may_submit(run, epoch):
                         return
+                    attempt = time.time()
                     self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
                               "ours_seen": False, "continued": prev["id"]}
@@ -900,6 +901,7 @@ class AgentRunner:
                         return
                     if not self._may_submit(run, epoch):
                         return
+                    attempt = time.time()
                     sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
                                                        guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
@@ -907,13 +909,14 @@ class AgentRunner:
                 else:
                     if not self._may_submit(run, epoch):
                         return
+                    attempt = time.time()
                     sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True}
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if not e.unsent:
+                if not e.unsent and attempt:
                     first_try = first_try or attempt  # it may have reached the hub
                 if op and e.code in ("unknown", "assistant_in_doubt", "op_id_reused"):
                     self._fail(run["id"], "Persona 不确定这个 /agent 有没有开始处理（网络中途断了）。请先在 Persona 里看看有没有"
@@ -953,7 +956,7 @@ class AgentRunner:
             if cur is not None:
                 cur.update(fields)
                 # when its conversation may first have got it (a try that surely reached nothing does not count)
-                cur["submitted"] = first_try or attempt
+                cur["submitted"] = first_try or attempt or time.time()
                 if cur["state"] == "stopped":
                     stopped = True
                 else:
