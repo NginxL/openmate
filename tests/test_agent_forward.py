@@ -243,6 +243,23 @@ class ForwardTest(unittest.TestCase):
         time.sleep(0.4)
         self.assertEqual([s["reply_to"] for s in replies(h) if s["text"].startswith("两件事一起答")], [c.id])
 
+    def test_a_request_waiting_its_turn_is_stopped_with_its_conversation(self):
+        """b is looked up, c waits its turn behind it; a /stop of the thread's first request stops the conversation:
+        c, asked before it, never wakes it again."""
+        h, first, run1, sid = dispatched(self)
+        with h.http.lock:
+            h.http.todos[0]["done_at"] = "2026-11-19T12:00:00Z"  # b finds no Agent: it would ask the conversation
+        h.http.todos_delay = 1.0
+        b = follow_up(h, first, "/agent 做个英文版")
+        wait_until(lambda: [r for r in h.http.requests if r["path"] == "/api/v1/todos"], what="the lookup")
+        c = follow_up(h, first, "/agent 问助手 进度如何")
+        run_of(h, c)
+        follow_up(h, first, "/stop")
+        wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), what="the stop")
+        wait_until(lambda: run_of(h, b)["state"] == "stopped" and run_of(h, c)["state"] == "stopped", what="both stopped")
+        time.sleep(1.5)
+        self.assertFalse(h.http.messages_to("mac-example", sid), "the stopped conversation is never asked again")
+
     def test_a_stop_of_the_first_request_stops_a_follow_up_waiting_for_its_result(self):
         h, first, run1, sid = dispatched(self)
         msg, run = forwarded(self, h, first, sid)

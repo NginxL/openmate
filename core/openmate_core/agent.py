@@ -263,7 +263,20 @@ class AgentRunner:
         except Exception:
             log.exception("the guest quota ledger could not be filled from the kept runs")
         self._prune(force=True)
+        # cut off while they waited their turn: nothing went out, so they start again, in the order asked
+        again = sorted((r for r in self.store.runs_in_state(["starting"]) if r.get("queued") and self.enabled
+                        and self.hub.available and time.time() - float(r.get("created") or 0) < self.app.timing.agent_fresh),
+                       key=lambda r: float(r.get("created") or 0))
+        with self._mu:
+            for run in again:
+                self._turns.setdefault((run["chat_id"], run["thread_key"]), []).append(run["id"])
+        for run in again:
+            log.info("an /agent request cut off while it waited its turn starts again")
+            row = self.store.message(run["chat_id"], run["request_id"]) or {"chat_id": run["chat_id"], "id": run["request_id"]}
+            threading.Thread(target=self._start_run, args=(run, row), name="openmate-agent-start", daemon=True).start()
         for run in self.store.runs_in_state(["starting"]):
+            if any(r["id"] == run["id"] for r in again):
+                continue
             fresh = time.time() - float(run.get("created") or 0) < START_REPLAY_MOST  # the hub keeps receipts 30 days
             if run.get("forward_pending") and self.enabled and self.hub.available \
                     and time.time() - float(run.get("created") or 0) < self.app.timing.agent_keep:
@@ -375,6 +388,8 @@ class AgentRunner:
         """Another account signed in: what /agent posted for the one before is no echo of the next one's lines."""
         with self._mu:
             self._posted.clear()
+            self._turns.clear()  # the requests waiting their turn were that account's: none holds up the next one's
+            self._turned.notify_all()
 
     def _header_marks(self) -> List[str]:
         marks = list(AI_MARKS[:2])
@@ -465,6 +480,7 @@ class AgentRunner:
                 return
             run = self._new_run(row, req, now)
             run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)
+            run["queued"] = True  # waiting its turn: nothing sent yet (a restart starts it again)
             self.store.run_put(run)
             with self._mu:  # its turn among the thread's requests: they start in the order they were asked
                 self._turns.setdefault((run["chat_id"], run["thread_key"]), []).append(run["id"])
@@ -757,6 +773,11 @@ class AgentRunner:
                 q = self._turns.get(key) or []
                 if run["id"] not in q or q[0] == run["id"]:
                     return
+                head = self.store.run_get(q[0])
+                if head is None or head["state"] != "starting":  # gone (wiped, pruned) or past its start: not waited for
+                    q.pop(0)
+                    self._turned.notify_all()
+                    continue
                 left = deadline - time.time()
                 if left <= 0:
                     log.info("/agent: a request before this one in the thread is still starting: this one goes on")
@@ -802,7 +823,25 @@ class AgentRunner:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
         self._wait_turn(run)  # the thread's requests before it first
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"])
+            if cur is None or cur["state"] != "starting":
+                return  # stopped (or wiped) while it waited
+            if cur.pop("queued", None):
+                self.store.run_put(cur)
         prev = None if run.get("start_op") else self._previous(run)  # one with an operation: a new conversation
+        if prev is not None and prev.get("session_id") and \
+                self._stopped_since(dict(run, session_id=prev["session_id"]), float(run["created"])):
+            # its conversation was stopped after it was asked (it waited its turn meanwhile): stopped with it
+            with self._lock(run["id"]):
+                cur = self.store.run_get(run["id"])
+                if cur is None or cur["state"] != "starting":
+                    return
+                cur["state"], cur["stopped_at"] = "stopped", time.time()
+                if not self.store.run_put(cur):
+                    return
+            self._end_reaction(run["id"], "stopped")
+            return
         if prev is not None and self._may_forward(run, prev):
             if self._forward(run, row, prev, epoch):
                 return  # handed to the task's Agent (or stopped, or failed and said so): the conversation is not asked
@@ -2142,7 +2181,8 @@ class AgentRunner:
                 return  # gone meanwhile (pruned, or wiped by another account's sign-in): nothing here to stop
             before = cur["state"]
             cur["state"] = "stopped"
-            cur["stopped_at"] = time.time()
+            if before != "stopped" or not cur.get("stopped_at"):
+                cur["stopped_at"] = time.time()  # a second stop of it reaches nothing: the first one's time stays
             if not self.store.run_put(cur):
                 return
         if before in ACTIVE:

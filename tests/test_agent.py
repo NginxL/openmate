@@ -495,6 +495,24 @@ class StopTest(unittest.TestCase):
         wait_until(lambda: [s for s in h.sent() if "已经结束了" in s["text"]], what="the answer to the second stop")
         self.assertEqual(h.app.store.run_get(run2["id"])["state"], "running")
         self.assertEqual(len(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid)), 1)
+        self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"), "it still answers")
+
+    def test_a_request_cut_off_while_it_waited_its_turn_starts_again(self):
+        h = agent(self)
+        first = ask(h, "/agent 第一个")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+        second = h.world.push("chat_example_team", "me", "接着问的原文", root_id=first.id)
+        rid = "omr_" + "4" * 20
+        h.app.store.run_put({"id": rid, "chat_id": "chat_example_team", "request_id": second.id, "thread_key": first.id,
+                             "root_id": first.id, "state": "starting", "created": time.time(), "queued": True,
+                             "request_text": "接着问的原文", "replies": 0, "reply_inflight": 0, "reply_ids": []})
+        h2 = h.restart()
+        h2.wait_ok()
+        msgs = wait_until(lambda: h2.http.posts("/api/v1/sessions/mac-example/%s/messages" % sid), what="started again")
+        self.assertIn("接着问的原文", msgs[0]["body"]["text"])
+        wait_until(lambda: h2.app.store.run_get(rid)["state"] == "running", what="running")
+        self.assertFalse([s for s in h2.sent() if "扩展重启了" in s["text"]], "never told to send it again")
 
     def test_only_my_stop_counts(self):
         h = self.h
