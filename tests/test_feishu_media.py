@@ -102,10 +102,27 @@ class MediaToolTest(unittest.TestCase):
         second = h.tool("media", message=row["id"])
         self.assertEqual(len(calls), 2, "fetched again, as this account")
         self.assertNotEqual(first.split("本地文件：")[1].split("（")[0], second.split("本地文件：")[1].split("（")[0])
+        first_path = first.split("本地文件：")[1].split("（")[0]
+        self.assertFalse(os.path.exists(os.path.dirname(first_path)), "the account before's files are gone")
         h.app.store.meta_set("account_id", "")
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("飞书还没登录", e.exception.message, "whose files these are must be known")
+
+    def test_a_folder_is_made_this_users_own_and_old_files_go(self):
+        h = signed(self)
+        row = picture_row(h)
+        top = os.path.dirname(folder_of(h))
+        os.makedirs(folder_of(h))
+        os.chmod(top, 0o500)  # this user's, but not writable: made usable again
+        stale = os.path.join(folder_of(h), "7000000000000000009.png")
+        with open(stale, "wb") as f:
+            f.write(PNG)
+        os.utime(stale, (1, 1))
+        h.tool("media", message=row["id"])
+        self.assertEqual(oct(os.stat(top).st_mode & 0o777), oct(0o700))
+        self.assertFalse(os.path.exists(stale), "older than a day: gone")
+        self.assertTrue(os.path.exists(os.path.join(folder_of(h), row["id"] + ".png")))
 
     def test_a_failed_write_or_an_empty_answer_leaves_the_file_before(self):
         h = signed(self)

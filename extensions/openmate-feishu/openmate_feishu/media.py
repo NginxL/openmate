@@ -6,7 +6,8 @@ never the ref (its resource key) nor anything of the session.
 Every call fetches again, as the account signed in now: Feishu decides what that account may see, and a copy kept
 for an account signed in before (a restart in the middle of a switch) is never handed out. The files are written
 into <temporary directory>/openmate-feishu-media-<uid>/<a hash of the store's account>/ (0700, this user's own, never
-through a link), replacing the one written for the same message before. Not the extension's data directory: Persona's
+through a link), replacing the one written for the same message before; each call removes the folders of the accounts
+signed in before and this account's files older than a day. Not the extension's data directory: Persona's
 agent sandbox closes extensions/data/ to the agents it starts, and they are the ones who read these files."""
 
 from __future__ import annotations
@@ -15,8 +16,10 @@ import hashlib
 import mimetypes
 import os
 import re
+import shutil
 import stat
 import tempfile
+import time
 from typing import Dict, List, Tuple
 
 from openmate_core import views
@@ -27,6 +30,8 @@ MEDIA_TOOL = CONNECTOR_ID + "_media"
 MEDIA_MOST = 25 << 20  # 25 MB a file: a picture, a document; a longer video is watched in Feishu
 MEDIA_DIR = "openmate-feishu-media"
 BASE = ""  # where MEDIA_DIR goes; "" is this user's temporary directory (tests name another)
+KEEP_SECONDS = 24 * 3600  # a file fetched for a question is read within minutes; each call fetches again anyway
+_ACCOUNT_DIR = re.compile(r"^[0-9a-f]{16}$")
 _KINDS_WITH_MEDIA = ("IMAGE", "STICKER", "FILE", "AUDIO", "VOICE", "VIDEO", "MEDIA")
 KIND_WORDS = {"image": "图片", "sticker": "表情", "video": "视频", "voice": "语音", "file": "文件"}
 _ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")  # Feishu's are digits; the fixture's have letters
@@ -173,8 +178,37 @@ def _own_folder(folder: str) -> None:
             raise OSError(0, "%s 不是一个目录（可能是链接），不往那里写" % os.path.basename(d))
         if st.st_uid != os.getuid():
             raise OSError(0, "%s 不是这个用户的，不往那里写" % os.path.basename(d))
-        if st.st_mode & 0o077:
+        if stat.S_IMODE(st.st_mode) != 0o700:
             os.chmod(d, 0o700)
+    _tidy(folder)
+
+
+def _tidy(folder: str) -> None:
+    """What no one should read any more: the folders of the accounts signed in here before (one account at a time),
+    and this account's files older than KEEP_SECONDS (each call fetches again)."""
+    parent, mine = os.path.split(folder)
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    for n in names:
+        p = os.path.join(parent, n)
+        if n == mine or not _ACCOUNT_DIR.match(n) or os.path.islink(p) or not os.path.isdir(p):
+            continue
+        shutil.rmtree(p, ignore_errors=True)
+    old = time.time() - KEEP_SECONDS
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for n in names:
+        p = os.path.join(folder, n)
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode) and st.st_mtime < old:
+                os.remove(p)
+        except OSError:
+            pass
 
 
 def _written(folder: str, stem: str) -> List[str]:
