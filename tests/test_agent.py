@@ -513,6 +513,22 @@ class StopTest(unittest.TestCase):
         run2 = running(h, second)
         self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"))
 
+    def test_a_request_whose_first_try_reached_nothing_counts_from_the_try_that_did(self):
+        h = agent(self)
+        first = ask(h, "/agent 第一个")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+
+        def offline_while_stopped():  # the user stops the first meanwhile; this try reaches nothing
+            ask(h, "/stop", root_id=first.id, parent_id=first.id)
+            wait_until(lambda: h.app.store.run_get(run1["id"])["state"] == "stopped", what="the first stopped")
+            return 503, {"error": "offline", "code": "manager_offline"}
+
+        h.http.send_hook[sid] = offline_while_stopped
+        second = ask(h, "/agent 接着来", root_id=first.id)
+        run2 = running(h, second)
+        self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"))
+
     def test_only_my_stop_counts(self):
         h = self.h
         h.world.push("chat_example_team", "user_example_a", "/stop", root_id=self.m.id)

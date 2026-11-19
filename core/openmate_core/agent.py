@@ -882,6 +882,7 @@ class AgentRunner:
                     self._fail(run["id"], "这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复，这个 /agent 请求没有开始处理。"
                                           "网络恢复后请重新发送。" % _span(t.agent_hub_wait))
                 return
+            attempt = time.time()
             try:
                 if prev is not None:
                     mid, sid = prev["machine_id"], prev["session_id"]
@@ -889,7 +890,6 @@ class AgentRunner:
                         baseline = self._latest_seq(mid, sid)
                     if not self._may_submit(run, epoch):
                         return
-                    first_try = first_try or time.time()
                     self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
                               "ours_seen": False, "continued": prev["id"]}
@@ -900,7 +900,6 @@ class AgentRunner:
                         return
                     if not self._may_submit(run, epoch):
                         return
-                    first_try = first_try or time.time()
                     sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
                                                        guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
@@ -908,13 +907,14 @@ class AgentRunner:
                 else:
                     if not self._may_submit(run, epoch):
                         return
-                    first_try = first_try or time.time()
                     sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True}
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
+                if not e.unsent:
+                    first_try = first_try or attempt  # it may have reached the hub
                 if op and e.code in ("unknown", "assistant_in_doubt", "op_id_reused"):
                     self._fail(run["id"], "Persona 不确定这个 /agent 有没有开始处理（网络中途断了）。请先在 Persona 里看看有没有"
                                           "新开的会话；没有的话再重新发送。")
@@ -952,7 +952,8 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur is not None:
                 cur.update(fields)
-                cur["submitted"] = first_try or time.time()  # when its conversation may have got it: a stop before is not its own
+                # when its conversation may first have got it (a try that surely reached nothing does not count)
+                cur["submitted"] = first_try or attempt
                 if cur["state"] == "stopped":
                     stopped = True
                 else:
@@ -1091,11 +1092,10 @@ class AgentRunner:
         target = {"todo_id": str(todo.get("id") or ""), "machine_id": a["machine_id"], "session_id": a["session_id"]}
         return target if self._still_on(target) else None
 
-    def _reporting(self, conv: str) -> Optional[bool]:
-        """The hub still tells the conversation about its tasks (not stopped in the app meanwhile); None when the hub
-        cannot say now."""
+    def _reporting(self, conv: str) -> Optional[str]:
+        """The hub's word on the conversation's task notices (HubAPI.reporter_state); None when it cannot say now."""
         try:
-            return self.hub.reporter_state(conv) == "reporting"
+            return self.hub.reporter_state(conv)
         except HubError:
             return None
 
@@ -1225,14 +1225,20 @@ class AgentRunner:
                 unsure("这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复" % _span(t.agent_hub_wait))
                 return True
             # looked at right before every try (the wait may have been long); after a restart, all of it again
-            reporting = True if tries == 0 or resumed else self._reporting(conv)
+            reporting = "reporting" if tries == 0 else self._reporting(conv)
             if reporting is None:  # not known now (the network): asked again, under the same deadline
                 if time.time() >= deadline:
                     unsure("这台电脑和 Persona 之间的网络不稳，等了 %s" % _span(t.agent_hub_wait))
                     return True
                 self._stop.wait(min(t.agent_hub_probe, max(0.0, deadline - time.time())))
                 continue
-            if reporting is False:
+            if reporting not in ("reporting", "stopped"):
+                # no more a reporting conversation (its task notices go elsewhere)
+                if not maybe:
+                    return False  # nothing went out: the conversation is asked
+                unsure("这个对话已经不再接收任务的汇报")
+                return True
+            if reporting == "stopped":
                 # stopped in the app since it was asked: stopped with it (asking the conversation would wake it)
                 with self._lock(run_id):
                     cur = self.store.run_get(run_id)
