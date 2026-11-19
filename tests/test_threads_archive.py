@@ -131,6 +131,23 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(msg["sender_name"], "示例同事甲")
         self.assertTrue(msg["at"].endswith("Z"))
 
+    def test_sticker_pictures_stay_out(self):
+        """A sticker reaches the knowledge base as its "[表情]" line, with no picture to download; a picture still has one."""
+        h = Harness(self)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        _, cursor = self.follow(h)
+        st = h.world.push("chat_example_team", "user_example_a", "", type="STICKER",
+                          media=[Media("sticker", ref="sticker:wave", width=240, height=240)])
+        im = h.world.push("chat_example_team", "user_example_a", "", type="IMAGE",
+                          media=[Media("image", ref="image:shot", width=800, height=600)])
+        wait_until(lambda: h.app.store.message("chat_example_team", im.id), what="stored")
+        res = h.c("archive.changes", cursor=cursor, limit=100)
+        msgs = {m["id"]: m for b in res["batches"] for m in b["messages"]}
+        self.assertEqual(msgs[st.id]["text"], "[表情]")
+        self.assertNotIn("media", msgs[st.id])
+        self.assertEqual(msgs[im.id]["media"], ["image:shot"])
+
     def test_batch_fields(self):
         h = Harness(self)
         h.sign_in()

@@ -197,7 +197,9 @@ def archive_message(row: dict, me: str, handle_kind: str) -> dict:
         out["mentioned"] = True
     if row.get("at_all"):
         out["mentioned_all"] = True
-    refs = [m.get("ref") for m in row.get("media") or [] if m.get("ref")]
+    # a sticker's picture is not offered: the line keeps "[表情]", and the knowledge base downloads no emoji (most of
+    # the bytes a chat archive held, and nothing anyone looks up)
+    refs = [m.get("ref") for m in row.get("media") or [] if m.get("ref") and m.get("kind") != "sticker"]
     if refs:
         out["media"] = refs
     if row.get("sender_id") and handle_kind:

@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime
 
 from harness import ROOT, Harness, HubSideError, wait_until
-from openmate_core.backend import Chat, Message
+from openmate_core.backend import Chat, Media, Message
 from openmate_core.store import history_sql
 
 BIG = "chat_example_history"
@@ -89,6 +89,22 @@ class HistoryTest(unittest.TestCase):
             self.assertTrue(got, "newer on an empty page")
             q = {"limit": limit, "after": page["newer"]}
         self.fail("never reached the newest")
+
+
+    def test_sticker_pictures_stay_out(self):
+        """History pages offer no sticker picture either: the line is "[表情]"; a picture keeps its ref."""
+        rows = [Message(id="msg_hist_sticker", chat_id=BIG, position=301, sender_id="user_example_a", sender_name="示例同事甲",
+                        text="", type="STICKER", at=self.now - 9000,
+                        media=[Media("sticker", ref="sticker:wave", width=240, height=240)]),
+                Message(id="msg_hist_image", chat_id=BIG, position=302, sender_id="user_example_a", sender_name="示例同事甲",
+                        text="", type="IMAGE", at=self.now - 8999,
+                        media=[Media("image", ref="image:shot", width=800, height=600)])]
+        self.h.app.store.add_messages(rows, from_history=True)
+        page = self.h.c("archive.history", chat=BIG, limit=10)
+        msgs = {m["id"]: m for m in page["messages"]}
+        self.assertEqual(msgs["msg_hist_sticker"]["text"], "[表情]")
+        self.assertNotIn("media", msgs["msg_hist_sticker"])
+        self.assertEqual(msgs["msg_hist_image"]["media"], ["image:shot"])
 
     def test_chats_lists_what_is_stored(self):
         listed = self.h.c("history.chats")["chats"]
