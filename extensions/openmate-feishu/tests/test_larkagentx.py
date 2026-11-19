@@ -380,6 +380,16 @@ class MappingTest(Base):
             "chats": {"512": {"id": "512", "type": 2, "name": "示例群", "chatMode": 3}}, "orderedChatIds": ["512"]}
         self.b.recent_chats(5)
         self.assertEqual(self.m(chat_id="512", msg_id="128", _placement=none, **bare).root_id, "90")
+        # an account signed out while the record was read: not known
+        S.chats["514"] = {"id": "514", "type": 2, "name": "示例群"}
+        client, read = self.b._client, self.b._chat_read
+        def away(c, chat_id, me=None):
+            got = read(c, chat_id, me)
+            self.b._client = object()
+            return got
+        self.b._chat_read = away
+        self.assertFalse(self.b._plain_group(client, "514"))
+        self.b._client, self.b._chat_read = client, read
         # an account no longer signed in asks nothing
         n = len(S.chat_info_calls)
         self.assertFalse(self.b._plain_group(object(), "513"))

@@ -1471,6 +1471,9 @@ class LarkXBackend(Backend):
             info, chat = self._chat_read(client, chat_id)
         except Exception:
             return False
+        with self._lock:
+            if self._client is not client:  # signed out or another account while it was read
+                return False
         return "type" in info and chat.kind == "group" and not chat.topic
 
     def _learn_peer(self, chat_id: str, user_id: str, me_id: str) -> None:
