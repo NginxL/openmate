@@ -41,7 +41,8 @@ def stored(h, chat, msg):
 
 def folder_of(h):
     whose = hashlib.sha256(("openmate-feishu:" + h.app.store.meta_get("account_id")).encode()).hexdigest()[:16]
-    return os.path.join(h.data_dir, "tmp", "openmate-feishu-media-%d" % os.getuid(), whose)
+    ours = hashlib.sha256(os.path.abspath(h.data_dir).encode()).hexdigest()[:8]
+    return os.path.join(h.data_dir, "tmp", "openmate-feishu-media-%d-%s" % (os.getuid(), ours), whose)
 
 
 def counting(h):
@@ -108,6 +109,30 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("飞书还没登录", e.exception.message, "whose files these are must be known")
+
+    def test_the_account_before_is_tidied_even_by_a_failed_call_and_not_another_instance(self):
+        h = signed(self)
+        row = picture_row(h)
+        h.tool("media", message=row["id"])
+        before = folder_of(h)
+        os.chmod(before, 0o500)  # its files cannot be removed as it is: made writable first
+        other = os.path.join(os.path.dirname(os.path.dirname(before)), "openmate-feishu-media-%d-0123abcd" % os.getuid(),
+                             "0123456789abcdef")
+        os.makedirs(other)  # another instance of the extension (another data directory): never touched
+        with open(os.path.join(other, "1.png"), "wb") as f:
+            f.write(PNG)
+        os.makedirs(os.path.join(os.path.dirname(before), "0123456789abcdef\n"))  # not an account's name
+        h.app.store.meta_set("account_id", "user_example_other")
+
+        def gone(ref, most):
+            raise BackendError("附件不在了（可能已被撤回或过期）", "not_found")
+
+        h.app.backend.media = gone
+        with self.assertRaises(HubSideError):
+            h.tool("media", message=row["id"])
+        self.assertFalse(os.path.exists(before), "tidied though the fetch failed")
+        self.assertTrue(os.path.exists(os.path.join(other, "1.png")))
+        self.assertTrue(os.path.isdir(os.path.join(os.path.dirname(before), "0123456789abcdef\n")))
 
     def test_a_folder_is_made_this_users_own_and_old_files_go(self):
         h = signed(self)
@@ -195,7 +220,7 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=m.id)
         self.assertIn("超过 25 MB", e.exception.message)
-        folder = os.path.dirname(folder_of(h))
+        folder = folder_of(h)
         self.assertFalse(os.path.isdir(folder) and os.listdir(folder), "nothing kept")
         # a backend that hands back more than it was allowed is held to the limit too
         h.app.backend.media = lambda ref, most: ("application/zip", b"\0" * (most + 1))

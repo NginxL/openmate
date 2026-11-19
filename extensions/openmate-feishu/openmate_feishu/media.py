@@ -13,12 +13,13 @@ agent sandbox closes extensions/data/ to the agents it starts, and they are the 
 from __future__ import annotations
 
 import hashlib
+import logging
 import mimetypes
 import os
 import re
-import shutil
 import stat
 import tempfile
+import threading
 import time
 from typing import Dict, List, Tuple
 
@@ -31,7 +32,8 @@ MEDIA_MOST = 25 << 20  # 25 MB a file: a picture, a document; a longer video is 
 MEDIA_DIR = "openmate-feishu-media"
 BASE = ""  # where MEDIA_DIR goes; "" is this user's temporary directory (tests name another)
 KEEP_SECONDS = 24 * 3600  # a file fetched for a question is read within minutes; each call fetches again anyway
-_ACCOUNT_DIR = re.compile(r"^[0-9a-f]{16}$")
+_ACCOUNT_DIR = re.compile(r"[0-9a-f]{16}")  # fullmatch
+_WRITING = threading.Lock()  # the tidy-up and the writes of this process, one at a time
 _KINDS_WITH_MEDIA = ("IMAGE", "STICKER", "FILE", "AUDIO", "VOICE", "VIDEO", "MEDIA")
 KIND_WORDS = {"image": "图片", "sticker": "表情", "video": "视频", "voice": "语音", "file": "文件"}
 _ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")  # Feishu's are digits; the fixture's have letters
@@ -44,6 +46,9 @@ _REASONS = {  # the backend's words say what happened; these say what it means f
     "too_large": "，在飞书里打开看",
     "rejected": "，这个账号看不到它",
 }
+
+
+log = logging.getLogger("openmate.media")
 
 
 class MediaError(Exception):
@@ -103,7 +108,13 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
     if backend is None or not app.signed_in or getattr(app, "link", "") == "expired" or not account:
         raise MediaError(head + "\n飞书还没登录（或登录已失效），下载不了：先在 Persona 的飞书扩展里扫码登录，再试一次。")
     whose = hashlib.sha256(("openmate-feishu:" + account).encode("utf-8")).hexdigest()[:16]
-    folder = os.path.join(BASE or tempfile.gettempdir(), "%s-%d" % (MEDIA_DIR, os.getuid()), whose)
+    ours = hashlib.sha256(os.path.abspath(app.data_dir or "").encode("utf-8")).hexdigest()[:8]  # this extension's own
+    folder = os.path.join(BASE or tempfile.gettempdir(), "%s-%d-%s" % (MEDIA_DIR, os.getuid(), ours), whose)
+    try:
+        with _WRITING:
+            _own_folder(folder)  # and the tidy-up, whatever becomes of the fetch
+    except OSError as e:
+        raise MediaError(head + "\n存不到本机：%s。" % (e.strerror or type(e).__name__))
     lines: List[str] = [head]
     got = 0
     for i, m in enumerate(media):
@@ -142,6 +153,11 @@ def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]
     if not data:
         raise BackendError("飞书给回来的是空的", "unknown")
     mime = (mime or "application/octet-stream").split(";", 1)[0].strip().lower()
+    with _WRITING:
+        return _write(folder, stem, m, mime, data)
+
+
+def _write(folder: str, stem: str, m: dict, mime: str, data: bytes) -> Tuple[str, str, int]:
     _own_folder(folder)
     path = os.path.join(folder, stem + _ext(mime, str(m.get("name") or "")))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=".part-")
@@ -193,9 +209,9 @@ def _tidy(folder: str) -> None:
         return
     for n in names:
         p = os.path.join(parent, n)
-        if n == mine or not _ACCOUNT_DIR.match(n) or os.path.islink(p) or not os.path.isdir(p):
+        if n == mine or not _ACCOUNT_DIR.fullmatch(n) or os.path.islink(p) or not os.path.isdir(p):
             continue
-        shutil.rmtree(p, ignore_errors=True)
+        _remove_tree(p)
     old = time.time() - KEEP_SECONDS
     try:
         names = os.listdir(folder)
@@ -209,6 +225,31 @@ def _tidy(folder: str) -> None:
                 os.remove(p)
         except OSError:
             pass
+
+
+def _remove_tree(top: str) -> None:
+    """An account's folder before, whatever its modes: made writable first (it is this user's), then removed. What is
+    left (another user's file in it) is logged, not hidden."""
+    for d, subdirs, _ in os.walk(top):
+        for x in [d] + [os.path.join(d, s) for s in subdirs]:
+            try:
+                if not os.path.islink(x):
+                    os.chmod(x, 0o700)
+            except OSError:
+                pass
+    left = 0
+    for d, subdirs, files in os.walk(top, topdown=False):
+        for x in [os.path.join(d, f) for f in files] + [os.path.join(d, s) for s in subdirs]:
+            try:
+                os.rmdir(x) if os.path.isdir(x) and not os.path.islink(x) else os.remove(x)
+            except OSError:
+                left += 1
+    try:
+        os.rmdir(top)
+    except OSError:
+        left += 1
+    if left:
+        log.warning("matefeishu_media: %d old entries could not be removed", left)
 
 
 def _written(folder: str, stem: str) -> List[str]:
