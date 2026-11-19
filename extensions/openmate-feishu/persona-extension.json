@@ -17,7 +17,7 @@
         "id": "matefeishu",
         "name": "飞书（OpenMate）",
         "capabilities": ["status", "tools", "actions", "events", "inbox", "archive", "history", "login", "threads"],
-        "agent_tools": ["matefeishu_status", "matefeishu_chats", "matefeishu_messages", "matefeishu_search", "matefeishu_docs", "matefeishu_agent_reply", "matefeishu_starkmesh"],
+        "agent_tools": ["matefeishu_status", "matefeishu_chats", "matefeishu_messages", "matefeishu_search", "matefeishu_docs", "matefeishu_agent_reply", "matefeishu_starkmesh", "matefeishu_media"],
         "confirm_always": ["matefeishu_*"],
         "sends_as_user": true,
         "poll_seconds": 60,

@@ -39,12 +39,27 @@ def chat_kind(chat: Optional[dict]) -> str:
     return "dm" if chat and chat.get("kind") == "dm" else "group"
 
 
-def log_line(row: dict, tz, me: str = "我", mark: str = "") -> str:
-    """"MM-DD HH:MM name: text" (mine as me), for triage context and /agent context."""
+def log_line(row: dict, tz, me: str = "我", mark: str = "", media_tool: str = "") -> str:
+    """"MM-DD HH:MM name: text" (mine as me), for triage context and /agent context. With media_tool, a message with
+    a picture or file that can be fetched says how to see it ("[图片]（看图：matefeishu_media id=…）")."""
     who = "我" if row.get("mine") else sender_of(row, me)
     text = text_of(row).replace("\r", "")
     line = "%s %s: %s" % (local_stamp(row.get("at") or 0, tz), who, text)
-    return line + mark
+    return line + media_hint(row, media_tool) + mark
+
+
+_MEDIA_VERBS = {"image": "看图", "sticker": "看图", "video": "下载视频", "voice": "下载语音", "file": "下载文件"}
+
+
+def media_hint(row: dict, media_tool: str) -> str:
+    """"（看图：<tool> id=…）" for a message whose picture or file the tool can fetch; "" otherwise."""
+    if not media_tool or row.get("blocked"):
+        return ""
+    kinds = [str(m.get("kind") or "") for m in row.get("media") or [] if isinstance(m, dict) and m.get("ref")]
+    if not kinds:
+        return ""
+    verb = _MEDIA_VERBS.get(kinds[0], "下载附件") if len(set(kinds)) == 1 else "看图片和文件"
+    return "（%s：%s id=%s）" % (verb, media_tool, row.get("id") or "")
 
 
 def where(platform: str, chat: Optional[dict], chat_id: str) -> str:

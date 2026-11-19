@@ -266,7 +266,8 @@ def _row_line(app, r: dict, me: str) -> str:
         extra += " 回复=" + r["parent_id"]
     if r.get("root_id"):
         extra += " 话题=" + r["root_id"]
-    return "[%s] %s (id=%s%s)" % (r["position"], views.log_line(r, app.tz, me), r["id"], extra)
+    line = views.log_line(r, app.tz, me, media_tool=getattr(app.platform, "media_tool", "") or "")
+    return "[%s] %s (id=%s%s)" % (r["position"], line, r["id"], extra)
 
 
 SCAN_PAGE = 200  # messages read from the store (and asked of the service) at a time by a filtered read

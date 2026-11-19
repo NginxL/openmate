@@ -856,8 +856,14 @@ class AgentRunner:
         ] if self._can_send_images() else []) + [
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
             "- 下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c),
-        ])
+        ] + ([
+            "- 消息里的图片和文件用 %s 看（给消息 id，上下文里写着「看图：%s id=…」）：它只读，下载到本机后直接读文件；不要用 lark-cli 去找或下载。" % (
+                self._media_tool(), self._media_tool()),
+        ] if self._media_tool() else []))
         return _block("instructions", "/agent 说明", body)
+
+    def _media_tool(self) -> str:
+        return str(getattr(self.app.platform, "media_tool", "") or "")
 
     def build_prompt(self, run: dict, row: dict, prev: Optional[dict]) -> str:
         app = self.app
@@ -890,12 +896,14 @@ class AgentRunner:
                 rows = [r for r in rows if r["position"] > prev_row["position"]]
                 title = "上次请求之后的消息"
         rows = [r for r in rows if views.has_content(r) and r["position"] <= int(row["position"]) or r["id"] == row["id"]]
-        lines = [clip(views.log_line(r, tz, me, mark if r["id"] == row["id"] else ""), 2000) for r in rows]
+        guest = run.get("kind") in GUEST_KINDS  # someone else asked: only what the group itself said, nothing of mine
+        tool = "" if guest else self._media_tool()  # a guest has only the reply tool: no hint it cannot follow
+        lines = [clip(views.log_line(r, tz, me, mark if r["id"] == row["id"] else "", tool), 2000) for r in rows]
         quoted = store.message(chat_id, row["parent_id"]) if row.get("parent_id") else None
         tail: List[str] = []
         if quoted is not None:
-            tail.append(_block("context", "引用的消息", clip(views.log_line(quoted, tz, me), 4000) + "（id=%s）" % quoted["id"]))
-        guest = run.get("kind") in GUEST_KINDS  # someone else asked: only what the group itself said, nothing of mine
+            tail.append(_block("context", "引用的消息",
+                               clip(views.log_line(quoted, tz, me, media_tool=tool), 4000) + "（id=%s）" % quoted["id"]))
         if prev is None and not guest:
             kb = self._kb_context(chat_id)
             if kb:

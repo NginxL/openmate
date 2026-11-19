@@ -50,7 +50,15 @@ def platform(manifest_path: str = "") -> Platform:
         login_hint_expired="二维码过期了，已换一张新的，请重新扫码",
         ui_pages=_agenda_pages,
         legacy_blocked_texts=(DLP_BLOCKED_TEXT,),  # what told a blocked message before 0.11.29 stored the mark
+        tools=_media_tools,  # matefeishu_media: a message's pictures and files as local files (read-only)
+        media_tool=CONNECTOR_ID + "_media",
     )
+
+
+def _media_tools(app):
+    from .media import media_tools
+
+    return media_tools(app)
 
 
 def _agenda_pages(app):

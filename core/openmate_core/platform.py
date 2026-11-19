@@ -65,6 +65,10 @@ class Platform:
     today_api_callers: Tuple[str, ...] = ()
     #: the platform's own read tools: app → {tool name: (schema, run(arguments) → text)} (WeChat's matewechat_media)
     tools: Optional[Callable[[Any], Dict[str, Any]]] = None
+    #: the platform's read tool that fetches a message's pictures and files by its id (Feishu: matefeishu_media). The
+    #: chat lines models read (the messages tool, /agent's context) name it after each message that has some; ""
+    #: names nothing (WeChat writes its local paths into the text itself)
+    media_tool: str = ""
 
 
 @dataclass
