@@ -684,6 +684,17 @@ class PlacementTest(unittest.TestCase):
         ask(h, "/stop", parent_id=progress["id"], placement="chat")  # no thread to find it by: the quote does
         wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "stopped", what="stopped")
 
+    def test_a_stop_quoting_the_timeout_notice_in_the_main_stream(self):
+        h = Harness(self, config={"agent": True}, timing=fast(agent_timeout=0.5))
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        msg = ask(h, "/agent 很慢", placement="chat")
+        run = running(h, msg)
+        notice = wait_until(lambda: next((x for x in h.sent() if "不再等待" in x["text"]), None), timeout=5, what="notice")
+        self.assertEqual(self.where(notice), (msg.id, None, False))
+        wait_until(lambda: h.app.store.run_get(run["id"]).get("notice_id") == notice["id"], what="kept")
+        self.assertEqual(h.app.agent._target({"chat_id": msg.chat_id, "parent_id": notice["id"]})["id"], run["id"])
+
     def test_a_copy_is_never_a_command(self):
         h = self.make(agent_reply_header=" ", agent_reply_suffix=SUFFIX, agent_ack_reaction="", agent_auto=True)
         root, under = self.thread(h)
@@ -711,6 +722,11 @@ class PlacementTest(unittest.TestCase):
         self.assertEqual((row["placement"], row["root_id"]), ("thread_chat", "msg_example_r"), "the live reading wins")
         self.assertEqual(row["same_as"], "msg_example_s")
         self.assertEqual(h.app.store.message("chat_example_team", "msg_example_x")["root_id"], "", "the store's as it was")
+        h.app.store.add_messages([Message(id="msg_example_y", chat_id="chat_example_team", position=1000, mine=True,
+                                          text="y", parent_id="msg_example_q")], from_history=True)
+        (row,) = h.app.store.add_messages([Message(id="msg_example_y", chat_id="chat_example_team", position=1000,
+                                                   mine=True, text="y", placement="chat")], from_history=False)
+        self.assertEqual(row["parent_id"], "msg_example_q", "a live reading naming no quote keeps the stored one")
         self.assertNotIn("placement", h.app.store.message("chat_example_team", "msg_example_x"), "never stored")
 
     def test_unknown_placement_keeps_the_old_way(self):

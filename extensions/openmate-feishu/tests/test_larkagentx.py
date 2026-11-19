@@ -352,6 +352,8 @@ class MappingTest(Base):
         c = self.m(msg_id="108", _placement=copy, content_data=t)
         self.assertEqual((c.same_as, c.placement), ("101", "chat"), "the main stream's copy of a thread reply")
         self.assertEqual(self.m(_placement=sync, **thread).same_as, "", "the reply itself is no copy")
+        nameless = dict(copy, sync_related="")
+        self.assertEqual(self.m(msg_id="110", _placement=nameless, content_data=t).same_as, "110", "still a copy")
         for i in range(larkagentx.SYNCED_KEEP + 5):
             self.m(msg_id=str(1000 + i), _placement=sync, **thread)
         self.assertEqual(len(self.b._synced), larkagentx.SYNCED_KEEP, "only the newest are remembered")

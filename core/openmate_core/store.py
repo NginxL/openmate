@@ -150,10 +150,13 @@ def _message_row(r: sqlite3.Row) -> dict:
 
 def _live_row(r: sqlite3.Row, m: Message) -> dict:
     """A stored row as add_messages answers it: with the placement and same_as the backend read (not columns). A
-    placement comes with the thread and quote it was read with, which win over a row an older reading stored."""
+    placement comes with the thread it was read with, which wins over a row an older reading stored (and its quote,
+    when the live reading names one)."""
     d = _message_row(r)
     if m.placement:
-        d.update(placement=m.placement, root_id=m.root_id or "", thread_id=m.thread_id or "", parent_id=m.parent_id or "")
+        d.update(placement=m.placement, root_id=m.root_id or "", thread_id=m.thread_id or "")
+        if m.parent_id:
+            d["parent_id"] = m.parent_id
     if m.same_as:
         d["same_as"] = m.same_as
     return d

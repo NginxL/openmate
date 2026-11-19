@@ -1336,7 +1336,8 @@ class LarkXBackend(Backend):
         sender = _id(d.get("from_id"))
         placement = self._placement(d, chat_id, msg_id, in_thread, topic_root, bool(me_id) and sender == me_id, client)
         marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else {}
-        same_as = marks.get("sync_related", "") if marks.get("sync_type") == SYNC_TARGET else ""
+        # a copy in the main stream: of the reply it names, else of one it does not (still a copy, never a command)
+        same_as = (marks.get("sync_related") or msg_id) if marks.get("sync_type") == SYNC_TARGET else ""
         if sender and sender != me_id and _int(d.get("chat_type")) == CHAT_P2P:
             self._learn_peer(chat_id, sender)
         mentions = self._mentions(data)

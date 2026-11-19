@@ -1147,12 +1147,14 @@ class AgentRunner:
             self.store.run_put(cur)
         self._end_reaction(run_id, "failed")
         if notice:
-            self._post_once(cur, "agent:%s:timeout" % run_id,
-                            "等了 %s 还没有结果，不再等待。可以在 Persona 里打开这个会话看进度。" % _span(self.app.timing.agent_timeout),
-                            **self._where(cur))
+            mid = self._post_once(cur, "agent:%s:timeout" % run_id,
+                                  "等了 %s 还没有结果，不再等待。可以在 Persona 里打开这个会话看进度。" % _span(self.app.timing.agent_timeout),
+                                  **self._where(cur))
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
                 cur["timeout_notice"] = "done"  # the send journal says whether it went out (or may have)
+                if mid:
+                    cur["notice_id"] = mid  # a /stop quoting it finds the run (in the main stream there is no thread)
                 self.store.run_put(cur)
 
     def _fail(self, run_id: str, message: str) -> None:
@@ -1548,7 +1550,7 @@ class AgentRunner:
         if parent:
             for r in self.store.runs_in_chat(chat_id):
                 if (r["request_id"] == parent or parent in (r.get("reply_ids") or []) or parent == r.get("ack_id")
-                        or parent == r.get("progress_id")):  # the progress message too (in the main stream: no thread)
+                        or parent in (r.get("progress_id"), r.get("notice_id"))):  # in the main stream: no thread
                     return r
         root = row.get("root_id") or ""
         if root:
