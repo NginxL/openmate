@@ -108,7 +108,7 @@ class MediaToolTest(unittest.TestCase):
         h.app.store.meta_set("account_id", "")
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
-        self.assertIn("飞书还没登录", e.exception.message, "whose files these are must be known")
+        self.assertIn("正在恢复登录", e.exception.message, "whose files these are must be known")
 
     def test_the_account_before_is_tidied_even_by_a_failed_call_and_not_another_instance(self):
         h = signed(self)
@@ -319,10 +319,48 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("图片下载不了：附件不在了（可能已被撤回或过期）", e.exception.message)
-        h.app.creds = "absent"
+        h.app.creds = "none"
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("飞书还没登录", e.exception.message)
+
+    def test_a_page_instead_of_the_file_is_not_a_file(self):
+        h = signed(self)
+        m = h.world.push(TEAM, "user_example_a", "", type="FILE",
+                         media=[Media("file", ref="file:report", name="report.pdf", mime="application/pdf")])
+        stored(h, TEAM, m)
+        h.app.backend.media = lambda ref, most: ("text/html", b"<!DOCTYPE html><html>sign in</html>")
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=m.id)
+        self.assertIn("回答的是一个网页", e.exception.message)
+        page = h.world.push(TEAM, "user_example_a", "", type="FILE", media=[Media("file", ref="file:page", name="a.html")])
+        stored(h, TEAM, page)
+        self.assertIn(page.id + ".html", h.tool("media", message=page.id), "an HTML file sent as one is kept")
+
+    def test_why_it_cannot_fetch_now(self):
+        h = signed(self)
+        row = picture_row(h)
+        h.app.link = "connecting"  # credentials kept, the session not back yet
+
+        def restoring(ref, most):
+            raise BackendError("还没有登录飞书", "expired")
+
+        h.app.backend.media = restoring
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=row["id"])
+        self.assertIn("正在恢复登录", e.exception.message)
+        h.app.creds = "loading"
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=row["id"])
+        self.assertIn("正在恢复登录", e.exception.message)
+        h.app.setup_error = "LarkAgentX 的 Python 不对"
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=row["id"])
+        self.assertIn("飞书扩展有问题，下载不了：LarkAgentX 的 Python 不对", e.exception.message)
+        h.app.setup_error, h.app.creds = "", "none"
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=row["id"])
+        self.assertIn("扫码登录", e.exception.message)
 
     def test_an_expired_sign_in_is_said(self):
         h = signed(self)
