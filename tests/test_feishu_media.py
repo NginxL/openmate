@@ -78,16 +78,13 @@ class MediaToolTest(unittest.TestCase):
         with open(path, "rb") as f:
             self.assertTrue(f.read().startswith(PNG))
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(os.stat(folder_of(h)).st_mode & 0o777), oct(0o700))
         self.assertEqual(calls, [("img:example-1", 25 << 20)], "through media(ref, max_bytes), 25 MB at most")
-        # the kept copy, unless again; the chat may be named
+        # every call fetches again, as the account signed in now; the chat may be named
         self.assertIn(path, h.tool("media", message=row["id"], chat=DM))
-        self.assertEqual(len(calls), 1)
-        self.assertIn(path, h.tool("media", message=row["id"], again=True))
-        self.assertEqual(len(calls), 2)
-        self.assertIn(path, h.tool("media", id=row["id"]), "the hint's own word for it works too")
         self.assertEqual(len(calls), 2)
 
-    def test_another_account_never_gets_the_copies_kept(self):
+    def test_each_account_writes_its_own_and_fetches_as_itself(self):
         h = signed(self)
         row = picture_row(h)
         calls = counting(h)
@@ -99,49 +96,58 @@ class MediaToolTest(unittest.TestCase):
         h.app.store.meta_set("account_id", "")
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
-        self.assertIn("飞书还没登录", e.exception.message, "whose copies these are must be known")
+        self.assertIn("飞书还没登录", e.exception.message, "whose files these are must be known")
 
-    def test_again_keeps_the_old_copy_until_the_new_one_is_in(self):
+    def test_a_failed_write_or_an_empty_answer_leaves_the_file_before(self):
         h = signed(self)
         row = picture_row(h)
         path = os.path.join(folder_of(h), row["id"] + ".png")
         h.tool("media", message=row["id"])
-
-        def down(ref, most):
-            raise BackendError("连不上飞书", "unreachable")
-
-        h.app.backend.media = down
+        h.app.backend.media = lambda ref, most: ("image/png", b"")
         with self.assertRaises(HubSideError) as e:
-            h.tool("media", message=row["id"], again=True)
-        self.assertIn("图片下载不了：连不上飞书", e.exception.message)
-        self.assertTrue(os.path.isfile(path), "the copy kept before is still there")
-        self.assertIn(path, h.tool("media", message=row["id"]))
+            h.tool("media", message=row["id"])
+        self.assertIn("图片下载不了：飞书给回来的是空的", e.exception.message)
+        from openmate_feishu import media as fm
 
-    def test_a_kept_copy_is_told_by_its_bytes_and_never_a_link(self):
+        h.app.backend.media = lambda ref, most: ("image/png", PNG + b"new")
+        real = fm.os.replace
+
+        def broken(a, b):
+            raise OSError(28, "No space left on device")
+
+        fm.os.replace = broken
+        try:
+            with self.assertRaises(HubSideError) as e:
+                h.tool("media", message=row["id"])
+        finally:
+            fm.os.replace = real
+        self.assertIn("存不到本机", e.exception.message)
+        with open(path, "rb") as f:
+            self.assertFalse(f.read().endswith(b"new"), "the file before is whole")
+        self.assertEqual([n for n in os.listdir(folder_of(h)) if n.startswith(".part-")], [], "no partial left")
+
+    def test_never_written_through_a_link(self):
         h = signed(self)
-        m = h.world.push(TEAM, "user_example_a", "", type="FILE",
-                         media=[Media("file", ref="file:memo", name="memo.jpg", mime="application/pdf")])
-        stored(h, TEAM, m)
-        h.app.backend.media = lambda ref, most: ("application/pdf", b"%PDF-1.4 example")
-        first = h.tool("media", message=m.id)
-        again = h.tool("media", message=m.id)  # the kept copy: named .jpg, but not a picture
-        for text in (first, again):
-            self.assertIn("application/pdf", text)
-            self.assertNotIn("看图", text)
-        # a link put where a copy would be is not handed out
-        n = h.world.push(TEAM, "user_example_a", "", type="FILE", media=[Media("file", ref="file:spec", name="a.txt")])
-        stored(h, TEAM, n)
-        folder = folder_of(h)
-        outside = os.path.join(h.data_dir, "outside.txt")
-        with open(outside, "w") as f:
-            f.write("not this")
-        os.symlink(outside, os.path.join(folder, n.id + ".txt"))
-        h.app.backend.media = lambda ref, most: ("text/plain", b"the real one")
-        text = h.tool("media", message=n.id)
-        with open(os.path.join(folder, n.id + ".txt")) as f:
-            self.assertEqual(f.read(), "the real one")
-        self.assertFalse(os.path.islink(os.path.join(folder, n.id + ".txt")))
-        self.assertIn(n.id + ".txt", text)
+        row = picture_row(h)
+        elsewhere = os.path.join(h.data_dir, "elsewhere")
+        os.makedirs(elsewhere)
+        os.makedirs(os.path.join(h.data_dir, "media"))
+        os.symlink(elsewhere, folder_of(h))
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=row["id"])
+        self.assertIn("存不到本机", e.exception.message)
+        self.assertEqual(os.listdir(elsewhere), [])
+        # a link where the file goes is replaced by the file itself, not followed
+        os.remove(folder_of(h))
+        os.makedirs(folder_of(h))
+        outside = os.path.join(elsewhere, "outside.png")
+        with open(outside, "wb") as f:
+            f.write(b"not this")
+        os.symlink(outside, os.path.join(folder_of(h), row["id"] + ".png"))
+        h.tool("media", message=row["id"])
+        self.assertFalse(os.path.islink(os.path.join(folder_of(h), row["id"] + ".png")))
+        with open(outside, "rb") as f:
+            self.assertEqual(f.read(), b"not this")
 
     def test_a_file_keeps_its_extension_and_name(self):
         h = signed(self)
@@ -189,6 +195,10 @@ class MediaToolTest(unittest.TestCase):
         self.assertIn("消息 id 不对", e.exception.message)
         self.assertNotIn("passwd", e.exception.message, "what was given is not echoed (a ref has its key in it)")
         with self.assertRaises(HubSideError) as e:
+            h.tool("media", message="img_v3_example_key")
+        self.assertIn("本地没有这条飞书消息", e.exception.message)
+        self.assertNotIn("img_v3", e.exception.message, "a resource key given by mistake is not echoed")
+        with self.assertRaises(HubSideError) as e:
             h.tool("media", message="")
         self.assertIn("缺少消息 id", e.exception.message)
         blocked = h.world.push(TEAM, "user_example_a", "", type="IMAGE", blocked=True,
@@ -214,7 +224,7 @@ class MediaToolTest(unittest.TestCase):
             h.tool("media", message=row["id"])
         self.assertIn("飞书还没登录", e.exception.message)
 
-    def test_an_expired_sign_in_is_said_even_with_a_kept_copy(self):
+    def test_an_expired_sign_in_is_said(self):
         h = signed(self)
         row = picture_row(h)
         h.tool("media", message=row["id"])

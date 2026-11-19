@@ -1,8 +1,11 @@
 """matefeishu_media: the pictures and files of one Feishu message, fetched through the backend's media(ref) into the
 extension's data directory (media/), as local paths a model can read. Read-only: nothing is sent, nothing in Feishu
 changes. What it prints is the message's line, each file's local path, type and size, or why a file is not there;
-never the ref (its resource key) nor anything of the session. The kept copies are the signed-in account's own
-(media/<account>/): another account signed in later never gets them, it fetches as itself."""
+never the ref (its resource key) nor anything of the session.
+
+Every call fetches again, as the account signed in now: Feishu decides what that account may see, and a copy kept
+for an account signed in before (a restart in the middle of a switch) is never handed out. The files are written
+into media/<a hash of the store's account>/, replacing the one written for the same message before."""
 
 from __future__ import annotations
 
@@ -11,7 +14,7 @@ import mimetypes
 import os
 import re
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from openmate_core import views
 from openmate_core.backend import BackendError
@@ -28,10 +31,8 @@ _EXTS = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/
          "audio/ogg": ".ogg", "audio/opus": ".opus", "audio/mpeg": ".mp3", "text/plain": ".txt",
          "application/pdf": ".pdf"}
 _REASONS = {  # the backend's words say what happened; these say what it means for the one who asked
-    "not_found": "",
     "too_large": "，在飞书里打开看",
     "rejected": "，这个账号看不到它",
-    "unknown": "",
 }
 
 
@@ -43,15 +44,14 @@ def media_tools(app) -> Dict:
     """{matefeishu_media: (schema, run)} for Platform.tools."""
     schema = {
         "name": MEDIA_TOOL,
-        "description": "看一条飞书消息里的图片或文件（也包括表情、视频、语音）：下载到本机（%d MB 以内），返回本地文件路径、"
-                       "类型和大小，图片可以直接读这个文件看图。消息 id 来自 matefeishu_messages 或 /agent 上下文里"
-                       "「看图：matefeishu_media message=…」的提示。下载不了时说明原因（没有图片或文件、已撤回或过期、超过大小上限、"
-                       "飞书没登录等），如实转告，不要猜内容。只读，不会发任何消息，也不改飞书里的任何东西；不要用 lark-cli 去下载。"
-                       % (MEDIA_MOST >> 20),
+        "description": "看一条飞书消息里的图片或文件（也包括表情、视频、语音）：以现在登录的账号下载到本机（%d MB 以内），"
+                       "返回本地文件路径、类型和大小，图片可以直接读这个文件看图。消息 id 来自 matefeishu_messages，或 /agent "
+                       "上下文里「看图：matefeishu_media message=…」的提示。下载不了时说明原因（没有图片或文件、已撤回或过期、"
+                       "超过大小上限、飞书没登录等），如实转告，不要猜内容。只读，不会发任何消息，也不改飞书里的任何东西；"
+                       "不要用 lark-cli 去下载。" % (MEDIA_MOST >> 20),
         "input_schema": {"type": "object", "properties": {
             "message": {"type": "string", "description": "消息 id（matefeishu_messages 每行的 id=…，或「看图：matefeishu_media message=…」里的）"},
-            "chat": {"type": "string", "description": "这条消息所在的会话 id，可选"},
-            "again": {"type": "boolean", "description": "重新下载（本地副本被清理了，或上次的不对），默认 false"}},
+            "chat": {"type": "string", "description": "这条消息所在的会话 id，可选"}},
             "required": ["message"]},
     }
 
@@ -59,25 +59,25 @@ def media_tools(app) -> Dict:
         from openmate_core.wire import RPCError
 
         try:
-            mid = str(a.get("message") or a.get("id") or "").strip()  # id: as a hint's "id=…" may be read
-            return fetch(app, mid, str(a.get("chat") or "").strip(), bool(a.get("again")))
+            return fetch(app, str(a.get("message") or "").strip(), str(a.get("chat") or "").strip())
         except MediaError as e:
             raise RPCError(str(e))
 
     return {MEDIA_TOOL: (schema, run)}
 
 
-def fetch(app, mid: str, chat_id: str = "", again: bool = False) -> str:
+def fetch(app, mid: str, chat_id: str = "") -> str:
     if not mid:
         raise MediaError("缺少消息 id（matefeishu_messages 每行的 id=…）")
-    if not _ID.match(mid):
-        raise MediaError("消息 id 不对：飞书消息 id 是一串数字（用 matefeishu_messages 每行的 id=…）")  # not echoed
+    if not _ID.match(mid):  # not echoed: what was given may be a ref, with its key in it
+        raise MediaError("消息 id 不对：飞书消息 id 是一串数字（用 matefeishu_messages 每行的 id=…）")
     store = app.store
     if store is None:
         raise MediaError("扩展还在启动，请稍后再试")
     row = store.message(chat_id, mid) if chat_id else store.find_message(mid)
     if row is None:
-        raise MediaError("本地没有这条飞书消息：%s。先用 matefeishu_messages 读它所在的会话，再用那里给出的 id。" % mid)
+        raise MediaError("本地没有这条飞书消息%s。先用 matefeishu_messages 读它所在的会话，再用那里给出的 id。"
+                         % ("：" + mid if mid.isdigit() else ""))
     head = "消息 id=%s：%s" % (mid, views.log_line(row, app.tz, app.me_name()).replace("\n", " ")[:300])
     if row.get("blocked"):
         raise MediaError(head + "\n飞书的安全策略拦下了这条消息，图片和文件都看不到。")
@@ -101,7 +101,7 @@ def fetch(app, mid: str, chat_id: str = "", again: bool = False) -> str:
             continue
         stem = mid if i == 0 else "%s-%d" % (mid, i)
         try:
-            path, mime, size = _local(folder, stem, m, backend, again)
+            path, mime, size = _fetch_one(folder, stem, m, backend)
         except BackendError as e:
             lines.append("%s下载不了：%s%s。" % (word, e.message, _REASONS.get(e.kind, "")))
             continue
@@ -121,32 +121,30 @@ def fetch(app, mid: str, chat_id: str = "", again: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _local(folder: str, stem: str, m: dict, backend, again: bool) -> Tuple[str, str, int]:
-    """(path, mime, size) of the file kept for this media, fetched first when there is none (or again)."""
-    if not again:
-        kept = _kept(folder, stem)
-        if kept is not None:
-            return kept, _mime_of(kept, m), os.path.getsize(kept)
+def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]:
+    """(path, mime, size): the media fetched now and written in place of the one written for it before."""
     mime, data = backend.media(str(m["ref"]), MEDIA_MOST)
     data = bytes(data or b"")
     if len(data) > MEDIA_MOST:
         raise BackendError("附件超过 %d MB" % (MEDIA_MOST >> 20), "too_large")
+    if not data:
+        raise BackendError("飞书给回来的是空的", "unknown")
     mime = (mime or "application/octet-stream").split(";", 1)[0].strip().lower()
-    os.makedirs(folder, mode=0o700, exist_ok=True)
+    _own_folder(folder)
     path = os.path.join(folder, stem + _ext(mime, str(m.get("name") or "")))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=".part-")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, path)  # a reader of the old copy keeps it whole; a failed write leaves the old one
+        os.replace(tmp, path)  # a reader of the one before keeps it whole; a failed write leaves it as it was
     except BaseException:
         try:
             os.remove(tmp)
         except OSError:
             pass
         raise
-    for old in _all_kept(folder, stem):  # again: a copy of another type is gone only once the new one is in place
+    for old in _written(folder, stem):  # the one before, of another type now: gone once this one is in place
         if old != path:
             try:
                 os.remove(old)
@@ -155,7 +153,16 @@ def _local(folder: str, stem: str, m: dict, backend, again: bool) -> Tuple[str, 
     return path, mime, len(data)
 
 
-def _all_kept(folder: str, stem: str) -> List[str]:
+def _own_folder(folder: str) -> None:
+    """media/ and media/<account>/ as real directories of the data directory, never through a link."""
+    parent = os.path.dirname(folder)
+    for d in (parent, folder):
+        if os.path.islink(d):
+            raise OSError(0, "%s 是一个链接，不往那里写" % os.path.basename(d))
+        os.makedirs(d, mode=0o700, exist_ok=True)
+
+
+def _written(folder: str, stem: str) -> List[str]:
     try:
         names = sorted(os.listdir(folder))
     except OSError:
@@ -163,53 +170,11 @@ def _all_kept(folder: str, stem: str) -> List[str]:
     return [os.path.join(folder, n) for n in names if os.path.splitext(n)[0] == stem and not n.startswith(".")]
 
 
-def _kept(folder: str, stem: str) -> Optional[str]:
-    for p in _all_kept(folder, stem):
-        if not os.path.islink(p) and os.path.isfile(p) and os.path.getsize(p) > 0:  # only a file this tool wrote
-            return p
-    return None
-
-
 def _ext(mime: str, name: str) -> str:
     own = os.path.splitext(os.path.basename(name))[1]
     if _EXT.match(own):
         return own.lower()
     return _EXTS.get(mime) or mimetypes.guess_extension(mime) or ".bin"
-
-
-def _mime_of(path: str, m: dict) -> str:
-    """A kept copy's type: a picture by its bytes (as the backend tells one), anything else by its message, never a
-    picture by its name alone."""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(16)
-    except OSError:
-        head = b""
-    picture = _sniff(head)
-    if picture:
-        return picture
-    mime = str(m.get("mime") or "") or mimetypes.guess_type(path)[0] or "application/octet-stream"
-    return "application/octet-stream" if mime.startswith("image/") else mime
-
-
-def _sniff(b: bytes) -> str:
-    if b.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if b.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if b[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
-        return "image/webp"
-    if b[:2] == b"BM":
-        return "image/bmp"
-    if b[4:8] == b"ftyp" and b[8:12] in (b"heic", b"heix", b"mif1", b"msf1"):
-        return "image/heic"
-    if b[4:8] == b"ftyp" and b[8:12] == b"avif":
-        return "image/avif"
-    if b[:4] in (b"II*\x00", b"MM\x00*"):
-        return "image/tiff"
-    return ""
 
 
 def _word(m: dict) -> str:
