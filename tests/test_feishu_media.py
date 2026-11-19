@@ -20,6 +20,12 @@ PNG = b"\x89PNG\r\n\x1a\n"
 
 def signed(test):
     h = Harness(test)
+    from openmate_feishu import media as fm
+
+    old = fm.BASE
+    fm.BASE = os.path.join(h.data_dir, "tmp")  # this test's own temporary directory
+    os.makedirs(fm.BASE)
+    test.addCleanup(setattr, fm, "BASE", old)
     h.sign_in()
     wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
     return h
@@ -35,7 +41,7 @@ def stored(h, chat, msg):
 
 def folder_of(h):
     whose = hashlib.sha256(("openmate-feishu:" + h.app.store.meta_get("account_id")).encode()).hexdigest()[:16]
-    return os.path.join(h.data_dir, "media", whose)
+    return os.path.join(h.data_dir, "tmp", "openmate-feishu-media-%d" % os.getuid(), whose)
 
 
 def counting(h):
@@ -63,10 +69,11 @@ class MediaToolTest(unittest.TestCase):
             manifest = json.load(f)
         self.assertIn(CID + "_media", manifest["contributes"]["connectors"][0]["agent_tools"], "the Agent gets it too")
 
-    def test_a_picture_is_fetched_into_the_data_directory(self):
+    def test_a_picture_is_fetched_into_a_private_temporary_directory(self):
         h = signed(self)
         row = picture_row(h)
         calls = counting(h)
+        os.makedirs(os.path.dirname(folder_of(h)), 0o755)  # made before, open to others: closed again
         text = h.tool("media", message=row["id"])
         path = os.path.join(folder_of(h), row["id"] + ".png")
         self.assertIn("图片 本地文件：" + path, text)
@@ -79,6 +86,8 @@ class MediaToolTest(unittest.TestCase):
             self.assertTrue(f.read().startswith(PNG))
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
         self.assertEqual(oct(os.stat(folder_of(h)).st_mode & 0o777), oct(0o700))
+        self.assertEqual(oct(os.stat(os.path.dirname(folder_of(h))).st_mode & 0o777), oct(0o700))
+        self.assertNotIn(os.path.join(h.data_dir, "media"), text, "not the extension's data (the agent sandbox closes it)")
         self.assertEqual(calls, [("img:example-1", 25 << 20)], "through media(ref, max_bytes), 25 MB at most")
         # every call fetches again, as the account signed in now; the chat may be named
         self.assertIn(path, h.tool("media", message=row["id"], chat=DM))
@@ -131,11 +140,12 @@ class MediaToolTest(unittest.TestCase):
         row = picture_row(h)
         elsewhere = os.path.join(h.data_dir, "elsewhere")
         os.makedirs(elsewhere)
-        os.makedirs(os.path.join(h.data_dir, "media"))
+        os.makedirs(os.path.dirname(folder_of(h)))
         os.symlink(elsewhere, folder_of(h))
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("存不到本机", e.exception.message)
+        self.assertIn("不是一个目录", e.exception.message)
         self.assertEqual(os.listdir(elsewhere), [])
         # a link where the file goes is replaced by the file itself, not followed
         os.remove(folder_of(h))
@@ -168,7 +178,7 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=m.id)
         self.assertIn("超过 25 MB", e.exception.message)
-        folder = os.path.join(h.data_dir, "media")
+        folder = os.path.dirname(folder_of(h))
         self.assertFalse(os.path.isdir(folder) and os.listdir(folder), "nothing kept")
         # a backend that hands back more than it was allowed is held to the limit too
         h.app.backend.media = lambda ref, most: ("application/zip", b"\0" * (most + 1))
@@ -182,6 +192,11 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=text_msg["id"])
         self.assertIn("没有图片或文件", e.exception.message)
+        undecoded = h.world.push(TEAM, "user_example_a", "", type="IMAGE")  # Feishu said IMAGE, its content not read
+        stored(h, TEAM, undecoded)
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=undecoded.id)
+        self.assertIn("没有留下下载信息", e.exception.message)
         no_ref = h.world.push(TEAM, "user_example_a", "", type="IMAGE", media=[Media("image")])
         stored(h, TEAM, no_ref)
         with self.assertRaises(HubSideError) as e:
