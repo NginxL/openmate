@@ -426,7 +426,8 @@ class FixtureBackend(Backend):
 
     # writes
 
-    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+             to_chat: bool = False) -> str:
         w = self.world
         if w.send_delay:
             time.sleep(w.send_delay)
@@ -441,7 +442,8 @@ class FixtureBackend(Backend):
             raise SendRejected("没有这个会话")
         m = w.push(chat_id, "me", text, parent_id=reply_to or "", root_id=root or "")
         with w.lock:
-            w.sent.append({"chat": chat_id, "text": text, "reply_to": reply_to, "root": root, "id": m.id})
+            w.sent.append({"chat": chat_id, "text": text, "reply_to": reply_to, "root": root, "to_chat": to_chat,
+                           "id": m.id})
         return m.id
 
     @property

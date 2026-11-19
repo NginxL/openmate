@@ -579,6 +579,112 @@ class ReceiptsAndProgressTest(unittest.TestCase):
         wait_until(lambda: "✅ 已完成" in h.sent()[0]["text"], what="the progress message closed")
         self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "DONE")])
 
+class PlacementTest(unittest.TestCase):
+    """A /agent reply goes back where it was asked, as the backend read the request (Message.placement): only in a
+    thread, in a thread and also in the main stream, or in the main stream; its progress message too, edited in place
+    wherever it is."""
+
+    def make(self, **cfg):
+        config = {"agent": True}
+        config.update(cfg)
+        h = Harness(self, config=config)
+        h.sign_in()
+        wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
+        return h
+
+    def thread(self, h):
+        """A root in the team group with a reply under it (the request quotes that reply)."""
+        root = h.world.push("chat_example_team", "user_example_a", "[图片]", type="IMAGE")
+        under = h.world.push("chat_example_team", "user_example_b", "还有货啊", root_id=root.id, thread_id=root.id,
+                             parent_id=root.id, placement="thread")
+        return root, under
+
+    def where(self, sent):
+        return sent["reply_to"], sent["root"], sent.get("to_chat", False)
+
+    def progress_answer_and_where(self, h, msg):
+        """Progress twice (one message, edited in place), then the answer: where each went."""
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="第一步：看图", progress=True)
+        first = h.sent()[-1]
+        out = h.tool("agent_reply", request=run["id"], text="第二步：查规格", progress=True)
+        self.assertIn("原地编辑", out)
+        self.assertEqual(len(h.sent()), 1, "edited, not sent again")
+        self.assertEqual(h.world.edits[-1][:2], ("chat_example_team", first["id"]))
+        self.assertIn("第二步：查规格", h.sent()[0]["text"])
+        h.tool("agent_reply", request=run["id"], text="是一台裸金属实例")
+        self.assertEqual(len(h.sent()), 2)
+        self.assertIn("✅ 已完成", h.sent()[0]["text"], "the progress message, edited where it is")
+        self.assertEqual(h.world.edits[-1][1], first["id"])
+        return run, [self.where(x) for x in h.sent()]
+
+    def test_only_in_the_thread_goes_back_to_the_thread(self):
+        h = self.make()
+        root, under = self.thread(h)
+        msg = ask(h, "/agent 这个是什么货", root_id=root.id, thread_id=root.id, parent_id=under.id, placement="thread")
+        run, places = self.progress_answer_and_where(h, msg)
+        self.assertEqual(run["placement"], "thread")
+        self.assertEqual(places, [(msg.id, root.id, False)] * 2)
+        self.assertIn("回复会以我的身份发到这个话题里，", started(h)["body"]["prompt"])
+
+    def test_in_the_thread_and_the_chat_goes_back_to_both(self):
+        h = self.make()
+        root, under = self.thread(h)
+        msg = ask(h, "/agent 这个是什么货", root_id=root.id, thread_id=root.id, parent_id=under.id,
+                  placement="thread_chat")
+        run, places = self.progress_answer_and_where(h, msg)
+        self.assertEqual(run["placement"], "thread_chat")
+        self.assertEqual(places, [(msg.id, root.id, True)] * 2, "into the thread, also to the chat, quoting the request")
+        self.assertIn("回复会以我的身份发到这个话题里，同时也发到群里", started(h)["body"]["prompt"])
+
+    def test_in_the_main_stream_quotes_it_there(self):
+        h = self.make()
+        root, under = self.thread(h)
+        msg = ask(h, "/agent 这个是什么货", parent_id=under.id, placement="chat")  # a quote in the main stream
+        run, places = self.progress_answer_and_where(h, msg)
+        self.assertEqual(places, [(msg.id, None, False)] * 2, "no thread opened on the request: a quote in the chat")
+        self.assertIn("回复会以我的身份引用这条请求发到群里", started(h)["body"]["prompt"])
+        plain = ask(h, "/agent 再问一句", placement="chat")
+        run2 = running(h, plain)
+        h.tool("agent_reply", request=run2["id"], text="好的")
+        self.assertEqual(self.where(h.sent()[-1]), (plain.id, None, False))
+
+    def test_the_run_s_own_notices_go_there_too(self):
+        h = self.make(agent_reply_header=" ", agent_reply_suffix=SUFFIX, agent_ack_reaction="")
+        root, under = self.thread(h)
+        msg = ask(h, "/agent 停下", root_id=root.id, thread_id=root.id, parent_id=under.id, placement="thread_chat")
+        run = running(h, msg)
+        h.http.add(run["session_id"], "assistant", "text", "做到一半")
+        h.http.add(run["session_id"], "system", "notice", "已中断")
+        h.http.end_turn(run["session_id"])
+        notice = wait_until(lambda: next((x for x in h.sent() if "已在 Persona 里停止" in x["text"]), None), what="notice")
+        self.assertEqual(self.where(notice), (msg.id, root.id, True))
+        main = ask(h, "/agent 主界面", placement="chat")
+        run2 = running(h, main)
+        h.http.add(run2["session_id"], "assistant", "text", "主界面的答案")
+        h.http.end_turn(run2["session_id"])
+        answer = wait_until(lambda: next((x for x in h.sent() if "主界面的答案" in x["text"]), None), what="fallback")
+        self.assertEqual(self.where(answer), (main.id, None, False), "the fallback answer too")
+
+    def test_a_stop_is_answered_where_it_was_said(self):
+        h = self.make(agent_reply_header=" ", agent_reply_suffix=SUFFIX, agent_ack_reaction="")
+        root, under = self.thread(h)
+        msg = ask(h, "/agent 慢慢做", root_id=root.id, thread_id=root.id, parent_id=under.id, placement="thread_chat")
+        running(h, msg)
+        stop = ask(h, "/stop", root_id=root.id, thread_id=root.id, parent_id=msg.id, placement="thread_chat")
+        said = wait_until(lambda: next((x for x in h.sent() if "已停止" in x["text"]), None), what="the /stop answer")
+        self.assertEqual(self.where(said), (stop.id, root.id, True))
+
+    def test_unknown_placement_keeps_the_old_way(self):
+        h = self.make()
+        msg = ask(h, "/agent 不知道在哪")  # a backend that reads no placement (WeChat, a direct chat)
+        run = running(h, msg)
+        self.assertEqual(run["placement"], "")
+        h.tool("agent_reply", request=run["id"], text="好的")
+        self.assertEqual(self.where(h.sent()[-1]), (msg.id, msg.id, False))
+        self.assertIn("回复会以我的身份发到这个话题里，", started(h)["body"]["prompt"])
+
+
 class TimeoutRestartTest(unittest.TestCase):
     def test_timeout(self):
         h = agent(self, timing=fast(agent_timeout=0.5))

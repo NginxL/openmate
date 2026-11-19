@@ -44,6 +44,10 @@ class Message:
     back. root_id is the thread (topic) root the message is in ("" outside a thread); parent_id is the message it quotes
     or replies to. mine: sent by the signed-in account. at_me: it @-mentions the signed-in account (an @all alone is
     at_all, not at_me). type is upper case: TEXT, POST, IMAGE, FILE, STICKER, AUDIO, VIDEO, CARD, SYSTEM…
+    placement: where a group message shows, as the service says it when it is read: "thread" (only in the thread on
+    root_id), "thread_chat" (in that thread and also in the chat's main stream), "chat" (in the main stream, quoting
+    or not); "" when the backend cannot tell (a direct chat, a thread-first group). A /agent reply goes back there.
+    It is not stored: only a live read hands it on (the core's rows of new messages carry it).
     """
 
     id: str
@@ -62,6 +66,7 @@ class Message:
     at_all: bool = False
     media: List[Media] = field(default_factory=list)
     blocked: bool = False
+    placement: str = ""
 
 
 @dataclass
@@ -361,10 +366,13 @@ class Backend(abc.ABC):
     # writes (the core calls them only after the user agreed: a confirmed action, an inbox Send, a /agent reply)
 
     @abc.abstractmethod
-    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+             to_chat: bool = False) -> str:
         """Send text as the account and return the new message's id. reply_to: the message it answers (quoted);
-        root: the thread to post in (reply_to == root with no thread yet: open a thread on that message). Raise
-        SendRejected only when it surely did not go out."""
+        root: the thread to post in (reply_to == root with no thread yet: open a thread on that message). to_chat:
+        into root's thread and also into the chat's main stream, quoting reply_to (the core passes it only when true,
+        and only for a message the backend read as "thread_chat"). Raise SendRejected only when it surely did not go
+        out."""
 
     @abc.abstractmethod
     def create_chat(self, user_id: str) -> str:

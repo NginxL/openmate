@@ -148,6 +148,14 @@ def _message_row(r: sqlite3.Row) -> dict:
     return d
 
 
+def _live_row(r: sqlite3.Row, m: Message) -> dict:
+    """A stored row as add_messages answers it: with the placement the backend read (not a column)."""
+    d = _message_row(r)
+    if m.placement:
+        d["placement"] = m.placement
+    return d
+
+
 def _chat_row(r: sqlite3.Row) -> dict:
     d = dict(r)
     d["topic"] = bool(d["topic"])
@@ -451,7 +459,8 @@ class Store:
         """Store messages not stored yet (by chat and id). A later copy only renews the text and type when it reads
         otherwise (an edit, or a better reading by a newer version). Answers the new rows, and, for a live copy of a
         message a history read stored first, that row once (its first live delivery, claimed here: from_history
-        turns 0), so a command or an @me read in by a catch-up before its push still reaches /agent."""
+        turns 0), so a command or an @me read in by a catch-up before its push still reaches /agent. An answered row
+        also has the message's placement when the backend read one (never stored: /agent keeps it with its run)."""
         now = now or time.time()
 
         def run(db):
@@ -506,7 +515,7 @@ class Store:
                         r = db.execute("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ?",
                                        (m.chat_id, m.id)).fetchone()
                         if r is not None:
-                            new.append(_message_row(r))  # its first live delivery
+                            new.append(_live_row(r, m))  # its first live delivery
                     continue
                 if (m.type or "").upper() != "SYSTEM":
                     db.execute(
@@ -515,7 +524,7 @@ class Store:
                         (m.chat_id, now, float(m.at or 0)),
                     )
                 r = db.execute("SELECT " + _MESSAGE_COLUMNS + " FROM messages WHERE seq = ?", (cur.lastrowid,)).fetchone()
-                new.append(_message_row(r))
+                new.append(_live_row(r, m))
             return new
 
         return self._tx(run)

@@ -321,6 +321,30 @@ class MappingTest(Base):
         self.assertEqual((topic_root.root_id, topic_root.thread_id), ("", "101"))
         self.assertEqual(self.m(root_id="0", parent_id="0", content_data=t).root_id, "")
 
+    def test_where_a_message_shows(self):
+        from larkx._fake import text_data
+
+        t = text_data("x")
+        thread = dict(root_id="90", parent_id="95", anchor="90", scope="topic", content_data=t)
+        self.assertEqual(self.m(**thread).placement, "thread", "a reply only in the thread")
+        sync = {"thread_type": 2, "send_to_chat": False, "sync_type": 2, "sync_related": "96", "sync_root": "90"}
+        self.assertEqual(self.m(_placement=sync, **thread).placement, "thread_chat", "also sent to the chat")
+        old = {"thread_type": 2, "send_to_chat": True, "sync_type": 0, "sync_related": "", "sync_root": ""}
+        self.assertEqual(self.m(msg_id="102", _placement=old, **thread).placement, "thread_chat", "the older mark")
+        self.assertEqual((self.b._synced["101"], self.b._synced["102"]), ("sync", "send"), "how: a reply copies it")
+        alone = {"thread_type": 2, "send_to_chat": False, "sync_type": 0, "sync_related": "", "sync_root": ""}
+        self.assertEqual(self.m(msg_id="103", _placement=alone, **thread).placement, "thread")
+        self.assertNotIn("103", self.b._synced)
+        quote = self.m(root_id="90", parent_id="95", anchor="104", scope="topic", msg_id="104", content_data=t)
+        self.assertEqual(quote.placement, "chat", "a quote in the main stream")
+        self.assertEqual(self.m(content_data=t).placement, "chat", "a plain group message")
+        self.assertEqual(self.m(chat_type=1, root_id="90", anchor="90", content_data=t).placement, "", "a direct chat")
+        self.assertEqual(self.m(scope="topic", anchor="101", content_data=t).placement, "", "a thread-first group's root")
+        for i in range(larkagentx.SYNCED_KEEP + 5):
+            self.m(msg_id=str(1000 + i), _placement=sync, **thread)
+        self.assertEqual(len(self.b._synced), larkagentx.SYNCED_KEEP, "only the newest are remembered")
+        self.assertIn(str(1000 + larkagentx.SYNCED_KEEP + 4), self.b._synced)
+
     def test_positions_always_grow(self):
         from larkx._fake import text_data
 
@@ -517,6 +541,25 @@ class SendTest(Base):
         b.send("502", "话题群", reply_to="60", root="60")
         self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("60", False), "a topic group's own way")
         self.assertEqual(self.last()["text"], "话题群")
+
+    def test_into_the_thread_and_also_the_chat(self):
+        b = self.b
+        real = larkagentx.also_to_chat
+        larkagentx.also_to_chat = lambda pkt, parent, mark: dict(pkt, parent=parent, mark=mark)  # real: smoke test
+        self.addCleanup(setattr, larkagentx, "also_to_chat", real)
+        b.send("500", "也发到群里", reply_to="97", root="90", to_chat=True)
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("90", True))
+        self.assertEqual((self.last()["parent"], self.last()["mark"]), ("97", "sync"), "quotes the request")
+        b._synced["98"] = "send"  # the request carried the older mark: the reply carries it too
+        b.send("500", "旧标记", reply_to="98", root="90", to_chat=True)
+        self.assertEqual((self.last()["parent"], self.last()["mark"]), ("98", "send"))
+        b.send("500", "只在话题里", reply_to="97", root="90")
+        self.assertNotIn("mark", self.last(), "only in the thread: as before")
+        b.send("502", "话题群", reply_to="60", root="60", to_chat=True)
+        self.assertNotIn("mark", self.last(), "a thread-first group has no main stream to copy to")
+        larkagentx.also_to_chat = lambda pkt, parent, mark: 1 / 0
+        with self.assertRaises(SendRejected):  # the packet could not be made: surely not sent
+            b.send("500", "x", reply_to="97", root="90", to_chat=True)
 
     def test_surely_not_sent(self):
         b = self.b
@@ -1307,6 +1350,27 @@ class ListenTest(Base):
         self.assertFalse(t.is_alive())
         self.assertEqual(self.error, [])
         self.assertEqual(self.links, ["up"])
+
+    def test_pushed_messages_say_where_they_show(self):
+        from larkx._fake import frame, text_data
+
+        real = larkagentx.pushed_threads
+        larkagentx.pushed_threads = lambda p: json.loads(p.decode("utf-8"))  # the real decoding: test_smoke_larkx
+        self.addCleanup(setattr, larkagentx, "pushed_threads", real)
+        t = self.start()
+        sync = {"thread_type": 2, "send_to_chat": False, "sync_type": 2, "sync_related": "299", "sync_root": "90"}
+        thread = dict(root_id="90", parent_id="95", anchor="90", scope="topic")
+        S.frames.put(frame(messages=[frame_msg("206", "500", 25, text_data("/agent 也发到群里"), sender=ME, **thread),
+                                     frame_msg("207", "500", 26, text_data("只在话题里"), sender=ME, **thread),
+                                     frame_msg("208", "500", 27, text_data("主界面"), parent_id="95")],
+                           payload=json.dumps({"206": sync, "207": dict(sync, sync_type=0, sync_related="")}).encode()))
+        S.frames.put(frame(messages=[frame_msg("209", "500", 28, text_data("读不出标记"), **thread)], payload=b"bad"))
+        wait_until(lambda: len(self.got) == 4, what="the messages")
+        self.assertEqual([(m.id, m.placement) for m in self.got],
+                         [("206", "thread_chat"), ("207", "thread"), ("208", "chat"), ("209", "thread")])
+        self.stop.set()
+        t.join(5)
+        self.assertEqual(self.error, [])
 
     def test_chats_moved_to_done_reach_the_core(self):
         from larkx._fake import frame, text_data

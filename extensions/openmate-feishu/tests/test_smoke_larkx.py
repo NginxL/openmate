@@ -113,6 +113,23 @@ req = gateway.request_from_dict(req_cls, {"messageIds": ["71", "73"]})
 resp = resp_cls(); st = resp.selfReactionStatus.add(); st.userId = "7001"; st.messageId = "73"; st.reactionType = "DONE"
 st.nanoUpdateTime = 1763000000000000000
 out["reactions"] = [heard, cmd, list(req.messageIds), larkagentx.reacted_by(gateway.response_to_dict(resp_cls, resp.SerializeToString()), "7001")]
+pm = LA.messages.PushMessagesRequest()
+x = pm.messages["81"]; x.id = "81"; x.rootId = "80"; x.threadId = "80"; x.threadMessageType = 2
+x.syncToChatMessageType = 2; x.syncToChatRelatedMessageId = 82; x.syncToChatThreadRootId = 80
+x = pm.messages["83"]; x.id = "83"; x.rootId = "80"; x.threadId = "80"; x.threadMessageType = 2; x.sendToChat = True
+x = pm.messages["84"]; x.id = "84"; x.rootId = "80"; x.threadId = "80"; x.threadMessageType = 2
+x = pm.messages["85"]; x.id = "85"
+marks = larkagentx.pushed_threads(pm.SerializeToString())
+out["pushed_threads"] = [[k, marks[k], larkagentx.synced_mark(marks[k])] for k in sorted(marks)]
+pkt = b.lx.builders.build_send_message_packet("也发到群里", "900", "rid", root_id="80", thread_chat=False)
+pkt = larkagentx.also_to_chat(pkt, "81", "sync")
+lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
+pr = P.PutMessageRequest(); pr.ParseFromString(pkt.payload)  # what LarkAgentX's own classes still read in it
+out["also_to_chat"] = [lr.chatId, lr.rootId, lr.parentId, lr.isReplyInThread, lr.syncToChat, lr.sendToChat,
+                       pr.content.richText.innerText, pkt.cmd]
+pkt = larkagentx.also_to_chat(b.lx.builders.build_send_message_packet("旧标记", "900", "rid", root_id="80"), "83", "send")
+lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
+out["also_to_chat_send"] = [lr.parentId, lr.syncToChat, lr.sendToChat]
 files = [f for _, _, fs in os.walk(data) for f in fs]
 out["files"] = files
 from loguru import logger
@@ -147,6 +164,15 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["group_info"], [64, ["910"], True, 5000])
         self.assertEqual(out["reactions"], [[["71"]], 24, ["71", "73"], {"73": 1763000000.0}],
                          "a real push names the message with the account's reaction; a real answer's own status")
+        none = {"thread_type": 2, "send_to_chat": False, "sync_type": 0, "sync_related": "", "sync_root": ""}
+        self.assertEqual(out["pushed_threads"], [
+            ["81", dict(none, sync_type=2, sync_related="82", sync_root="80"), "sync"],
+            ["83", dict(none, send_to_chat=True), "send"],
+            ["84", none, ""],
+            ["85", dict(none, thread_type=0), ""]], "where pushed messages show, read from a real push")
+        self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
+                         "into the thread, also to the chat, quoting the request")
+        self.assertEqual(out["also_to_chat_send"], ["83", False, True])
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

@@ -73,6 +73,9 @@ _LEADING_ID = re.compile(r"^(\s*)(\d{15,20}):", re.M)
 _CJK = re.compile(r"[\u3400-\u9fff]")
 _ASCII_WORD = re.compile(r"^[A-Za-z0-9_.:#/@%+=-]+$")  # an identifier, a key, a colour or a path: not words
 CHAT_P2P = 1
+THREAD_REPLY = 2  # entities.Message.ThreadMessageType THREAD_REPLY_MESSAGE: a reply in a thread
+SYNC_TARGET, SYNC_SOURCE = 1, 2  # entities.Message.SyncToChatMessageType: a thread reply's copy in the main stream, the reply
+SYNCED_KEEP = 500  # how many messages' "also in the main stream" marks are remembered (a reply copies the request's)
 AT_TAG = 5
 PUSH_CMD = 6
 PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
@@ -290,6 +293,51 @@ def pushed_done(payload: bytes) -> Dict[str, float]:
     return done_cards(d.get("cards"), d.get("type"))
 
 
+def pushed_threads(payload: bytes) -> Dict[str, dict]:
+    """What says where each message of a messages.PushMessagesRequest shows, which LarkAgentX's message dicts leave
+    out: by message id, its thread kind (threadMessageType), and whether it also went to the main stream (sendToChat,
+    or the syncToChat marks: syncToChatMessageType, the related message, the thread's root). Ids only, no content."""
+    from larkx.proto import lark_all_pb2
+
+    req = lark_all_pb2.messages.PushMessagesRequest()
+    req.ParseFromString(payload)
+    out: Dict[str, dict] = {}
+    for key, m in req.messages.items():
+        mid = _id(m.id) or _id(key)
+        if mid:
+            out[mid] = {"thread_type": int(m.threadMessageType), "send_to_chat": bool(m.sendToChat),
+                        "sync_type": int(m.syncToChatMessageType), "sync_related": _id(m.syncToChatRelatedMessageId),
+                        "sync_root": _id(m.syncToChatThreadRootId)}
+    return out
+
+
+def synced_mark(marks: Optional[dict]) -> str:
+    """How a message's marks (pushed_threads) say it also went to the main stream: "sync" (the syncToChat marks),
+    "send" (sendToChat), "" (it did not, or nothing is known)."""
+    if not marks:
+        return ""
+    if marks.get("sync_type") in (SYNC_TARGET, SYNC_SOURCE) or marks.get("sync_related"):
+        return "sync"
+    return "send" if marks.get("send_to_chat") else ""
+
+
+def also_to_chat(pkt, parent_id: str, mark: str):
+    """LarkAgentX's thread-reply packet (build_send_message_packet), made to go to the main stream as well: quoting
+    parent_id (the request, in that thread) and marked the way the request was ("send": sendToChat, else syncToChat).
+    Through lark_all_pb2's PutMessageRequest, which has both fields (the builder's proto_pb2 one has no syncToChat)."""
+    from larkx.proto import lark_all_pb2
+
+    req = lark_all_pb2.messages.PutMessageRequest()
+    req.ParseFromString(pkt.payload)
+    req.parentId = str(parent_id)
+    if mark == "send":
+        req.sendToChat = True
+    else:
+        req.syncToChat = True
+    pkt.payload = req.SerializeToString()
+    return pkt
+
+
 def done_cards(cards, box=None, only: Optional[Set[str]] = None) -> Dict[str, float]:
     """{chat id: when it last changed (seconds, 0 when unknown)} of the chats' feed cards in 完成: by each card's
     feedType, else the push's own (box). Other cards (a thread's, a document's), cards on their way out and, with
@@ -465,6 +513,7 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
+        self._synced: Dict[str, str] = {}  # message id → how it also went to the main stream (synced_mark), the newest
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
         self._done_heard = False
@@ -821,8 +870,17 @@ class LarkXBackend(Backend):
         except Exception:
             log.info("a push could not be decoded")
             return
+        marks: Dict[str, dict] = {}
+        if any(m.get("from_id") for m in pushed) and packet.get("payload"):
+            try:
+                marks = pushed_threads(packet["payload"])
+            except Exception as e:  # the messages are read all the same: where each shows is then not known
+                log.info("where pushed messages show could not be read (%s)", type(e).__name__)
         for m in pushed:
             if m.get("from_id"):
+                hit = marks.get(_id(m.get("msg_id")))
+                if hit is not None:
+                    m["_placement"] = hit
                 inbox.put(m)
 
     def _deliver(self, inbox: "queue.Queue", client, me: Account, on_message) -> None:
@@ -1276,6 +1334,7 @@ class LarkXBackend(Backend):
         topic_root = not root and d.get("scope") == "topic" and anchor == msg_id  # a thread-first group's root
         thread_id = anchor if in_thread else (msg_id if topic_root else "")
         sender = _id(d.get("from_id"))
+        placement = self._placement(d, msg_id, in_thread, topic_root, bool(me_id) and sender == me_id)
         if sender and sender != me_id and _int(d.get("chat_type")) == CHAT_P2P:
             self._learn_peer(chat_id, sender)
         mentions = self._mentions(data)
@@ -1286,7 +1345,29 @@ class LarkXBackend(Backend):
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),
             text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
-            media=self._media_of(mt, data, chat_id, msg_id))
+            media=self._media_of(mt, data, chat_id, msg_id), placement=placement)
+
+    def _placement(self, d: dict, msg_id: str, in_thread: bool, topic_root: bool, mine: bool) -> str:
+        """Where a message shows (Message.placement): a group's reply in a thread is "thread", or "thread_chat" when
+        its marks (pushed_threads: live pushes only) say it also went to the main stream; anything else in a group
+        is "chat"; a direct chat and a thread-first group's root, "" (replies there keep their own way). How it also
+        went is remembered for a reply to copy (send). The account's own say what they carried in the log (ids and
+        the marks, never content)."""
+        if _int(d.get("chat_type")) == CHAT_P2P or topic_root:
+            return ""
+        marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
+        mark = synced_mark(marks)
+        placement = ("thread_chat" if mark else "thread") if in_thread else "chat"
+        if mark:
+            with self._lock:
+                self._synced[msg_id] = mark
+                while len(self._synced) > SYNCED_KEEP:
+                    del self._synced[next(iter(self._synced))]
+        if mine and marks is not None and (in_thread or mark or marks.get("thread_type")):
+            log.info("own message %s: threadMessageType=%d sendToChat=%s syncToChatMessageType=%d related=%s "
+                     "syncRoot=%s; read as %s", msg_id, marks.get("thread_type", 0), marks.get("send_to_chat", False),
+                     marks.get("sync_type", 0), marks.get("sync_related") or "-", marks.get("sync_root") or "-", placement)
+        return placement
 
     def _learn_peer(self, chat_id: str, user_id: str) -> None:
         """The other person of a direct chat, from their message in it (the chat's own record may have no name)."""
@@ -1822,7 +1903,8 @@ class LarkXBackend(Backend):
         except BackendError:
             return False  # not known: an ordinary group's way (a thread) is what the core asked for
 
-    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+             to_chat: bool = False) -> str:
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -1841,8 +1923,13 @@ class LarkXBackend(Backend):
             if root and not self._is_dm(client, chat_id):
                 # into the thread on root (LarkAgentX opens it when there is none yet); a thread-first group takes
                 # the reply into the topic without the reply-in-thread mark
-                pkt = b.build_send_message_packet(text, chat_id, rid, root_id=root,
-                                                  thread_chat=bool(client.is_thread_chat(chat_id)))
+                topic = bool(client.is_thread_chat(chat_id))
+                pkt = b.build_send_message_packet(text, chat_id, rid, root_id=root, thread_chat=topic)
+                if to_chat and not topic:
+                    # …and into the main stream too, quoting the request, marked the way the request itself was
+                    with self._lock:
+                        mark = self._synced.get(reply_to or "", "")
+                    pkt = also_to_chat(pkt, reply_to or root, mark or "sync")
             elif root or reply_to:
                 # a reply that quotes and stays in the main stream (a direct chat has no threads here):
                 # thread_chat=True is the builder's way to leave the reply-in-thread mark out

@@ -1369,11 +1369,14 @@ class ConnectorApp:
         finally:
             self._inflight.discard(key)
 
-    def send_as_user(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def send_as_user(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+                     to_chat: bool = False) -> str:
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
+        if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
+            return self.backend.send(chat_id, text, reply_to or None, root, to_chat=True)
         return self.backend.send(chat_id, text, reply_to or None, root or None)
 
     def send_image_as_user(self, chat_id: str, path: str) -> str:

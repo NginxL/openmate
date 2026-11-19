@@ -266,7 +266,8 @@ class AgentRunner:
             if not self.enabled:
                 continue  # off here (the connector, or a member hub): nothing said in the user's name
             self._post_once(run, "agent-restart:" + run["id"],
-                            "扩展重启了，没法确认这个 /agent 请求有没有开始处理。" + CHECK, reply_to=run["request_id"])
+                            "扩展重启了，没法确认这个 /agent 请求有没有开始处理。" + CHECK,
+                            **(self._where(run) if run.get("placement") else {"reply_to": run["request_id"]}))
         resumed = len(self.store.runs_in_state(["running"]))
         if resumed:
             log.info("resuming %d running /agent request(s)", resumed)
@@ -387,6 +388,7 @@ class AgentRunner:
         if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
             return
         run = self._new_run(row, req, now)
+        run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)
         self.store.run_put(run)
         self._prune()
         threading.Thread(target=self._start_run, args=(run, row), name="openmate-agent-start", daemon=True).start()
@@ -842,7 +844,7 @@ class AgentRunner:
             return _block("instructions", "自动代答说明", body)
         body = "\n".join([
             "我在%s里发了一条 /agent 请求，请你替我处理。" % p,
-            "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份发到这个话题里，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run)),
+            "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份%s，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run), _WHERE_WORDS.get(run.get("placement") or "", "发到这个话题里")),
             "- 回复以我的名义发出：只写已经做完的事和查到的事实；还没做的写成建议，不要替我答应任何事。",
         ] + ([
             "- 中途进度：调用 %s_agent_reply 时加 progress=true，它会原地更新同一条进度消息，不会刷屏；只发有意义的进展。" % c,
@@ -1058,8 +1060,7 @@ class AgentRunner:
                     return
                 cur["state"] = "stopped"
                 self.store.run_put(cur)
-            self._post_once(cur, "agent:%s:app-stop" % run["id"], "已在 Persona 里停止", reply_to=cur["request_id"],
-                            root=cur["root_id"] or cur["request_id"])
+            self._post_once(cur, "agent:%s:app-stop" % run["id"], "已在 Persona 里停止", **self._where(cur))
         elif ended:
             self._turn_ended(run["id"])
 
@@ -1124,8 +1125,7 @@ class AgentRunner:
                     cur["fallback"] = "failed"  # nothing in the journal: a late answer may still go out
                     self.store.run_put(cur)
         if post is not None:
-            mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, reply_to=cur["request_id"],
-                                  root=cur["root_id"] or cur["request_id"], model_effort=me)
+            mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, model_effort=me, **self._where(cur))
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
                 cur["fallback"] = "sent" if mid else "failed"
@@ -1149,7 +1149,7 @@ class AgentRunner:
         if notice:
             self._post_once(cur, "agent:%s:timeout" % run_id,
                             "等了 %s 还没有结果，不再等待。可以在 Persona 里打开这个会话看进度。" % _span(self.app.timing.agent_timeout),
-                            reply_to=cur["request_id"], root=cur["root_id"] or cur["request_id"])
+                            **self._where(cur))
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
                 cur["timeout_notice"] = "done"  # the send journal says whether it went out (or may have)
@@ -1164,8 +1164,7 @@ class AgentRunner:
             cur["error"] = message
             self.store.run_put(cur)
         self._end_reaction(run_id, "failed")
-        self._post_once(cur, "agent:%s:failed" % run_id, message, reply_to=cur["request_id"],
-                        root=cur["root_id"] or cur["request_id"])
+        self._post_once(cur, "agent:%s:failed" % run_id, message, **self._where(cur))
 
     # ---------------------------------------------------------------- sending as the user
 
@@ -1245,13 +1244,18 @@ class AgentRunner:
             t += ("" if self.suffix.startswith("\n") else "\n\n") + self.suffix
         return t
 
-    def _send(self, run: dict, key: str, body: str, reply_to: str, root: str) -> dict:
+    def _where(self, run: dict) -> dict:
+        """Where a message about the run goes: back where its request was asked (_where); a run whose placement is
+        unknown, as before: its request's thread, else a thread opened on the request."""
+        return _where(run["request_id"], run.get("root_id") or "", run.get("placement") or "", run["request_id"])
+
+    def _send(self, run: dict, key: str, body: str, reply_to: str, root: str, to_chat: bool = False) -> dict:
         """Send body into the run's chat as the user, once per key (the send journal). Nobody confirms these sends
         (the user asked for them with /agent), so each one that went out is told to the hub's sent-as-user ledger
         (sent.record, allowed by the manifest's sends_as_user); one answered from the journal is not told again."""
 
         def go() -> dict:
-            mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None)
+            mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None, to_chat=to_chat)
             chat = self.store.get_chat(run["chat_id"])
             self.app.record_sent(run["chat_id"], body, str(mid or ""), reply_to=reply_to, root=root,
                                  session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "",
@@ -1293,7 +1297,7 @@ class AgentRunner:
 
         return self.app.send_once(key, "agent", go)
 
-    def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "",
+    def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "", to_chat: bool = False,
                    model_effort: Optional[tuple] = None) -> str:
         """Send text (with the header / end mark) into the run's chat once per key; the new message's id, "" when it
         failed. A run nobody asked for in the chat (自动代答, a document's comment) says nothing there of its own: a
@@ -1304,7 +1308,7 @@ class AgentRunner:
         body = self.with_suffix(text, run, model_effort)
         self._remember_post(body)
         try:
-            res = self._send(run, key, body, reply_to, root)
+            res = self._send(run, key, body, reply_to, root, to_chat)
             return str(res.get("message_ref") or "")
         except RPCError as e:
             log.warning("an /agent message was not sent: %s", e.code or "error")
@@ -1389,7 +1393,7 @@ class AgentRunner:
             if cur.get("kind") == "doc":
                 res = self._doc_reply(cur, key, body)
             else:
-                res = self._send(cur, key, body, cur["request_id"], cur["root_id"] or cur["request_id"])
+                res = self._send(cur, key, body, **self._where(cur))
             sent_id = str(res.get("message_ref") or "")
             went = True
         except RPCError:
@@ -1489,7 +1493,7 @@ class AgentRunner:
                 self._keep_progress(cur["id"], pid, text)
                 return "已更新进度（原地编辑了消息 id=%s）" % pid
             key = "agent:%s:progress:%s" % (cur["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
-            res = self._send(cur, key, body, cur["request_id"], cur["root_id"] or cur["request_id"])
+            res = self._send(cur, key, body, **self._where(cur))
             mid = str(res.get("message_ref") or "")
             self._keep_progress(cur["id"], mid or pid, text)
             return "已发出进度（消息 id=%s），之后的进度会原地更新这条" % (mid or "未知")
@@ -1528,7 +1532,8 @@ class AgentRunner:
             return False
         chat = self.store.get_chat(run["chat_id"])
         try:
-            self.app.record_sent(run["chat_id"], body, mid, reply_to=run["request_id"], root=run["root_id"] or run["request_id"],
+            where = self._where(run)
+            self.app.record_sent(run["chat_id"], body, mid, reply_to=where["reply_to"], root=where["root"],
                                  session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "", setting="agent",
                                  summary=summary + "（" + views.where(self.app.platform.name, chat, run["chat_id"]) + "）")
         except Exception:
@@ -1623,8 +1628,24 @@ class AgentRunner:
             text = "已停止" + ("：" + "、".join(tasks) if tasks else "")
             if background:
                 text += "。它在 Persona 里还有后台任务在跑，这里停不掉；它之后不会再回复到这里"
-        self._post_once(cur, "agent-stop:%s:%s" % (row["chat_id"], row["id"]), text, reply_to=row["id"],
-                        root=row.get("root_id") or "")
+        self._post_once(cur, "agent-stop:%s:%s" % (row["chat_id"], row["id"]), text,
+                        **_where(row["id"], row.get("root_id") or "", row.get("placement") or "", ""))
+
+
+#: where the /agent instructions say the reply goes, by the request's placement (any other: as before)
+_WHERE_WORDS = {"chat": "引用这条请求发到群里", "thread": "发到这个话题里", "thread_chat": "发到这个话题里，同时也发到群里"}
+
+
+def _where(request_id: str, root_id: str, placement: str, old_root: str) -> dict:
+    """The send arguments (reply_to, root, to_chat) of a reply to request_id, back where it was asked: in the main
+    stream quoting it ("chat"), in its thread ("thread"), in its thread and also in the main stream quoting it
+    ("thread_chat"). A request whose placement is unknown ("": a direct chat, a thread-first group, a run from before
+    placements were read) keeps the old way: its thread, else old_root."""
+    if placement == "chat":
+        return {"reply_to": request_id, "root": "", "to_chat": False}
+    if placement == "thread_chat" and root_id:
+        return {"reply_to": request_id, "root": root_id, "to_chat": True}
+    return {"reply_to": request_id, "root": root_id or old_root, "to_chat": False}
 
 
 def _hub_words(e: HubError) -> str:
