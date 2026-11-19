@@ -126,7 +126,7 @@ class MediaToolTest(unittest.TestCase):
         os.makedirs(os.path.join(os.path.dirname(before), "0123456789abcdef\n"))  # not an account's name
         h.app.store.meta_set("account_id", "user_example_other")
         with self.assertRaises(HubSideError):
-            h.tool("media", message="7000000000000000001")  # a message the new account does not have
+            h.tool("media", message="id=123")  # not even a message id
         self.assertFalse(os.path.exists(before), "tidied though nothing was fetched")
         self.assertTrue(os.path.exists(os.path.join(other, "1.png")))
         self.assertTrue(os.path.isdir(os.path.join(os.path.dirname(before), "0123456789abcdef\n")))

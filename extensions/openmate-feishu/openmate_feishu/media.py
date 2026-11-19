@@ -82,10 +82,6 @@ def media_tools(app) -> Dict:
 
 
 def fetch(app, mid: str, chat_id: str = "") -> str:
-    if not mid:
-        raise MediaError("缺少消息 id（matefeishu_messages 每行的 id=…）")
-    if not _ID.match(mid):  # not echoed: what was given may be a ref, with its key in it
-        raise MediaError("消息 id 不对：飞书消息 id 是一串数字（用 matefeishu_messages 每行的 id=…）")
     store = app.store
     if store is None:
         raise MediaError("扩展还在启动，请稍后再试")
@@ -96,6 +92,10 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
                 _own_folder(folder)  # and the tidy-up: first, whatever becomes of this call
         except OSError as e:
             raise MediaError("存不到本机：%s。" % (e.strerror or type(e).__name__))
+    if not mid:
+        raise MediaError("缺少消息 id（matefeishu_messages 每行的 id=…）")
+    if not _ID.match(mid):  # not echoed: what was given may be a ref, with its key in it
+        raise MediaError("消息 id 不对：飞书消息 id 是一串数字（用 matefeishu_messages 每行的 id=…）")
     row = store.message(chat_id, mid) if chat_id else store.find_message(mid)
     if row is None:
         raise MediaError("本地没有这条飞书消息%s。先用 matefeishu_messages 读它所在的会话，再用那里给出的 id。"
