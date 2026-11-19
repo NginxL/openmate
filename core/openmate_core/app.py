@@ -1583,12 +1583,17 @@ class ConnectorApp:
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if self.channel is not None:
             self.channel.outgoing(chat_id, text)  # its echo in the 渠道's chat is no line of the user's
-        if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
-            mid = self.backend.send(chat_id, text, reply_to or None, root, to_chat=True)
-        else:
-            mid = self.backend.send(chat_id, text, reply_to or None, root or None)
+        try:
+            if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
+                mid = self.backend.send(chat_id, text, reply_to or None, root, to_chat=True)
+            else:
+                mid = self.backend.send(chat_id, text, reply_to or None, root or None)
+        except SendRejected:
+            if self.channel is not None:
+                self.channel.outgoing(chat_id, text, failed=True)  # surely not sent: its text stands for nothing
+            raise
         if self.channel is not None:
-            self.channel.outgoing(chat_id, text, str(mid or ""))
+            self.channel.outgoing(chat_id, text, str(mid or ""))  # known by its id from now on
         return mid
 
     def send_image_as_user(self, chat_id: str, path: str) -> str:
