@@ -857,7 +857,7 @@ class AgentRunner:
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
             "- 下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c),
         ] + ([
-            "- 消息里的图片和文件用 %s 看（给消息 id，上下文里写着「看图：%s id=…」）：它只读，下载到本机后直接读文件；不要用 lark-cli 去找或下载。" % (
+            "- 消息里的图片和文件用 %s 看（给消息 id，上下文里写着「看图：%s message=…」）：它只读，下载到本机后直接读文件；不要用 lark-cli 去找或下载。" % (
                 self._media_tool(), self._media_tool()),
         ] if self._media_tool() else []))
         return _block("instructions", "/agent 说明", body)

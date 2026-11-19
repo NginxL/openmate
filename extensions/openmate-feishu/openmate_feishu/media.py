@@ -1,10 +1,12 @@
 """matefeishu_media: the pictures and files of one Feishu message, fetched through the backend's media(ref) into the
 extension's data directory (media/), as local paths a model can read. Read-only: nothing is sent, nothing in Feishu
 changes. What it prints is the message's line, each file's local path, type and size, or why a file is not there;
-never the ref (its resource key) nor anything of the session."""
+never the ref (its resource key) nor anything of the session. The kept copies are the signed-in account's own
+(media/<account>/): another account signed in later never gets them, it fetches as itself."""
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import os
 import re
@@ -43,11 +45,11 @@ def media_tools(app) -> Dict:
         "name": MEDIA_TOOL,
         "description": "看一条飞书消息里的图片或文件（也包括表情、视频、语音）：下载到本机（%d MB 以内），返回本地文件路径、"
                        "类型和大小，图片可以直接读这个文件看图。消息 id 来自 matefeishu_messages 或 /agent 上下文里"
-                       "「看图：matefeishu_media id=…」的提示。下载不了时说明原因（没有图片或文件、已撤回或过期、超过大小上限、"
+                       "「看图：matefeishu_media message=…」的提示。下载不了时说明原因（没有图片或文件、已撤回或过期、超过大小上限、"
                        "飞书没登录等），如实转告，不要猜内容。只读，不会发任何消息，也不改飞书里的任何东西；不要用 lark-cli 去下载。"
                        % (MEDIA_MOST >> 20),
         "input_schema": {"type": "object", "properties": {
-            "message": {"type": "string", "description": "消息 id（matefeishu_messages 每行的 id=…）"},
+            "message": {"type": "string", "description": "消息 id（matefeishu_messages 每行的 id=…，或「看图：matefeishu_media message=…」里的）"},
             "chat": {"type": "string", "description": "这条消息所在的会话 id，可选"},
             "again": {"type": "boolean", "description": "重新下载（本地副本被清理了，或上次的不对），默认 false"}},
             "required": ["message"]},
@@ -57,8 +59,8 @@ def media_tools(app) -> Dict:
         from openmate_core.wire import RPCError
 
         try:
-            return fetch(app, str(a.get("message") or "").strip(), str(a.get("chat") or "").strip(),
-                         bool(a.get("again")))
+            mid = str(a.get("message") or a.get("id") or "").strip()  # id: as a hint's "id=…" may be read
+            return fetch(app, mid, str(a.get("chat") or "").strip(), bool(a.get("again")))
         except MediaError as e:
             raise RPCError(str(e))
 
@@ -69,7 +71,7 @@ def fetch(app, mid: str, chat_id: str = "", again: bool = False) -> str:
     if not mid:
         raise MediaError("缺少消息 id（matefeishu_messages 每行的 id=…）")
     if not _ID.match(mid):
-        raise MediaError("消息 id 不对：%s（用 matefeishu_messages 每行的 id=…）" % mid[:80])
+        raise MediaError("消息 id 不对：飞书消息 id 是一串数字（用 matefeishu_messages 每行的 id=…）")  # not echoed
     store = app.store
     if store is None:
         raise MediaError("扩展还在启动，请稍后再试")
@@ -85,9 +87,11 @@ def fetch(app, mid: str, chat_id: str = "", again: bool = False) -> str:
     if not any(m.get("ref") for m in media):
         raise MediaError(head + "\n这条消息的%s没有留下下载信息，取不到内容。" % _word(media[0]))
     backend = app.backend
-    if backend is None or not app.signed_in:
+    account = store.meta_get("account_id")
+    if backend is None or not app.signed_in or getattr(app, "link", "") == "expired" or not account:
         raise MediaError(head + "\n飞书还没登录（或登录已失效），下载不了：先在 Persona 的飞书扩展里扫码登录，再试一次。")
-    folder = os.path.join(app.data_dir or tempfile.gettempdir(), MEDIA_DIR)
+    whose = hashlib.sha256(("openmate-feishu:" + account).encode("utf-8")).hexdigest()[:16]
+    folder = os.path.join(app.data_dir or tempfile.gettempdir(), MEDIA_DIR, whose)
     lines: List[str] = [head]
     got = 0
     for i, m in enumerate(media):
@@ -111,7 +115,7 @@ def fetch(app, mid: str, chat_id: str = "", again: bool = False) -> str:
         name = "「%s」" % str(m["name"])[:120] if m.get("name") else ""
         lines.append("%s%s 本地文件：%s（%s）" % (word, name, path, "，".join(bits)))
         if mime.startswith("image/"):
-            lines.append("可以直接读这个文件看图。")
+            lines.append("可以直接读这个文件看图（路径在运行飞书扩展的这台电脑上）。")
     if not got:
         raise MediaError("\n".join(lines))
     return "\n".join(lines)
@@ -129,24 +133,25 @@ def _local(folder: str, stem: str, m: dict, backend, again: bool) -> Tuple[str, 
         raise BackendError("附件超过 %d MB" % (MEDIA_MOST >> 20), "too_large")
     mime = (mime or "application/octet-stream").split(";", 1)[0].strip().lower()
     os.makedirs(folder, mode=0o700, exist_ok=True)
-    for old in _all_kept(folder, stem):  # again: the new one replaces it, whatever its type now
-        try:
-            os.remove(old)
-        except OSError:
-            pass
     path = os.path.join(folder, stem + _ext(mime, str(m.get("name") or "")))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=".part-")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+        os.replace(tmp, path)  # a reader of the old copy keeps it whole; a failed write leaves the old one
     except BaseException:
         try:
             os.remove(tmp)
         except OSError:
             pass
         raise
+    for old in _all_kept(folder, stem):  # again: a copy of another type is gone only once the new one is in place
+        if old != path:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
     return path, mime, len(data)
 
 
@@ -160,7 +165,7 @@ def _all_kept(folder: str, stem: str) -> List[str]:
 
 def _kept(folder: str, stem: str) -> Optional[str]:
     for p in _all_kept(folder, stem):
-        if os.path.isfile(p) and os.path.getsize(p) > 0:
+        if not os.path.islink(p) and os.path.isfile(p) and os.path.getsize(p) > 0:  # only a file this tool wrote
             return p
     return None
 
@@ -173,11 +178,38 @@ def _ext(mime: str, name: str) -> str:
 
 
 def _mime_of(path: str, m: dict) -> str:
-    ext = os.path.splitext(path)[1].lower()
-    for mime, e in _EXTS.items():
-        if e == ext:
-            return mime
-    return str(m.get("mime") or "") or mimetypes.guess_type(path)[0] or "application/octet-stream"
+    """A kept copy's type: a picture by its bytes (as the backend tells one), anything else by its message, never a
+    picture by its name alone."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        head = b""
+    picture = _sniff(head)
+    if picture:
+        return picture
+    mime = str(m.get("mime") or "") or mimetypes.guess_type(path)[0] or "application/octet-stream"
+    return "application/octet-stream" if mime.startswith("image/") else mime
+
+
+def _sniff(b: bytes) -> str:
+    if b.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if b.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if b[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "image/webp"
+    if b[:2] == b"BM":
+        return "image/bmp"
+    if b[4:8] == b"ftyp" and b[8:12] in (b"heic", b"heix", b"mif1", b"msf1"):
+        return "image/heic"
+    if b[4:8] == b"ftyp" and b[8:12] == b"avif":
+        return "image/avif"
+    if b[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
+    return ""
 
 
 def _word(m: dict) -> str:
