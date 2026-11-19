@@ -270,6 +270,7 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=text_msg["id"])
         self.assertIn("没有图片或文件", e.exception.message)
+        self.assertNotIn("接口文档", e.exception.message, "what a message says is never told back")
         undecoded = h.world.push(TEAM, "user_example_a", "", type="IMAGE")  # Feishu said IMAGE, its content not read
         stored(h, TEAM, undecoded)
         with self.assertRaises(HubSideError) as e:
@@ -300,6 +301,12 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=blocked.id)
         self.assertIn("安全策略", e.exception.message)
+        h.app.store._tx(lambda db: db.execute("UPDATE messages SET blocked = 1, text = '旧正文' WHERE id = ?",
+                                              (text_msg["id"],)))  # kept before it was blocked
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=text_msg["id"])
+        self.assertIn("安全策略", e.exception.message)
+        self.assertNotIn("旧正文", e.exception.message)
 
     def test_expired_and_not_signed_in(self):
         h = signed(self)

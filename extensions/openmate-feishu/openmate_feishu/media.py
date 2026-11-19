@@ -24,6 +24,7 @@ import time
 from typing import Dict, List, Tuple
 
 from openmate_core import views
+from openmate_core.textutil import local_stamp
 from openmate_core.backend import BackendError
 
 CONNECTOR_ID = "matefeishu"
@@ -100,9 +101,11 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
     if row is None:
         raise MediaError("本地没有这条飞书消息%s。先用 matefeishu_messages 读它所在的会话，再用那里给出的 id。"
                          % ("：" + mid if mid.isdigit() else ""))
-    head = "消息 id=%s：%s" % (mid, views.log_line(row, app.tz, app.me_name()).replace("\n", " ")[:300])
     if row.get("blocked"):
-        raise MediaError(head + "\n飞书的安全策略拦下了这条消息，图片和文件都看不到。")
+        raise MediaError("消息 id=%s：飞书的安全策略拦下了这条消息，图片和文件都看不到。" % mid)
+    # who and when, never what it says: a wrong id must not bring back a chat's words
+    who = "我" if row.get("mine") else views.sender_of(row, app.me_name())
+    head = "消息 id=%s（%s，%s）" % (mid, who[:60], local_stamp(row.get("at") or 0, app.tz))
     media = [m for m in row.get("media") or [] if isinstance(m, dict)]
     if not media and str(row.get("type") or "").upper() in _KINDS_WITH_MEDIA:
         raise MediaError(head + "\n这条消息的内容没有解出来，没有留下下载信息，取不到内容。")
