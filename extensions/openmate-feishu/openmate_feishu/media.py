@@ -190,10 +190,11 @@ def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]
         raise BackendError("飞书给回来的是空的", "unknown")
     mime = (mime or "").split(";", 1)[0].strip().lower()
     declared = str(m.get("mime") or "").split(";", 1)[0].strip().lower()
-    # Feishu said this attachment is not text, and answered with a web page: an answer (a sign-in page), not the file.
+    # Feishu said this attachment is not text (its kind or its type), and answered with a web page: an answer (a sign-in page), not the file.
     # By the answer's own type only: what a file holds is not guessed at (an HTML template sent as text is a file)
-    if mime in ("text/html", "application/xhtml+xml") and declared and not declared.startswith("text/") \
-            and declared not in ("application/xhtml+xml", "application/octet-stream"):
+    not_text = str(m.get("kind") or "") in ("voice", "video", "image", "sticker") or (
+        declared and not declared.startswith("text/") and declared not in ("application/xhtml+xml", "application/octet-stream"))
+    if mime in ("text/html", "application/xhtml+xml") and not_text:
         raise BackendError("下载时飞书回答的是一个网页，不是这个附件（可能登录失效了）", "unknown")
     if mime in ("", "application/octet-stream", "binary/octet-stream") and m.get("mime"):
         mime = str(m["mime"]).split(";", 1)[0].strip().lower()  # what the message itself said it is

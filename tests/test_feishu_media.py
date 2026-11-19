@@ -338,6 +338,12 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=m.id)
         self.assertIn("回答的是一个网页", e.exception.message)
+        for kind, kind_type in (("voice", "AUDIO"), ("video", "VIDEO")):  # no type recorded, only the kind
+            v = h.world.push(TEAM, "user_example_a", "", type=kind_type, media=[Media(kind, ref="file:" + kind)])
+            stored(h, TEAM, v)
+            with self.assertRaises(HubSideError) as e:
+                h.tool("media", message=v.id)
+            self.assertIn("回答的是一个网页", e.exception.message, kind)
         page = h.world.push(TEAM, "user_example_a", "", type="FILE",
                             media=[Media("file", ref="file:page", name="a.html", mime="text/html")])
         stored(h, TEAM, page)
