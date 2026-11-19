@@ -330,6 +330,12 @@ def entity_marks(entity: dict) -> dict:
             "sync_root": _id(entity.get("syncToChatThreadRootId"))}
 
 
+def _thread_reply_synced(marks: dict) -> bool:
+    """Whether the marks are a thread reply's also sent to the main stream (its side of syncToChat: the source, or
+    the thread's root named), which only a reply in a thread has."""
+    return marks.get("sync_type") == SYNC_SOURCE or bool(marks.get("sync_root"))
+
+
 def synced_mark(marks: Optional[dict]) -> str:
     """How a message's marks (pushed_threads) say it also went to the main stream: "sync" (the syncToChat marks),
     "send" (sendToChat), "" (it did not, or nothing is known)."""
@@ -1381,10 +1387,13 @@ class LarkXBackend(Backend):
         # ordinary group may open a thread), so its root is only the quoted chain's.
         in_thread = bool(root) and anchor == root
         # A quote in the main stream may have no threadId yet (no one replied in its thread), so the anchor falls back
-        # to its root; the marks tell (threadMessageType): only a thread reply is in a thread. Only when they carry
-        # it, and in a group known as an ordinary one: else (a thread-first group, or not known) the old reading.
+        # to its root; the marks tell (threadMessageType): only a thread reply (2) is in a thread. Feishu leaves the
+        # field unset on a quote in the main stream (seen: a quote's push, and the quotes this backend sends), and
+        # sets it on every reply in a thread; unset with the marks of a thread reply sent to the chat as well keeps
+        # the old reading. Only in a group known as an ordinary one: else (thread-first, not known) the old reading.
         marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
-        if (in_thread and marks is not None and marks.get("thread_known") and marks.get("thread_type") != THREAD_REPLY
+        if (in_thread and marks is not None and marks.get("thread_type") != THREAD_REPLY
+                and (marks.get("thread_known") or not _thread_reply_synced(marks))
                 and (marks.get("plain_group") or self._plain_group(client, chat_id, d.get("chat_type"), me_id))):
             in_thread = False
         topic_root = not root and d.get("scope") == "topic" and anchor == msg_id  # a thread-first group's root
@@ -1430,8 +1439,10 @@ class LarkXBackend(Backend):
                 while len(self._synced) > SYNCED_KEEP:
                     del self._synced[next(iter(self._synced))]
         if mine and marks is not None and not marks.get("history") and (in_thread or mark or marks.get("thread_type")):
-            log.info("own message %s: threadMessageType=%d sendToChat=%s syncToChatMessageType=%d related=%s "
-                     "syncRoot=%s; read as %s", msg_id, marks.get("thread_type", 0), marks.get("send_to_chat", False),
+            log.info("own message %s: threadMessageType=%s sendToChat=%s syncToChatMessageType=%d related=%s "
+                     "syncRoot=%s; read as %s", msg_id,
+                     marks.get("thread_type", 0) if marks.get("thread_known", True) else "unset",
+                     marks.get("send_to_chat", False),
                      marks.get("sync_type", 0), marks.get("sync_related") or "-", marks.get("sync_root") or "-",
                      placement or "unknown")
         return placement
@@ -1688,8 +1699,9 @@ class LarkXBackend(Backend):
     def _history_marks(self, client, chat_id: str, got: list, me_id: str) -> None:
         """History carries no thread marks (pushed_threads), and a quote in the main stream no one replied to in its
         thread reads as a reply in that thread (its anchor is its root): for those a page has, the entities are asked
-        once and their threadMessageType kept as the marks (_message reads them as a push's). One that does not carry
-        it, a group not known as an ordinary one (asked once a page), or a failed read: the old reading."""
+        once and their marks kept (_message reads them as a push's, an unset threadMessageType too). One whose entity
+        is not in the answer, a group not known as an ordinary one (asked once a page), or a failed read: the old
+        reading."""
         maybe = {}
         for d in got:
             if (isinstance(d, dict) and "_placement" not in d and _id(d.get("root_id"))
@@ -1706,7 +1718,7 @@ class LarkXBackend(Backend):
             return
         for v in (raw.get("messages") or {}).values():
             d = maybe.get(_id(v.get("id"))) if isinstance(v, dict) else None
-            if d is not None and "threadMessageType" in v:
+            if d is not None:  # its own entity: a field it does not carry is unset
                 d["_placement"] = dict(entity_marks(v), plain_group=True)
 
     def _fill_blank(self, client, chat_id: str, msgs: List[Message]) -> None:

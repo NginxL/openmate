@@ -348,11 +348,17 @@ class MappingTest(Base):
         rooted = self.m(msg_id="112", _placement=dict(none, thread_type=1), **bare)  # a quote that opened a thread
         self.assertEqual((rooted.placement, rooted.root_id), ("chat", ""))
         self.assertEqual(self.m(msg_id="113", **bare).root_id, "90", "read from history: no marks, the old reading")
-        # the push did not carry threadMessageType (unset reads as 0): what it was read as stays
-        unset = {"thread_type": 0, "thread_known": False, "send_to_chat": False, "sync_type": 2, "sync_related": "",
-                 "sync_root": "90"}
-        kept = self.m(msg_id="116", _placement=unset, **bare)
-        self.assertEqual((kept.placement, kept.root_id), ("thread_chat", "90"), "no thread kind: the old reading")
+        # Feishu leaves threadMessageType unset on a quote in the main stream (a proto2 field: it reads as 0)
+        unset = {"thread_type": 0, "thread_known": False, "send_to_chat": False, "sync_type": 0, "sync_related": "",
+                 "sync_root": ""}
+        q = self.m(msg_id="130", _placement=unset, **bare)
+        self.assertEqual((q.placement, q.root_id, q.thread_id), ("chat", "", ""), "unset: a quote in the main stream")
+        # unset, with the marks of a thread reply also sent to the chat: what it was read as stays
+        synced = dict(unset, sync_type=2, sync_root="90")
+        kept = self.m(msg_id="116", _placement=synced, **bare)
+        self.assertEqual((kept.placement, kept.root_id), ("thread_chat", "90"), "a thread reply's marks: the old reading")
+        kept = self.m(msg_id="131", _placement=dict(unset, sync_root="90"), **bare)
+        self.assertEqual(kept.root_id, "90")
         S.chats["505"] = {"id": "505", "type": 2, "name": "示例话题群", "chatMode": 3}
         topic = self.m(chat_id="505", msg_id="115", _placement=none, **bare)
         self.assertEqual((topic.placement, topic.root_id), ("thread", "90"), "a thread-first group keeps the old reading")
@@ -433,6 +439,10 @@ class MappingTest(Base):
                          "a quote of a thread's root shows in the main stream")
         r = self.m(msg_id="122", _placement=dict(none, thread_type=2), **opened)
         self.assertEqual((r.placement, r.root_id, r.thread_id), ("thread", "120", "120"), "a reply in that thread")
+        # as Feishu pushes it: threadMessageType unset on the quote
+        q = self.m(msg_id="123", _placement=dict(none, thread_known=False), **opened)
+        self.assertEqual((q.placement, q.root_id, q.thread_id, q.parent_id), ("chat", "", "", "120"),
+                         "the quote as pushed: no thread kind at all")
 
     def test_positions_always_grow(self):
         from larkx._fake import text_data
@@ -904,13 +914,12 @@ class ReadTest(Base):
             4: dict(base, msg_id="304", position=4, root_id="301", parent_id="301", anchor="301"),  # no mark
         }
         S.api_answers["messages.PullMessagesByPositionsRequest"] = {"messages": {
-            "2": {"id": "302", "threadMessageType": 0}, "3": {"id": "303", "threadMessageType": "THREAD_REPLY_MESSAGE",
-                                                                "sendToChat": True}, "4": {"id": "304"}}}
+            "2": {"id": "302"}, "3": {"id": "303", "threadMessageType": "THREAD_REPLY_MESSAGE", "sendToChat": True}}}
         msgs = {m.id: m for m in self.b.history("620", None, 10)}
         self.assertEqual((msgs["302"].root_id, msgs["302"].thread_id, msgs["302"].parent_id), ("", "", "301"),
                          "a quote in the main stream")
         self.assertEqual((msgs["303"].root_id, msgs["303"].placement), ("301", "thread_chat"), "a reply in the thread")
-        self.assertEqual(msgs["304"].root_id, "301", "no mark: the old reading")
+        self.assertEqual(msgs["304"].root_id, "301", "its entity not in the answer: the old reading")
         self.assertNotIn("303", self.b._synced, "a history page's marks never push out a live request's")
         asked = [d for c, d in S.api_calls if c == "messages.PullMessagesByPositionsRequest"]
         self.assertEqual([d["positions"] for d in asked], [[2, 3, 4]], "asked once, only for those")
