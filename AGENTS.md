@@ -12,8 +12,10 @@ OpenMate 是 Persona 的扩展（飞书、微信）。这个仓库的任务**做
 4. **合入和发版**：
    - `git fetch`，rebase 到最新的 `main`。
    - 版本号取 `main` 上的当前版本加 1。只改了一个扩展就只升那个扩展；改了 `core/`，两个扩展都要升。
-   - 跑 `python3 -I scripts/package.py`，再用 `--check` 校验通过，然后提交、推到 `main`。
-   - 推送被拒，说明别人先推了：重新 fetch、rebase、取号、打包，再推。已经发布的包永远不改。
+   - 跑 `python3 -I scripts/package.py`，再用 `--check --published origin/main` 校验通过，然后提交。
+   - 先把这些提交强推回 PR 的分支（`git push --force-with-lease origin HEAD:<分支>`），再把**同一批提交**快进推到 `main`（`git push origin HEAD:main`）。提交号不变，GitHub 才会把 PR 标成已合并，Persona 的待办才会走到「合入」。不要关 PR、不要在 GitHub 上另做 squash 或 rebase 合并。
+   - 推 `main` 被拒，说明别人先推了：重新 fetch、rebase、取号、打包，再按上一步推一遍。已经发布的包永远不改。
+   - 推完用 `gh pr view <PR> --json state` 确认是 `MERGED`。
 5. **部署**：刷新装了 OpenMate 的扩展市场：`GET /api/v1/extensions/-/markets` 找到它，再 `POST /api/v1/extensions/-/markets/<market>/refresh`。GitHub raw 有大约 5 分钟缓存，等扩展自动升到新版本。如果显示「需要批准」，就停在这一步，告诉用户去批准什么。
 6. **验证**：在真实环境里看到效果，并记下证据。
    - 页面类改动：`POST /api/v1/extensions/<扩展>/-/ui/<页面>` 通过 hub 渲染，确认能打开、内容对、不超过 300 项。
