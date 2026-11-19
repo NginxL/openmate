@@ -7,7 +7,8 @@ asks for (docs/extensions/extensions.md "Hub API: scopes"):
     agents.control  POST /api/v1/sessions/{mid}/{sid}/messages (a conversation's, or a task's Agent's), …/interrupt
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
                     GET  /api/v1/sessions?machine_id=&session_id= (the session's status),
-                    GET  /api/v1/interactions (the questions waiting now: the 渠道 takes back one answered elsewhere)
+                    GET  /api/v1/interactions, …/interactions/history (the questions waiting now, and how one
+                    ended: the 渠道 takes back one answered elsewhere)
     kb.read         GET  /api/v1/kb/chats/{id}/context
     inbox.read      GET  /api/v1/inbox (the 今天 page)
     todos.read      GET  /api/v1/todos (the 今天 page; /agent: the open task its conversation handed out)
@@ -227,13 +228,22 @@ class HubAPI:
     def interrupt(self, machine_id: str, session_id: str) -> dict:
         return self.request("POST", "/api/v1/sessions/%s/%s/interrupt" % (_seg(machine_id), _seg(session_id)), {})
 
-    def pending_interactions(self) -> List[str]:
-        """The ids of the questions and approvals waiting for an answer now (those the hub shows extensions)."""
+    def pending_interactions(self) -> List[dict]:
+        """The questions and approvals waiting for an answer now (those the hub shows extensions), each with its id."""
         doc = self.request("GET", "/api/v1/interactions", timeout=15)
         items = doc.get("interactions") if isinstance(doc, dict) else None
         if not isinstance(items, list):
             raise HubError(0, "Persona hub 的待答列表看不懂", NETWORK)
-        return [str(i["id"]) for i in items if isinstance(i, dict) and i.get("id")]
+        return [i for i in items if isinstance(i, dict) and i.get("id")]
+
+    def interaction_history(self, machine_id: str, session_id: str, limit: int = 200) -> List[dict]:
+        """How a session's questions ended, the newest first: [{interaction: {id, …}, status}, …]."""
+        doc = self.request("GET", "/api/v1/interactions/history",
+                           query={"machine_id": machine_id, "session_id": session_id, "limit": limit}, timeout=15)
+        items = doc.get("interactions") if isinstance(doc, dict) else None
+        if not isinstance(items, list):
+            raise HubError(0, "Persona hub 的问题记录看不懂", NETWORK)
+        return [i for i in items if isinstance(i, dict) and isinstance(i.get("interaction"), dict)]
 
     def kb_chat_context(self, kb_chat_id: str) -> Optional[dict]:
         try:

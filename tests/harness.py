@@ -38,7 +38,7 @@ def fast(**kw) -> Timing:
                 agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, agent_settle=0.1, secrets_retry=0.05,
                 sent_retry=(0.05, 0.05, 0.05), warm_pages=False, agent_model_wait=1.0)
     if "channel_poll" in Timing.__dataclass_fields__:  # the channel's (older code has none: its tests fail elsewhere)
-        base.update(channel_poll=0.05, channel_retry=(0.05, 0.05))
+        base.update(channel_poll=0.05, channel_retry=(0.05, 0.05), channel_unseen=0.3)
     base.update(kw)
     return Timing(**base)
 
@@ -242,6 +242,7 @@ class FakeHubHTTP:
         self.lost_send_status = (502, "hub_unreachable")  # what a lost send (lost_sends) answers
         self.interactions: List[dict] = []  # GET /api/v1/interactions (agents.read): the cards waiting for an answer
         self.interactions_status: Optional[int] = None  # an HTTP status that route answers instead
+        self.history: List[dict] = []  # GET /api/v1/interactions/history: [{interaction: {id, machine_id, …}, status}]
         self._n = itertools.count(1)
         hub = self
 
@@ -428,6 +429,10 @@ class FakeHubHTTP:
                                                 **({"stopped_at": "2026-11-19T00:00:01Z", "stopped_by": "lark"}
                                                    if s.get("stopped") else {}))
                                            for sid, s in self.sessions.items() if s.get("reporter")]}
+            if method == "GET" and p == "/api/v1/interactions/history":
+                return 200, {"interactions": [dict(r) for r in self.history
+                                              if r["interaction"].get("machine_id") == query.get("machine_id")
+                                              and r["interaction"].get("session_id") == query.get("session_id")]}
             if method == "GET" and p == "/api/v1/interactions":
                 if self.interactions_status:
                     return self.interactions_status, {"error": "refused"}

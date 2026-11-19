@@ -105,4 +105,6 @@ class Timing:
     sent_retry: Tuple[float, ...] = (5.0, 30.0, 120.0)  # waits before sent.record is tried again (the hub was busy)
     channel_poll: float = 10.0  # while a question Persona put in the channel chat waits: how often the hub is asked
     channel_retry: Tuple[float, ...] = (2.0, 5.0)  # waits before a line is handed to Persona again (channel.receive)
+    channel_unseen: float = 60.0  # a question never seen waiting this long after it was sent is no longer followed
+    channel_resolve: float = 600.0  # how long the channel chat named by its name is trusted before it is checked again
     extra: Dict[str, float] = field(default_factory=dict)
