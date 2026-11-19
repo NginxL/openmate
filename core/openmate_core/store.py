@@ -113,6 +113,7 @@ _SCHEMA = [
         ref TEXT NOT NULL DEFAULT '',
         text TEXT NOT NULL DEFAULT '',
         quote TEXT NOT NULL DEFAULT '',
+        parent TEXT NOT NULL DEFAULT '',
         unsupported TEXT NOT NULL DEFAULT '',
         state TEXT NOT NULL DEFAULT '',
         at REAL NOT NULL,
@@ -131,6 +132,7 @@ _SCHEMA = [
         machine_id TEXT NOT NULL DEFAULT '',
         session_id TEXT NOT NULL DEFAULT '',
         here TEXT NOT NULL DEFAULT '',
+        tries INTEGER NOT NULL DEFAULT 0,
         state TEXT NOT NULL DEFAULT 'open',
         ended REAL NOT NULL DEFAULT 0,
         PRIMARY KEY (ix, ref))""",
@@ -747,6 +749,18 @@ class Store:
         now = now or time.time()
         return self._tx(lambda db: db.execute("UPDATE sends SET state = 'uncertain', updated = ? WHERE state = 'sending'", (now,)).rowcount)
 
+    def sends_done(self, prefix: str, since: float) -> List[Tuple[str, dict]]:
+        """(key, result) of the sends done since then whose key starts with prefix."""
+        rows = self._all("SELECT key, result FROM sends WHERE state = 'done' AND updated >= ? AND substr(key, 1, ?) = ? "
+                         "ORDER BY created", (since, len(prefix), prefix))
+        out = []
+        for r in rows:
+            try:
+                out.append((r["key"], json.loads(r["result"] or "{}")))
+            except ValueError:
+                continue
+        return out
+
     def sends_prune(self, before: float) -> None:
         self._tx(lambda db: db.execute("DELETE FROM sends WHERE updated < ? AND state != 'sending'", (before,)))
 
@@ -848,17 +862,17 @@ class Store:
     # ---- Persona's 渠道 ----
 
     def channel_msg_put(self, chat_id: str, msg_id: str, direction: str, owner: str = "", placement: str = "",
-                        root_id: str = "", ref: str = "", text: str = "", quote: str = "", unsupported: str = "",
-                        state: str = "", now: Optional[float] = None) -> bool:
+                        root_id: str = "", ref: str = "", text: str = "", quote: str = "", parent: str = "",
+                        unsupported: str = "", state: str = "", now: Optional[float] = None) -> bool:
         """Keep one of the channel's messages (once: False when it was kept already, so it is also the claim). What the
         channel sent ("out") is the channel's even when the send was kept as an echo first."""
         tail = " ON CONFLICT (chat_id, id) DO UPDATE SET dir = 'out', ref = excluded.ref WHERE dir = 'echo'" \
             if direction == "out" else ""
         return self._tx(lambda db: db.execute(
-            "INSERT INTO channel_msgs (chat_id, id, dir, owner, placement, root_id, ref, text, quote, unsupported, state, "
-            "at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" + (tail or " ON CONFLICT (chat_id, id) DO NOTHING"),
+            "INSERT INTO channel_msgs (chat_id, id, dir, owner, placement, root_id, ref, text, quote, parent, unsupported, "
+            "state, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" + (tail or " ON CONFLICT (chat_id, id) DO NOTHING"),
             (chat_id, msg_id, direction, owner or "", placement or "", root_id or "", ref or "", text or "",
-             quote or "", unsupported or "", state or "", now or time.time())).rowcount == 1)
+             quote or "", parent or "", unsupported or "", state or "", now or time.time())).rowcount == 1)
 
     def channel_msg(self, chat_id: str, msg_id: str) -> Optional[dict]:
         r = self._one("SELECT * FROM channel_msgs WHERE chat_id = ? AND id = ?", (chat_id, msg_id))
@@ -874,9 +888,15 @@ class Store:
             "UPDATE channel_msgs SET state = ? WHERE chat_id = ? AND id = ? AND dir = 'in' AND state = 'pending'",
             (state, chat_id, msg_id)).rowcount == 1)
 
-    def channel_asked_since(self, chat_id: str, since: float) -> bool:
-        """Whether a question was put in the chat after then."""
-        return self._one("SELECT 1 FROM channel_asks WHERE chat_id = ? AND at > ? LIMIT 1", (chat_id, since)) is not None
+    def channel_asked_since(self, chat_id: str, since: float, other_than: str = "") -> bool:
+        """Whether a question (other than other_than) was first put in the chat after then (by its first piece)."""
+        return self._one("SELECT 1 FROM channel_asks WHERE chat_id = ? AND ix != ? GROUP BY ix HAVING MIN(at) > ? LIMIT 1",
+                         (chat_id, other_than, since)) is not None
+
+    def channel_ask_first(self, ix: str) -> Optional[float]:
+        """When question ix was first put in a chat (None when it is not followed)."""
+        r = self._one("SELECT MIN(at) AS at FROM channel_asks WHERE ix = ?", (ix,))
+        return float(r["at"]) if r and r["at"] is not None else None
 
     def channel_mark_here(self, chat_id: str, line_id: str, until: float) -> None:
         """A line handed over (or on its way) may answer the questions open in the chat that were put there before it
@@ -925,7 +945,7 @@ class Store:
     def channel_ask_set(self, ix: str, ref: str, **fields) -> bool:
         """Update an open question (seen, raised, machine_id, session_id, here, state, ended); False when it is no longer
         open."""
-        cols = [k for k in ("seen", "raised", "machine_id", "session_id", "here", "state", "ended") if k in fields]
+        cols = [k for k in ("seen", "raised", "machine_id", "session_id", "here", "tries", "state", "ended") if k in fields]
         if not cols:
             return False
         sql = "UPDATE channel_asks SET %s WHERE ix = ? AND ref = ? AND state = 'open'" % ", ".join(

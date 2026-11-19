@@ -447,21 +447,25 @@ class AgentRunner:
             self._maybe_auto(row, epoch)
             return
         text = row.get("text") or ""
-        if not text.strip():
-            return
         now = time.time()
         at = row.get("at") or 0
         if at and abs(now - at) > self.app.timing.agent_fresh:
             return
-        if self.is_agent_text(text) or self._echo(text):
+        channel = getattr(self.app, "channel", None)
+        if not text.strip():
+            if channel is not None:
+                channel.take(row, "", epoch)  # a picture there: Persona is told it cannot be brought
+            return
+        if self.is_agent_text(text):
             return
         view = getattr(self.app.platform, "mark_view", None)
         # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after any leading @s
         body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
-        channel = getattr(self.app, "channel", None)
         if channel is not None and channel.take(row, body, epoch):
-            return  # the 「Persona 渠道会话」's: handed to Persona's channel flow (channel.py), whether /agent is on or not
-        if not self.enabled:
+            # the 「Persona 渠道会话」's: handed to Persona's channel flow (channel.py), whether /agent is on or not; its
+            # echoes are told by the channel's own record of what was sent there, not /agent's text cache
+            return
+        if self._echo(text) or not self.enabled:
             return
         if body.lower() in STOP_WORDS:
             with self.app.owned(epoch) as ok:

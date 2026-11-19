@@ -324,6 +324,28 @@ class ReceiveTest(unittest.TestCase):
         pic = say(h, "[图片]", type="IMAGE", media=[Media("image", ref="img:example-9", mime="image/png")])
         self.assertEqual(received(h)["message"], {"id": pic.id, "unsupported": ["图片（这个渠道还转交不了，请在 App 里发）"]})
 
+    def test_a_picture_without_words_and_a_sticker_go_as_unsupported(self):
+        h = channel(self)
+        pic = say(h, "", type="IMAGE")  # Feishu: a picture has no text at all
+        self.assertEqual(received(h)["message"], {"id": pic.id, "unsupported": ["图片（这个渠道还转交不了，请在 App 里发）"]})
+        st = say(h, "[表情]", type="STICKER")  # WeChat: a sticker's words stand for it, with no media
+        self.assertEqual(received(h, 2)["message"], {"id": st.id, "unsupported": ["表情（这个渠道还转交不了，请在 App 里发）"]})
+
+    def test_an_agent_reply_elsewhere_does_not_swallow_the_users_words_here(self):
+        h = channel(self)
+        h.app.agent._remember_post("收到")  # an /agent reply in another chat said just that
+        m = say(h, "收到")
+        self.assertEqual(received(h)["message"]["id"], m.id)
+
+    def test_a_line_heard_before_a_sign_out_is_not_taken_after_it(self):
+        h = channel(self)
+        m = h.world.make(SOLO, "me", "/stop")  # heard (and stored) before the sign-out, its turn comes after
+        row = {"chat_id": SOLO, "id": m.id, "text": "/stop", "mine": True, "at": time.time(), "received": time.time()}
+        time.sleep(0.01)
+        h.app.channel.forget_pending()
+        self.assertTrue(h.app.channel.take(row, "/stop"))
+        self.assertIsNone(h.app.store.channel_msg(SOLO, m.id))
+
     def test_a_channel_push_does_not_swallow_the_users_same_words(self):
         h = channel(self, agent_reply_header=" ")  # no AI mark: only the id tells the echo
         send(h, ref="push1", text="收到", kind="push")
@@ -346,14 +368,33 @@ class ReceiveTest(unittest.TestCase):
 
     def test_a_refused_hand_over_is_said_in_the_chat(self):
         h = channel(self)
-        h.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("", "the assistant is away"))
+        h.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("permission_denied", "not a channel"))
         m = say(h, "/agent 你好")
         note = wait_until(lambda: [s for s in h.sent() if s["chat"] == SOLO and "没能交给 Persona" in s["text"]],
                           what="the note")[0]
         self.assertEqual(note["reply_to"], m.id)
         self.assertIn(HEADER, note["text"])
-        self.assertGreaterEqual(h.hub.receive_calls, 2, "tried again before giving up")
 
+    def test_a_lost_answer_is_tried_again_with_the_same_id_till_too_old(self):
+        h = channel(self)
+        fails = [3]
+
+        def flaky(p):
+            if fails[0]:
+                fails[0] -= 1
+                raise HubSideError("timeout", "no answer")
+        h.hub.receive_answer = flaky
+        m = say(h, "/agent 你好")
+        self.assertEqual(received(h)["message"]["id"], m.id)
+        self.assertEqual(h.hub.receive_calls, 4)
+        h2 = channel(self, timing=fast(channel_poll=0.05, channel_retry=(0.05,), channel_unseen=0.3, agent_fresh=1.0))
+        h2.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("timeout", "no answer"))
+        m2 = say(h2, "/agent 你好")
+        note = wait_until(lambda: [s for s in h2.sent() if "很久都没能确认" in s["text"]], timeout=10, what="the note")[0]
+        self.assertEqual(note["reply_to"], m2.id)
+        self.assertEqual(h2.app.store.channel_msg(SOLO, m2.id)["state"], "expired")
+        self.assertIn("message_id", send(h2, ref="late1", text="迟到的回答", kind="answer", reply_to=m2.id),
+                      "Persona may have had it after all: its answer is taken")
 
 class SendTest(unittest.TestCase):
     def test_the_answer_goes_back_where_it_was_asked_once_per_ref(self):
@@ -513,6 +554,52 @@ class AskTest(unittest.TestCase):
         h.http.interactions = [waiting("ix_example_1")]
         send(h, ref="ask:ix_example_1", text="Agent 想运行 make test。回复「允许」或「拒绝」。", kind="ask")
         self.assertGreater(time.monotonic() - t0, 0.3, "sent after the hand-over, not between its check and it")
+
+    def test_an_answer_quoting_an_older_question_is_not_given_to_a_newer_one(self):
+        h = channel(self)
+        old = self.ask(h, "ix_example_old")
+        time.sleep(0.02)
+        h.http.interactions.append(waiting("ix_example_new"))
+        send(h, ref="ask:ix_example_new", text="Agent 想删除 build 目录。回复「允许」或「拒绝」。", kind="ask")
+        line = say(h, "允许", parent_id=old)  # for the older one, heard after the newer one came
+        self.assertEqual(line_state(h, line.id), "dropped")
+        self.assertEqual(h.hub.received, [])
+
+    def test_a_second_piece_of_the_same_question_is_no_new_question(self):
+        h = channel(self, timing=fast(channel_poll=0.05, channel_retry=(0.4,), channel_unseen=0.3))
+        h.http.interactions = [waiting("ix_example_long")]
+        send(h, ref="ask:ix_example_long#0", text="很长的问题，第一段。", kind="ask")
+        tries = [1]
+
+        def flaky(p):
+            if tries[0]:
+                tries[0] -= 1
+                raise HubSideError("timeout", "no answer")
+        h.hub.receive_answer = flaky
+        line = say(h, "允许")
+        wait_until(lambda: h.hub.receive_calls >= 1, what="tried once")
+        send(h, ref="ask:ix_example_long#1", text="第二段：回复「允许」或「拒绝」。", kind="ask")
+        self.assertEqual(line_state(h, line.id), "handed")
+
+    def test_a_question_cut_off_before_it_was_written_down_is_followed_after_a_restart(self):
+        h = channel(self)
+        mid = self.ask(h)
+        h.app.store._tx(lambda db: db.execute("DELETE FROM channel_asks"))
+        h2 = h.restart()
+        h2.wait_ok()
+        self.assertEqual(h2.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["message_id"], mid)
+
+    def test_a_question_not_taken_back_for_now_is_tried_again(self):
+        h = channel(self)
+        h.world.recall_fail = True
+        h.world.edit_fail = True  # the service away for a while
+        mid = self.ask(h)
+        answered_elsewhere(h, "ix_example_1")
+        wait_until(lambda: h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["tries"] >= 1, what="tried")
+        h.world.recall_fail = False
+        h.world.edit_fail = False
+        self.assertEqual(ended(h, "ix_example_1"), "recalled")
+        self.assertEqual(h.world.recalls, [(SOLO, mid)])
 
     def test_a_quote_alone_answers_nothing(self):
         h = channel(self)
