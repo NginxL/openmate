@@ -89,6 +89,13 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
     store = app.store
     if store is None:
         raise MediaError("扩展还在启动，请稍后再试")
+    folder = _folder(app, store.meta_get("account_id"))
+    if folder:
+        try:
+            with _WRITING:
+                _own_folder(folder)  # and the tidy-up: first, whatever becomes of this call
+        except OSError as e:
+            raise MediaError("存不到本机：%s。" % (e.strerror or type(e).__name__))
     row = store.message(chat_id, mid) if chat_id else store.find_message(mid)
     if row is None:
         raise MediaError("本地没有这条飞书消息%s。先用 matefeishu_messages 读它所在的会话，再用那里给出的 id。"
@@ -104,17 +111,8 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
     if not any(m.get("ref") for m in media):
         raise MediaError(head + "\n这条消息的%s没有留下下载信息，取不到内容。" % _word(media[0]))
     backend = app.backend
-    account = store.meta_get("account_id")
-    if backend is None or not app.signed_in or getattr(app, "link", "") == "expired" or not account:
+    if backend is None or not app.signed_in or getattr(app, "link", "") == "expired" or not folder:
         raise MediaError(head + "\n飞书还没登录（或登录已失效），下载不了：先在 Persona 的飞书扩展里扫码登录，再试一次。")
-    whose = hashlib.sha256(("openmate-feishu:" + account).encode("utf-8")).hexdigest()[:16]
-    ours = hashlib.sha256(os.path.abspath(app.data_dir or "").encode("utf-8")).hexdigest()[:8]  # this extension's own
-    folder = os.path.join(BASE or tempfile.gettempdir(), "%s-%d-%s" % (MEDIA_DIR, os.getuid(), ours), whose)
-    try:
-        with _WRITING:
-            _own_folder(folder)  # and the tidy-up, whatever becomes of the fetch
-    except OSError as e:
-        raise MediaError(head + "\n存不到本机：%s。" % (e.strerror or type(e).__name__))
     lines: List[str] = [head]
     got = 0
     for i, m in enumerate(media):
@@ -142,6 +140,15 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
     if not got:
         raise MediaError("\n".join(lines))
     return "\n".join(lines)
+
+
+def _folder(app, account: str) -> str:
+    """<temporary directory>/openmate-feishu-media-<uid>-<this extension's>/<the account's>; "" for no account."""
+    if not account:
+        return ""
+    whose = hashlib.sha256(("openmate-feishu:" + account).encode("utf-8")).hexdigest()[:16]
+    ours = hashlib.sha256(os.path.abspath(app.data_dir or "").encode("utf-8")).hexdigest()[:8]  # this extension's own
+    return os.path.join(BASE or tempfile.gettempdir(), "%s-%d-%s" % (MEDIA_DIR, os.getuid(), ours), whose)
 
 
 def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]:
@@ -230,8 +237,12 @@ def _tidy(folder: str) -> None:
 def _remove_tree(top: str) -> None:
     """An account's folder before, whatever its modes: made writable first (it is this user's), then removed. What is
     left (another user's file in it) is logged, not hidden."""
+    try:
+        os.chmod(top, 0o700)  # a folder that cannot be read cannot be walked
+    except OSError:
+        pass
     for d, subdirs, _ in os.walk(top):
-        for x in [d] + [os.path.join(d, s) for s in subdirs]:
+        for x in [os.path.join(d, s) for s in subdirs]:
             try:
                 if not os.path.islink(x):
                     os.chmod(x, 0o700)

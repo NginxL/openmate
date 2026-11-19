@@ -115,7 +115,9 @@ class MediaToolTest(unittest.TestCase):
         row = picture_row(h)
         h.tool("media", message=row["id"])
         before = folder_of(h)
-        os.chmod(before, 0o500)  # its files cannot be removed as it is: made writable first
+        os.makedirs(os.path.join(before, "sub"))
+        os.chmod(os.path.join(before, "sub"), 0o000)
+        os.chmod(before, 0o000)  # its files cannot even be listed as it is: made usable first
         other = os.path.join(os.path.dirname(os.path.dirname(before)), "openmate-feishu-media-%d-0123abcd" % os.getuid(),
                              "0123456789abcdef")
         os.makedirs(other)  # another instance of the extension (another data directory): never touched
@@ -123,14 +125,9 @@ class MediaToolTest(unittest.TestCase):
             f.write(PNG)
         os.makedirs(os.path.join(os.path.dirname(before), "0123456789abcdef\n"))  # not an account's name
         h.app.store.meta_set("account_id", "user_example_other")
-
-        def gone(ref, most):
-            raise BackendError("附件不在了（可能已被撤回或过期）", "not_found")
-
-        h.app.backend.media = gone
         with self.assertRaises(HubSideError):
-            h.tool("media", message=row["id"])
-        self.assertFalse(os.path.exists(before), "tidied though the fetch failed")
+            h.tool("media", message="7000000000000000001")  # a message the new account does not have
+        self.assertFalse(os.path.exists(before), "tidied though nothing was fetched")
         self.assertTrue(os.path.exists(os.path.join(other, "1.png")))
         self.assertTrue(os.path.isdir(os.path.join(os.path.dirname(before), "0123456789abcdef\n")))
 
