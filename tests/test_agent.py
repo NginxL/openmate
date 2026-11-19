@@ -694,6 +694,10 @@ class PlacementTest(unittest.TestCase):
         self.assertEqual(self.where(notice), (msg.id, None, False))
         wait_until(lambda: h.app.store.run_get(run["id"]).get("notice_id") == notice["id"], what="kept")
         self.assertEqual(h.app.agent._target({"chat_id": msg.chat_id, "parent_id": notice["id"]})["id"], run["id"])
+        newer = ask(h, "/agent 同话题的新请求", root_id=msg.id, thread_id=msg.id, parent_id=notice["id"], placement="thread")
+        later = running(h, newer)
+        stop_in_thread = {"chat_id": msg.chat_id, "parent_id": notice["id"], "root_id": msg.id}
+        self.assertEqual(h.app.agent._target(stop_in_thread)["id"], later["id"], "in a thread: its newest run, as before")
 
     def test_a_copy_is_never_a_command(self):
         h = self.make(agent_reply_header=" ", agent_reply_suffix=SUFFIX, agent_ack_reaction="", agent_auto=True)

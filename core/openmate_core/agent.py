@@ -1547,12 +1547,14 @@ class AgentRunner:
     def _target(self, row: dict) -> Optional[dict]:
         chat_id = row["chat_id"]
         parent = row.get("parent_id") or ""
+        root = row.get("root_id") or ""
         if parent:
             for r in self.store.runs_in_chat(chat_id):
                 if (r["request_id"] == parent or parent in (r.get("reply_ids") or []) or parent == r.get("ack_id")
-                        or parent in (r.get("progress_id"), r.get("notice_id"))):  # in the main stream: no thread
+                        # in the main stream (no thread to find it by) a progress message or a notice is the run's
+                        # too; in a thread the thread's newest run is (it may go on in the same conversation)
+                        or (not root and parent in (r.get("progress_id"), r.get("notice_id")))):
                     return r
-        root = row.get("root_id") or ""
         if root:
             runs = self.store.runs_in_thread(chat_id, root)
             if runs:
