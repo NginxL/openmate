@@ -364,23 +364,37 @@ class MappingTest(Base):
         self.assertEqual(S.chat_info_calls.count("507"), 1)
         S.chats["508"] = {"id": "508", "name": "示例群"}  # its record does not say which kind of chat
         self.assertEqual(self.m(chat_id="508", msg_id="123", _placement=none, **bare).root_id, "90", "not known")
-        self.b._kinds["507"] = (0.0, True)  # known as an ordinary group a while ago; now a thread-first one
+        self.b._kinds["507"] = (0.0, True, 0.0)  # known as an ordinary group a while ago; now a thread-first one
         S.chats["507"] = {"id": "507", "type": 2, "name": "示例群", "chatMode": 2}
         self.assertEqual(self.m(chat_id="507", msg_id="124", _placement=none, **bare).root_id, "90", "read again")
         self.m(chat_id="506", msg_id="125", _placement=none, **bare)
         self.assertEqual(S.chat_info_calls.count("506"), 1, "a failure is not asked again per message")
         # a read of the chat's record for anything else says its kind too
         S.chats["509"] = {"id": "509", "type": 2, "name": "示例群", "chatMode": 3}
-        self.b._kinds["509"] = (time.monotonic() + 600, True)
+        self.b._kinds["509"] = (time.monotonic() + 600, True, 0.0)
         self.b._chat_read(self.b._client, "509")
         self.assertEqual(self.m(chat_id="509", msg_id="126", _placement=none, **bare).root_id, "90", "now thread-first")
         # a failure that ends after another read said the kind does not undo it
         def late(client, chat_id, me=None):
-            self.b._kinds[chat_id] = (time.monotonic() + 600, True)
+            self.b._kinds[chat_id] = (time.monotonic() + 600, True, time.monotonic())
             raise ValueError("timed out")
         self.b._chat_read = late
         self.assertEqual(self.m(chat_id="510", msg_id="127", _placement=none, **bare).root_id, "")
         self.assertTrue(self.b._kinds["510"][1])
+        # a read asked before the one kept says nothing, however late it ends
+        self.b._note_kind("511", False, 20.0)
+        self.b._note_kind("511", True, 10.0)
+        self.assertFalse(self.b._kinds["511"][1])
+        # the recent chats say a group is thread-first now
+        self.b._kinds["512"] = (time.monotonic() + 600, True, 0.0)
+        S.api_answers["chats.PullRecentChatsRequest"] = {
+            "chats": {"512": {"id": "512", "type": 2, "name": "示例群", "chatMode": 3}}, "orderedChatIds": ["512"]}
+        self.b.recent_chats(5)
+        self.assertEqual(self.m(chat_id="512", msg_id="128", _placement=none, **bare).root_id, "90")
+        # an account no longer signed in asks nothing
+        n = len(S.chat_info_calls)
+        self.assertFalse(self.b._plain_group(object(), "513"))
+        self.assertEqual(len(S.chat_info_calls), n)
         self.assertEqual(self.m(chat_id="504", chat_type=1, root_id="90", anchor="90", content_data=t).placement, "",
                          "a direct chat")
         self.b._peers["501"] = "7003"  # known as a direct chat, though the push did not say so

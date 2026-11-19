@@ -534,7 +534,8 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
-        self._kinds: Dict[str, Tuple[float, bool]] = {}  # chat id → (until, known as an ordinary group: _plain_group)
+        # chat id → (until, known as an ordinary group: _plain_group, when the read that said so was asked)
+        self._kinds: Dict[str, Tuple[float, bool, float]] = {}
         self._synced: Dict[str, str] = {}  # message id → how it also went to the main stream (synced_mark), the newest
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
@@ -1467,9 +1468,12 @@ class LarkXBackend(Backend):
         if chat_type in (3, "TOPIC_GROUP") or client is None:
             return False
         with self._lock:
-            hit = self._kinds.get(chat_id) if self._client is client else None
+            if self._client is not client:  # an account no longer signed in: nothing asked for it
+                return False
+            hit = self._kinds.get(chat_id)
         if hit is not None and hit[0] > time.monotonic():
             return hit[1]
+        asked = time.monotonic()
         try:
             self._chat_read(client, chat_id)  # notes the kind
         except Exception:
@@ -1481,18 +1485,17 @@ class LarkXBackend(Backend):
             hit = self._kinds.get(chat_id)
             if hit is not None and hit[0] > now:
                 return hit[1]
-            self._kinds[chat_id] = (now + KIND_UNKNOWN_TTL, False)  # not read, or no type: not known for a while
+            self._kinds[chat_id] = (now + KIND_UNKNOWN_TTL, False, asked)  # not read, or no type: not known a while
             self._trim_kinds()
         return False
 
-    def _note_kind(self, chat_id: str, info: dict) -> None:
-        """What a chat's record just read says of its kind (_plain_group); with the lock held, for the account it was
-        read for. A record without a type says nothing."""
-        if not isinstance(info, dict) or "type" not in info:
+    def _note_kind(self, chat_id: str, plain: bool, asked: float) -> None:
+        """What a read of a chat asked at `asked` says of its kind (_plain_group); with the lock held, for the account
+        it was read for. A read asked before the one kept says nothing."""
+        hit = self._kinds.get(chat_id)
+        if hit is not None and hit[2] > asked:
             return
-        dec = self.lx.decoders
-        plain = dec.enum_to_int(info.get("type")) == 2 and not dec.is_thread_chat(info)
-        self._kinds[chat_id] = (time.monotonic() + CHAT_TTL, plain)
+        self._kinds[chat_id] = (time.monotonic() + CHAT_TTL, plain, asked)
         self._trim_kinds()
 
     def _trim_kinds(self) -> None:
@@ -1773,6 +1776,7 @@ class LarkXBackend(Backend):
     def _chat_read(self, client, chat_id: str, me: Optional[Account] = None) -> Tuple[dict, Chat]:
         """The service's answer about a chat and the chat it makes, kept for the session that asked (while it is the
         one)."""
+        asked = time.monotonic()
         try:
             info = client.get_chat_info(chat_id)
         except Exception as e:
@@ -1786,7 +1790,10 @@ class LarkXBackend(Backend):
         with self._lock:
             if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
                 self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
-                self._note_kind(chat_id, info)
+                if "type" in info:  # a record without a type says nothing of the kind
+                    dec = self.lx.decoders
+                    self._note_kind(chat_id, dec.enum_to_int(info.get("type")) == 2 and not dec.is_thread_chat(info),
+                                    asked)
                 last = _int(info.get("lastMessagePosition"))
                 if last > self._last_pos.get(chat_id, 0):
                     self._last_pos[chat_id] = last
@@ -1844,6 +1851,7 @@ class LarkXBackend(Backend):
         chats: List[Chat] = []
         failed: Optional[Exception] = None
         answered = False
+        asked = time.monotonic()
         for how in (self._recent_from_chats, self._recent_from_feed):
             try:
                 chats = how(client, limit)
@@ -1862,6 +1870,8 @@ class LarkXBackend(Backend):
             if self._still(me):
                 for c in chats:
                     self._chats[c.id] = (now + CHAT_TTL, c)
+                    if c.topic:  # a thread-first group now (an ordinary one is told only by its own record)
+                        self._note_kind(c.id, False, asked)
         return chats[:limit]
 
     def _recent_from_chats(self, client, limit: int) -> List[Chat]:
