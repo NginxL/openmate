@@ -619,6 +619,77 @@ class SignInTest(unittest.TestCase):
         wait_until(lambda: app._creds_writer is None, what="the rotation writer to end")
         self.assertEqual(secret_json(h.hub.secrets[CID]), a_creds, "the failed sign-in's rotation sealed over A's")
 
+    def test_a_rotation_while_the_store_changes_hands_waits_for_the_sealing(self):
+        h = signed_in(self)  # A stays signed in; the user scans the other account's QR
+        app = h.app
+        a_creds = secret_json(h.hub.secrets[CID])
+        binding = hold(self, app, "_bind_account", lambda *a, **kw: True)
+        first = [True]
+
+        def sealing(creds):  # the other account's sign-in cannot be sealed
+            if first[0]:
+                first[0] = False
+                raise HubSideError("unavailable", "secrets unavailable")
+
+        h.world.me = OTHER
+        signing = background(h.sign_in)
+        self.assertTrue(binding.entered.wait(5), "the adapter answers as the other account; the store is A's still")
+        try:
+            app._credentials_rotated({"fixture_token": "rotated", "user": OTHER.id})  # its session refreshed meanwhile
+            time.sleep(0.2)  # the background writer had its chance
+            self.assertEqual(secret_json(h.hub.secrets[CID]), a_creds, "the other account's rotation sealed before it")
+            h.hub.save_hook = sealing
+        finally:
+            binding.go.set()
+        signing.join(10)
+        self.assertIn("error", signing.out)
+        wait_until(lambda: app._creds_writer is None, what="the rotation writer to end")
+        self.assertEqual(secret_json(h.hub.secrets[CID]), a_creds, "the failed sign-in's rotation sealed over A's")
+
+    def test_a_hand_over_that_does_not_end_counts_as_another_account(self):
+        from openmate_core import app as appmod
+
+        h = signed_in(self)
+        app = h.app
+        self.addCleanup(setattr, appmod, "HANDOFF_WAIT", appmod.HANDOFF_WAIT)
+        appmod.HANDOFF_WAIT = 0.2
+        epoch = app.account_epoch()
+        binding = hold(self, app, "_bind_account", lambda *a, **kw: True)
+        h.world.me = OTHER
+        signing = background(h.sign_in)
+        self.assertTrue(binding.entered.wait(5))
+        try:
+            self.assertFalse(app.owns(epoch), "A's work went on while the store was still changing hands")
+        finally:
+            binding.go.set()
+        signing.join(10)
+        self.assertNotIn("error", signing.out)
+
+    def test_the_next_accounts_own_document_mention_while_it_is_sealed_is_answered(self):
+        h = signed_in(self, {"agent": True, "auto_reply_docs": True, "agent_reply_header": " "})
+        app = h.app
+        paused, go = threading.Event(), threading.Event()
+
+        def sealing(creds):
+            paused.set()
+            go.wait(10)
+
+        h.hub.save_hook = sealing
+        h.world.me = OTHER  # scanned while A stays signed in
+        h.world.people["user_example_e"] = "另一个账号的同事"
+        signing = background(h.sign_in)
+        try:
+            self.assertTrue(paused.wait(5), "the other account's sign-in is being sealed")
+            app._doc_mention(DocMention(id="doc_mention_b_early", doc_url="https://example.feishu.cn/docx/ExampleDoc004",
+                                        doc_title="示例文档", comment_id="c1", from_id="user_example_e",
+                                        from_name="另一个账号的同事", text="@另一个示例用户 看下这里", at=time.time()),
+                             account=OTHER.id)
+            wait_until(lambda: app.store.run_count() == 1, what="the other account's own document mention taken")
+        finally:
+            go.set()
+        signing.join(10)
+        self.assertNotIn("error", signing.out)
+
     def test_the_next_accounts_own_group_left_while_it_is_sealed_is_kept(self):
         h = signed_in(self)
         app = h.app
@@ -642,46 +713,6 @@ class SignInTest(unittest.TestCase):
         signing.join(10)
         self.assertNotIn("error", signing.out)
 
-
-class PeopleAcrossSwitchTest(unittest.TestCase):
-    def test_who_is_asked_about_for_the_account_before_is_not_kept_for_the_next(self):
-        d = tempfile.mkdtemp(prefix="openmate-test-")
-        self.addCleanup(shutil.rmtree, d, True)
-        store = Store(os.path.join(d, "openmate.db"))
-        self.addCleanup(store.close)
-        gen = [1]
-
-        class Backend:
-            def people_kinds(self, ids):
-                return {i: "user" for i in ids}
-
-        import contextlib
-
-        class App:  # just what People reads of the connector
-            def __init__(self):
-                self.store, self.backend, self.signed_in = store, Backend(), True
-
-            def account_epoch(self):
-                return gen[0]
-
-            def owns(self, epoch, account="", owner="", settle=True):
-                return epoch is None or epoch == gen[0]
-
-            @contextlib.contextmanager
-            def owned(self, epoch, account="", owner=""):
-                yield self.owns(epoch)
-
-            def mark_changed(self, *scopes):
-                pass
-
-        later = []
-        people = People(App(), spawn=later.append)
-        people._can = lambda: True
-        people.bots(["user_example_a_contact"])  # A's page draws someone not known yet: asked about behind
-        gen[0] = 2  # another account signs in before the question goes
-        for run in later:
-            run()
-        self.assertEqual(store.people_kinds(["user_example_a_contact"]), {}, "asked for A, kept for the next")
 
     def test_a_sign_in_that_fails_while_its_link_reconnected_leaves_nothing_running(self):
         h = signed_in(self)  # A stays signed in; the user scans the other account's QR
@@ -740,7 +771,7 @@ class PeopleAcrossSwitchTest(unittest.TestCase):
         signing = background(h.sign_in)
         try:
             wait_until(lambda: app.account_epoch() > before, what="the store bound while the lock is busy")
-            self.assertIsNone(app.account, "nothing said to be A's while the adapter answers as the other")
+            self.assertEqual(app.account.id, OTHER.id, "the account said is the one the store is bound to, never A")
         finally:
             free.set()
         signing.join(10)
@@ -823,6 +854,75 @@ class StoreAcrossSwitchTest(unittest.TestCase):
         self.assertTrue(store.run_wiped("omr_example_pruned"))
         self.assertFalse(store.run_put(held))
         self.assertIsNone(store.run_get("omr_example_pruned"))
+
+
+class PeopleAcrossSwitchTest(unittest.TestCase):
+    def test_who_is_asked_about_for_the_account_before_is_not_kept_for_the_next(self):
+        d = tempfile.mkdtemp(prefix="openmate-test-")
+        self.addCleanup(shutil.rmtree, d, True)
+        store = Store(os.path.join(d, "openmate.db"))
+        self.addCleanup(store.close)
+        gen = [1]
+
+        class Backend:
+            def people_kinds(self, ids):
+                return {i: "user" for i in ids}
+
+        import contextlib
+
+        class App:  # just what People reads of the connector
+            def __init__(self):
+                self.store, self.backend, self.signed_in = store, Backend(), True
+
+            def account_epoch(self):
+                return gen[0]
+
+            def owns(self, epoch, account="", owner="", settle=True):
+                return epoch is None or epoch == gen[0]
+
+            @contextlib.contextmanager
+            def owned(self, epoch, account="", owner=""):
+                yield self.owns(epoch)
+
+            def mark_changed(self, *scopes):
+                pass
+
+        later = []
+        people = People(App(), spawn=later.append)
+        people._can = lambda: True
+        people.bots(["user_example_a_contact"])  # A's page draws someone not known yet: asked about behind
+        gen[0] = 2  # another account signs in before the question goes
+        for run in later:
+            run()
+        self.assertEqual(store.people_kinds(["user_example_a_contact"]), {}, "asked for A, kept for the next")
+
+    def test_a_draw_of_the_account_before_queues_nothing_for_the_next(self):
+        import contextlib
+
+        gen = [2]  # the other account is bound already
+
+        class App:
+            store, signed_in = None, True
+
+            def account_epoch(self):
+                return gen[0]
+
+            def owns(self, epoch, account="", owner="", settle=True):
+                return epoch is None or epoch == gen[0]
+
+            @contextlib.contextmanager
+            def owned(self, epoch, account="", owner=""):
+                yield self.owns(epoch)
+
+            def mark_changed(self, *scopes):
+                pass
+
+        later = []
+        people = People(App(), spawn=later.append)
+        people._can = lambda: True
+        people._epoch = lambda: 1  # the draw began for the account before; forget ran before it queued them
+        people._ask({"user_example_shared"})
+        self.assertEqual((people._want, people._asking), ({}, set()), "queued for the next account, never let go")
 
 
 if __name__ == "__main__":

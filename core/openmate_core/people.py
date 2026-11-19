@@ -96,8 +96,11 @@ class People:
         if not self._can():
             return
         epoch = self._epoch()  # the account whose draw wants them: asked and kept for that one only
+        owns = getattr(self.app, "owns", None)
         now = self.clock()
         with self._mu:
+            if epoch is not None and owns is not None and not owns(epoch, settle=False):
+                return  # drawn for the account before (forget may have run already): nothing queued for the next
             for i in ids:
                 if now >= self._next.get(i, now) and i not in self._asking:
                     self._want.setdefault(i, epoch)
@@ -136,8 +139,8 @@ class People:
             now = self.clock()
             with self._mu:  # forget empties these under this lock, after the generation moved on: checked again here
                 switched = switched or (epoch is not None and owns is not None and not owns(epoch, settle=False))
-                if not switched:
-                    self._asking.difference_update(batch)  # stored (or put off) before they leave the set
+                self._asking.difference_update(batch)  # stored (or put off, or let go) before they leave the set
+                if not switched:  # asked for the account before: nothing put off for the next
                     for i in batch:
                         if i not in kinds:
                             self._next[i] = now + wait

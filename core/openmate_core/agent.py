@@ -305,23 +305,21 @@ class AgentRunner:
             return self._digest(text) in self._posted
 
     def _remember_post(self, body: str, run: Optional[dict] = None) -> None:
-        if run is not None:
-            self._settle()
+        if run is not None and not self._settle():
+            return  # still being taken in: nothing goes out for it now
         with self._mu:  # checked where forget empties it: an echo of a wiped run never outlives the switch
             if run is not None and self.store.run_wiped(run["id"]):
                 return  # nothing goes out for it: no echo to look for (and none to hide the next account's lines)
             self._posted[self._digest(body)] = time.time()
 
-    def _settle(self) -> None:
+    def _settle(self) -> bool:
         settle = getattr(self.app, "settle", None)
-        if settle is not None:
-            settle()  # a sign-in being taken in: decided once it is bound
+        return settle() if settle is not None else True  # a sign-in being taken in: decided once it is bound
 
     def _gone(self, run_id: str) -> bool:
         """Nothing goes out in the user's name for the run: it was the account's signed in before, wiped by the
-        switch (a sign-in being taken in is waited for first)."""
-        self._settle()
-        return self.store.run_wiped(run_id)
+        switch, or a sign-in is still being taken in after the wait (a sign-in being taken in is waited for first)."""
+        return not self._settle() or self.store.run_wiped(run_id)
 
     def forget(self) -> None:
         """Another account signed in: what /agent posted for the one before is no echo of the next one's lines."""

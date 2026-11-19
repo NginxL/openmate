@@ -115,6 +115,7 @@ class ConnectorApp:
         self._creds_mu = threading.Lock()
         self._creds_gen = 0
         self._creds_out = False
+        self._creds_hold = False  # a sign-in is being taken in and sealed: rotations handed over meanwhile wait
         self._login_gen = 0  # the credentials generation the QR sign-in under way started in
         self._creds_seq = 0
         self._creds_sealed_seq = 0
@@ -407,7 +408,7 @@ class ConnectorApp:
                     return
             ok = False
             try:
-                ok = self._seal_rotation(*rot)
+                ok = self._seal_rotation(*rot, held=True)
             except Exception:
                 log.exception("saving refreshed credentials failed")
             tries = 0 if ok else (tries + 1 if rot[1] == last else 1)  # counted per rotation
@@ -418,13 +419,16 @@ class ConnectorApp:
                         self._creds_next = rot  # nothing newer: the same again, a little later
                 self.closing.wait(self.timing.secrets_retry * tries)
 
-    def _seal_rotation(self, gen: int, seq: int, creds: dict) -> bool:
+    def _seal_rotation(self, gen: int, seq: int, creds: dict, held: bool = False) -> bool:
         """Write rotated credentials unless a sign-in or logout came after they were handed over, or newer ones are
-        already written."""
+        already written. held: one handed over in the background, which waits while a sign-in is being sealed (it
+        is written after a sealed one only if no sign-in came between, never after one that failed)."""
         with self._creds_mu:
             if gen != self._creds_gen or self._creds_out:
                 log.info("rotated credentials from a session that ended: not saved")
                 return False
+            if held and self._creds_hold:
+                return False  # a sign-in is being sealed: tried again after it (or dropped when it moved gen on)
             if seq <= self._creds_sealed_seq:
                 return True  # newer ones are sealed already
             try:
@@ -813,19 +817,22 @@ class ConnectorApp:
         with self.lock:
             return self._account_epoch
 
-    def settle(self) -> None:
+    def settle(self) -> bool:
         """While a sign-in's account is being taken in (the adapter may answer as it already), wait until the store is
-        bound to it (a little at most): what an account's work does next is decided then, by its generation. Never
-        under _wipe_mu or a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
+        bound to it (a little at most): what an account's work does next is decided then, by its generation. False
+        when it is still being taken in after the wait (nothing of an account's goes on then). Never under _wipe_mu
+        or a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
         if self._handoff and self._handoff_by is not threading.current_thread():
             self._handed.wait(HANDOFF_WAIT)
+            return not self._handoff or self.closing.is_set()
+        return True
 
     def owns(self, epoch: Optional[int], account: str = "", owner: str = "", settle: bool = True) -> bool:
         """The store is still that of the account of epoch (None: whichever is signed in now), of account (the one
         signed in, when the adapter says whose) and of owner (the one the store is bound to), and it is open. A
         check alone, before work that would be wasted (after settle); a write takes owned."""
-        if settle:
-            self.settle()
+        if settle and not self.settle():
+            return False
         with self.lock:
             return (epoch is None or epoch == self._account_epoch) and not self.closing.is_set() and (
                 not account or (self.account is not None and self.account.id == account)) and (
@@ -836,9 +843,9 @@ class ConnectorApp:
         """Hold off an account switch's wipe (and the store's close) while writing down what a read or a live line of
         one account brought: yields owns(epoch, account, owner). Only store work under it, nothing that waits on the
         network. A sign-in's hand-over is waited for first (settle)."""
-        self.settle()
+        settled = self.settle()
         with self._wipe_mu:
-            yield self.owns(epoch, account, owner, settle=False)
+            yield settled and self.owns(epoch, account, owner, settle=False)
 
     def _bind_account(self, acct: Account) -> None:
         """The store belongs to this account from now on: another account's chats and marks are forgotten first, in
@@ -857,6 +864,7 @@ class ConnectorApp:
                     self._account_epoch += 1
                     self._owner = acct.id
                     self.account = None  # until this one is remembered: nothing said to be the other's is kept
+                    self._blank_tried = {}  # when the one before last tried an empty message is not this one's
                 # after the generation moved on (what was on its way checks it again under their own locks)
                 if self.people is not None:
                     self.people.forget()  # whom the one before was to ask about
@@ -1362,18 +1370,30 @@ class ConnectorApp:
 
     def _signed_in(self, done) -> dict:
         """A sign-in finished (a QR scanned, or one with nothing to scan): seal it and start the link. Under
-        _login_lock."""
+        _login_lock.
+        The adapter answers as the new account from now on: the store is that account's at once (another account's
+        wiped, the generation moved on), before anything here waits (a rotation being sealed holds _creds_mu), so
+        nothing read meanwhile is kept for the account before; an account's work waits until it is bound (settle)
+        and goes on only if it is still its store. A sign-in voided or not sealed leaves the store the new account's:
+        it is signed out here then, and the next sign-in or restore binds again."""
+        with self._creds_cv:
+            self._creds_hold = True  # until this sign-in is sealed (or not): background rotations wait
+        try:
+            voided, unsaved = self._take_in(done)
+        finally:
+            with self._creds_cv:
+                self._creds_hold = False
+        return self._after_take_in(done, voided, unsaved)
+
+    def _take_in(self, done) -> tuple:
+        """Bind the store to the account and seal its sign-in: (voided, unsaved)."""
         voided = unsaved = False
-        # The adapter answers as the new account from now on: the store is that account's at once (another account's
-        # wiped, the generation moved on), before anything here waits (a rotation being sealed holds _creds_mu), so
-        # nothing read meanwhile is kept for the account before; an account's work waits until it is bound (settle)
-        # and goes on only if it is still its store. A sign-in voided or not sealed below leaves the store the new
-        # account's: it is signed out here then, and the next sign-in or restore binds again.
         self._handed.clear()
         self._handoff_by = threading.current_thread()
         self._handoff = True
         try:
             self._bind_account(done.account)
+            self._remember_account(done.account)  # the store is its: what is said of the account is this one's
         except Exception:
             log.exception("the store could not be taken over by the account signed in")
             self._abandon_sign_in("登录没有完成，请重新扫码登录")
@@ -1399,6 +1419,9 @@ class ConnectorApp:
                     unsaved = True
                     with self._creds_cv:  # a rotation of this sign-in's session handed over meanwhile is not written
                         self._creds_gen += 1
+        return voided, unsaved
+
+    def _after_take_in(self, done, voided: bool, unsaved: bool) -> dict:
         if unsaved:
             # the adapter took this sign-in, the core keeps the one before: the adapter lets it go (outside
             # _creds_mu, as for a voided one), so nothing is sent as an account the core does not know it has
@@ -1408,6 +1431,7 @@ class ConnectorApp:
             # the logout stops the links itself (and says so); outside _creds_mu: the adapter may be sealing under its
             # own lock and waiting for it
             self._login = None
+            self.account = None
             try:
                 self.backend.logout()
             except Exception:
@@ -1416,7 +1440,6 @@ class ConnectorApp:
         self._login = None
         acct = done.account
         self.creds = "present"
-        self._remember_account(acct)
         self._catchup_done.clear()
         if not self.connector_on:
             # signed in, but the user turned the connector off in Persona: nothing is received or sent
@@ -1437,6 +1460,7 @@ class ConnectorApp:
         """A sign-in the adapter took and the core does not keep (voided, not sealed, not bound): every link stops (one
         may have reconnected as the new account meanwhile), the status says why, and the adapter lets it go."""
         self._login = None
+        self.account = None  # not signed in as it here
         with self.lock:
             self._gen += 1
             self._link_stop.set()
@@ -1516,7 +1540,6 @@ class ConnectorApp:
                      to_chat: bool = False) -> str:
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
-        self.settle()  # a sign-in being taken in: sent once it is bound (the caller checks whose it was)
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
@@ -1527,7 +1550,6 @@ class ConnectorApp:
         """A picture (an /agent reply's, checked and copied by images.take) into the chat as the user."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
-        self.settle()
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if not getattr(self.backend, "can_send_images", False):

@@ -8,6 +8,7 @@ The page's badge (ui.badge) is how many chats need the user; it is sent again wh
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import logging
@@ -18,6 +19,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import views
 from .textutil import one_line
+
+
+def account_epoch(app) -> Optional[int]:
+    """The connector's account generation when a page action begins (a stand-in app may have none)."""
+    get = getattr(app, "account_epoch", None)
+    return get() if get is not None else None
+
+
+def owned(app, epoch: Optional[int]):
+    """The connector's owned(epoch) (a write for the account the action began for), or always yes for a stand-in."""
+    fn = getattr(app, "owned", None)
+    return fn(epoch) if fn is not None else contextlib.nullcontext(True)
 from .wire import RPCError
 
 log = logging.getLogger("openmate.ui")
@@ -455,14 +468,17 @@ class ChatsToday:
         """Mark a chat's need 处理完 (until a newer message, or a newer @me in a group). With version, only the need
         the page showed: "newer" when a newer message came since (it stays), "none" when it needs nothing now, "ok"."""
         app = self.app
+        epoch = account_epoch(app)  # the need is this account's: kept for it only
         key = "chat:" + chat_id
         before = app.store.dismissed([key]).get(key)  # read before the need: a mark written since fails the write
         for t in self.needs(only={chat_id}) + self.done:
             if t["_chat"]["id"] == chat_id:
                 if version is not None and version != t["_version"]:
                     return "newer"
-                if before != t["_version"] and not app.store.dismiss_if(t["_done_key"], t["_version"], before):
-                    return "none"  # marked meanwhile (another page, the service's 完成): as it is now
+                with owned(app, epoch) as ok:
+                    if not ok or (before != t["_version"]
+                                  and not app.store.dismiss_if(t["_done_key"], t["_version"], before)):
+                        return "none"  # marked meanwhile (another page, the service's 完成; another account)
                 if hasattr(app, "mark_changed"):
                     app.mark_changed("inbox")  # the badge counts again
                 return "ok"
@@ -473,11 +489,15 @@ class ChatsToday:
         mark says so until the service is seen not done). Nothing when it is not 处理完 now (a newer message already
         brought it back: a 恢复 from a page drawn before must not cover that one)."""
         app = self.app
+        epoch = account_epoch(app)
         self.needs(only={chat_id})
         t = next((t for t in self.done if t["_chat"]["id"] == chat_id), None)
         if t is None:
             return
-        app.store.dismiss_if(t["_done_key"], REOPENED + t["_version"], t["_version"])
+        with owned(app, epoch) as ok:
+            if not ok:
+                return  # another account signed in meanwhile: its marks are its own
+            app.store.dismiss_if(t["_done_key"], REOPENED + t["_version"], t["_version"])
         if hasattr(app, "ask_done"):
             app.ask_done([chat_id])  # the service not done there now: a 完成 there from now on counts again
         if hasattr(app, "mark_changed"):

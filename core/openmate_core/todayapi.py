@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from . import views
 from .textutil import one_line
-from .ui import ChatsToday, day_start
+from .ui import ChatsToday, account_epoch, day_start, owned
 
 log = logging.getLogger("openmate.http")
 
@@ -116,6 +116,7 @@ def done(app, body: dict) -> dict:
     if not chat_id or not version:
         raise Refused(400, "invalid_params", "要给出 chat 和 version")
     _signed_in_as(app, account)
+    epoch = account_epoch(app)  # the account it was asked as: its mark is kept for it only
     key = "chat:" + chat_id
     marked = app.store.dismissed([key]).get(key)  # read before the need: a mark written after this makes the write fail
     data = ChatsToday(app)
@@ -127,8 +128,9 @@ def done(app, body: dict) -> dict:
         raise Refused(404, "not_found", "这个会话现在没有要处理的了")
     if t["_version"] != version:
         raise Refused(409, "changed", "有新消息，已刷新")
-    if not app.store.dismiss_if(key, version, marked):
-        raise Refused(409, "changed", "刚刚有了变化，已刷新")
+    with owned(app, epoch) as ok:
+        if not ok or not app.store.dismiss_if(key, version, marked):
+            raise Refused(409, "changed", "刚刚有了变化，已刷新")
     if hasattr(app, "mark_changed"):
         app.mark_changed("inbox")
     return {"ok": True}
