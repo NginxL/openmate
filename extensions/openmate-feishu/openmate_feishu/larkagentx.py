@@ -1982,6 +1982,23 @@ class LarkXBackend(Backend):
         if status is not None and _int(status) not in (0, 200):  # only a status came back: it was refused
             raise BackendError("%s没有接受这次编辑（状态 %d）" % (self.region.label, _int(status)), "unavailable")
 
+    can_recall = True
+
+    def recall(self, chat_id: str, message_id: str) -> None:
+        """Take back (撤回) a message of the account's, for everyone in the chat: LarkAgentX's public api with the
+        client's own delete-message request (its one field: the message's id)."""
+        mid = _id(message_id)
+        if not mid.isdigit():
+            raise BackendError("要撤回的%s消息 id 不对" % self.region.label, "not_found")
+        client, _ = self._signed_in()
+        try:
+            resp = client.api("messages.DeleteMessageRequest", {"id": mid})
+        except Exception as e:
+            raise BackendError("%s没有撤回这条消息（%s）" % (self.region.label, e.__class__.__name__), "unavailable")
+        status = resp.get("status") if isinstance(resp, dict) else None
+        if status is not None and _int(status) not in (0, 200):  # only a status came back: it was refused
+            raise BackendError("%s没有撤回这条消息（状态 %d）" % (self.region.label, _int(status)), "unavailable")
+
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         ids = [i for i in (_id(u) for u in user_ids) if i]
         if not ids:

@@ -37,6 +37,8 @@ def fast(**kw) -> Timing:
     base = dict(debounce=0.15, backoff_min=0.05, backoff_max=0.2, stable_after=0.3, login_wait=3.0, agent_poll=0.05,
                 agent_timeout=60.0, agent_hub_wait=5.0, agent_hub_probe=0.05, agent_settle=0.1, secrets_retry=0.05,
                 sent_retry=(0.05, 0.05, 0.05), warm_pages=False, agent_model_wait=1.0)
+    if "channel_poll" in Timing.__dataclass_fields__:  # the channel's (older code has none: its tests fail elsewhere)
+        base.update(channel_poll=0.05, channel_retry=(0.05, 0.05))
     base.update(kw)
     return Timing(**base)
 
@@ -91,6 +93,9 @@ class StdioHub:
         self.sent_records: List[dict] = []  # sent.record calls the hub accepted
         self.sent_calls = 0
         self.sent_answer: Optional[Callable[[dict], Any]] = None  # before accepting: raise HubSideError to refuse
+        self.received: List[dict] = []  # channel.receive calls the hub took (the owner's messages handed over)
+        self.receive_answer: Optional[Callable[[dict], Any]] = None  # before taking one: raise HubSideError to refuse
+        self.receive_calls = 0
         self.calls: List[tuple] = []
         self.events: List[tuple] = []
         self.raw_lines: List[bytes] = []
@@ -154,6 +159,21 @@ class StdioHub:
                     raise HubSideError("invalid_params", "sent.record: target is not an object")
                 with self._cv:
                     self.sent_records.append(params)
+                    self._cv.notify_all()
+                result = {}
+            elif method == "channel.receive":
+                # docs/extensions/channels.md "Protocol": the owner's message, deduplicated by its id
+                with self._cv:
+                    self.receive_calls += 1
+                if self.receive_answer is not None:
+                    self.receive_answer(params)
+                m = params.get("message")
+                if not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m["id"]:
+                    raise HubSideError("invalid_params", "channel.receive: message.id")
+                with self._cv:
+                    if not any(r["message"]["id"] == m["id"] and r.get("contribution") == params.get("contribution")
+                               for r in self.received):
+                        self.received.append(params)
                     self._cv.notify_all()
                 result = {}
             elif method == "cli.call":
@@ -220,6 +240,8 @@ class FakeHubHTTP:
         self.send_refused: Dict[str, Any] = {}  # session id → status, or (status, code, delivered), its messages get
         self.send_hook: Dict[str, Any] = {}  # session id → fn() run (once) as a message to it arrives; may answer for it
         self.lost_send_status = (502, "hub_unreachable")  # what a lost send (lost_sends) answers
+        self.interactions: List[dict] = []  # GET /api/v1/interactions (agents.read): the cards waiting for an answer
+        self.interactions_status: Optional[int] = None  # an HTTP status that route answers instead
         self._n = itertools.count(1)
         hub = self
 
@@ -323,6 +345,10 @@ class FakeHubHTTP:
         with self.lock:
             return [r for r in self.requests if r["method"] == "GET" and r["path"] == "/api/v1/sessions"]
 
+    def interactions_asked(self) -> int:
+        with self.lock:
+            return sum(1 for r in self.requests if r["method"] == "GET" and r["path"] == "/api/v1/interactions")
+
     def starts(self) -> List[dict]:
         with self.lock:
             return [r for r in self.requests if r["method"] == "POST" and r["path"] == "/api/v1/assistant/conversations"]
@@ -402,6 +428,10 @@ class FakeHubHTTP:
                                                 **({"stopped_at": "2026-11-19T00:00:01Z", "stopped_by": "lark"}
                                                    if s.get("stopped") else {}))
                                            for sid, s in self.sessions.items() if s.get("reporter")]}
+            if method == "GET" and p == "/api/v1/interactions":
+                if self.interactions_status:
+                    return self.interactions_status, {"error": "refused"}
+                return 200, {"interactions": [dict(i) for i in self.interactions]}
             if method == "GET" and p == "/api/v1/todos":
                 if self.todos_delay:
                     self.lock.release()

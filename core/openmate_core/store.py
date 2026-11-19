@@ -99,6 +99,29 @@ _SCHEMA = [
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
+    # Persona's 渠道 (channel.py): the user's lines handed to Persona ("in": where each was asked, so the answer goes
+    # back there) and what Persona's channel sent ("out": a reply quoting one is for Persona too)
+    """CREATE TABLE IF NOT EXISTS channel_msgs (
+        chat_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        dir TEXT NOT NULL,
+        placement TEXT NOT NULL DEFAULT '',
+        root_id TEXT NOT NULL DEFAULT '',
+        ref TEXT NOT NULL DEFAULT '',
+        at REAL NOT NULL,
+        PRIMARY KEY (chat_id, id))""",
+    # the questions Persona put in the channel chat (one row per message sent for it), till they ended: seen waiting
+    # at the hub at least once, answered here (a reply of the user's while it waited), and how each ended
+    """CREATE TABLE IF NOT EXISTS channel_asks (
+        ix TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        at REAL NOT NULL,
+        seen INTEGER NOT NULL DEFAULT 0,
+        here INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'open',
+        ended REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (ix, message_id))""",
 ]
 
 _MESSAGE_COLUMNS = (
@@ -801,6 +824,62 @@ class Store:
         self._tx(run)
         return n[0]
 
+    def chat_ids_named(self, name: str) -> List[str]:
+        """The chats (none the account left) with exactly this name."""
+        rows = self._all("SELECT id FROM chats WHERE name = ? AND id NOT IN (SELECT chat_id FROM gone) ORDER BY id",
+                         (name,))
+        return [r["id"] for r in rows]
+
+    # ---- Persona's 渠道 ----
+
+    def channel_msg_put(self, chat_id: str, msg_id: str, direction: str, placement: str = "", root_id: str = "",
+                        ref: str = "", now: Optional[float] = None) -> None:
+        self._tx(lambda db: db.execute(
+            "INSERT OR REPLACE INTO channel_msgs (chat_id, id, dir, placement, root_id, ref, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, msg_id, direction, placement or "", root_id or "", ref or "", now or time.time())))
+
+    def channel_msg(self, chat_id: str, msg_id: str) -> Optional[dict]:
+        r = self._one("SELECT * FROM channel_msgs WHERE chat_id = ? AND id = ?", (chat_id, msg_id))
+        return dict(r) if r else None
+
+    def channel_ask_put(self, ix: str, chat_id: str, message_id: str, now: Optional[float] = None) -> None:
+        self._tx(lambda db: db.execute(
+            "INSERT OR IGNORE INTO channel_asks (ix, chat_id, message_id, at) VALUES (?, ?, ?, ?)",
+            (ix, chat_id, message_id, now or time.time())))
+
+    def channel_asks_open(self, chat_id: Optional[str] = None) -> List[dict]:
+        """The questions not known to have ended (of one chat, or all), the oldest first."""
+        if chat_id is None:
+            rows = self._all("SELECT * FROM channel_asks WHERE state = 'open' ORDER BY at, ix")
+        else:
+            rows = self._all("SELECT * FROM channel_asks WHERE state = 'open' AND chat_id = ? ORDER BY at, ix", (chat_id,))
+        return [dict(r) for r in rows]
+
+    def channel_ask_set(self, ix: str, message_id: str, **fields) -> bool:
+        """Update an open question's row (seen, here, state, ended); False when it is no longer open."""
+        cols = [k for k in ("seen", "here", "state", "ended") if k in fields]
+        if not cols:
+            return False
+        sql = "UPDATE channel_asks SET %s WHERE ix = ? AND message_id = ? AND state = 'open'" % ", ".join(
+            "%s = ?" % k for k in cols)
+        return self._tx(lambda db: db.execute(sql, [fields[k] for k in cols] + [ix, message_id]).rowcount == 1)
+
+    def channel_ask_state(self, ix: str, message_id: str) -> str:
+        r = self._one("SELECT state FROM channel_asks WHERE ix = ? AND message_id = ?", (ix, message_id))
+        return r["state"] if r else ""
+
+    def channel_ask_end(self, ix: str, message_id: str, state: str) -> None:
+        """How a question taken back (or not) ended."""
+        self._tx(lambda db: db.execute("UPDATE channel_asks SET state = ? WHERE ix = ? AND message_id = ?",
+                                       (state, ix, message_id)))
+
+    def channel_prune(self, before: float) -> None:
+        def run(db):
+            db.execute("DELETE FROM channel_msgs WHERE at < ?", (before,))
+            db.execute("DELETE FROM channel_asks WHERE at < ?", (before,))
+
+        self._tx(run)
+
     def autoreply_chats(self) -> List[str]:
         return [r["chat_id"] for r in self._all("SELECT chat_id FROM autoreply ORDER BY at")]
 
@@ -886,7 +965,8 @@ class Store:
         def run(db):
             runs = [r["id"] for r in db.execute("SELECT id FROM runs").fetchall()]
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
-            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone"):
+            for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone",
+                          "channel_msgs", "channel_asks"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             # its history marks, and its name (the next one's is written next, when it has one)

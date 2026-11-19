@@ -58,6 +58,7 @@ OpenMate 是一组 Persona 扩展，把聊天软件接进 [Persona](https://gith
 | /agent 回复回到提问的地方：只在话题里问的回到话题，话题里勾了“也发到群里”的同样也发到群里并引用请求，群聊主界面问的在主界面引用回复；进度消息在这三处都原地更新 | 读消息时从飞书推送里读出位置（`threadMessageType`、`sendToChat` / `syncToChat`），发送时带上同样的标记 | 完成（0.11.32） |
 | 主界面引用回复（包括引用一条已经是话题根的消息）不再被当成话题回复：以 `threadMessageType` 为准，只有话题回复（2）才算在话题里 | 实时推送直接读标记；历史消息里被读成“在话题里”的，再读一次消息实体取这个字段；飞书对主界面引用不设这个字段，没设置也按主界面算 | 完成（0.11.37） |
 | 话题里的追问直接转给干活的 Agent：/agent 对话已经派出任务（待办还开着、Agent 还在）时，话题里你自己的追问直接发给那个 Agent，话题里回“已转给正在做这件事的 Agent”，结果照常经助手回到这条追问下面；写“问 Persona”“问助手”、待办关了、Agent 不在了、对话被停了，就照旧交给助手 | core 的 /agent：`todos.read` 按待办的 `origin` 找 Agent，`agents.control` 发消息；设置“话题里的追问直接转给干活的 Agent”（`agent_forward`，默认开）。微信按现有会话归属没有话题追问，不会触发 | 完成（0.11.38） |
+| Persona 渠道：飞书和微信各声明一个渠道（挂在各自的连接器上），出现在 Persona 的“设置 › 渠道”；只在扩展设置“Persona 渠道会话”指定的一个会话里生效（默认不指定，不发任何消息）：那里的 /agent 交给 Persona 统一的渠道流程，回答回到提问处；Agent 要你回答或批准的问题也发到那里，在 App 里答了飞书会自动撤回（微信撤回不了，只是不再等） | core 的 `channel.py`：`channel.receive` 交出本人消息，`channel.send` 按 ref 只发一次；有问题在等时每 10 秒读一次 `GET /api/v1/interactions`（`agents.read`），不在待答里了、又不是在这里答的就撤回（LarkAgentX 公开接口 `messages.DeleteMessageRequest`） | 完成（飞书 0.11.39、微信 0.1.37） |
 | 日记、订阅、账单、财务 | 各自一个扩展；账单和订阅从邮件里提取 | 之后 |
 
 需要 Persona 本身先支持的，已经提给 Persona：

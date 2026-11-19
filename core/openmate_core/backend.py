@@ -354,6 +354,14 @@ class Backend(abc.ABC):
         refused it (too old, not the account's). The core edits a /agent run's progress message in place."""
         raise BackendError("这个平台不支持编辑消息", "unsupported")
 
+    #: Whether recall works: the 渠道 takes back a question it put in the chat once it was answered elsewhere
+    can_recall: bool = False
+
+    def recall(self, chat_id: str, message_id: str) -> None:
+        """Take back (recall) a message the account sent (send), for everyone in the chat. BackendError when the
+        service has none or refused it (too old, not the account's)."""
+        raise BackendError("这个平台不支持撤回消息", "unsupported")
+
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         """Which of these are programs ("bot": bots and AI assistants) and which people ("user"), for those the service
         can tell; {} when it cannot. Read-only; the core asks in the background, at most 50 at a time."""

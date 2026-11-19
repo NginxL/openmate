@@ -1,6 +1,6 @@
 # OpenMate
 
-OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认。有三种回复不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（发出后扩展立刻退出等少数情况下，可能缺记一条）：你自己发起的 `/agent` 请求的回复；你勾选的群里有人真正 @ 你时的自动代答；飞书文档评论里 @ 你时的文档代答（默认关闭，要单独打开）。
+OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/persona) 扩展，把聊天软件接进 Persona：私聊和群消息进收件箱和知识库，Persona 的助手和 Agent 可以在聊天软件里替你出面。助手以你身份主动发的每一条消息都要你先在手机上确认。有四种消息不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（发出后扩展立刻退出等少数情况下，可能缺记一条）：你自己发起的 `/agent` 请求的回复；你勾选的群里有人真正 @ 你时的自动代答；飞书文档评论里 @ 你时的文档代答（默认关闭，要单独打开）；Persona 渠道在你指定的一个会话里的回答和问题（默认没有指定，一条都不发）。
 
 第一个扩展是**飞书**（`openmate-feishu`）。第二个是**微信**（`openmate-wechat`，一期做 `/agent`、群里自动代答和收图片等媒体，见下文）。钉钉以后再做。
 
@@ -28,6 +28,7 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 | 只读工具 | `matefeishu_status`、`matefeishu_chats`、`matefeishu_messages`（可按时间段和关键词查，会自己往前补读历史）、`matefeishu_search`（搜人和群）、`matefeishu_docs`（通过管理端的 lark-cli 只读集成搜文档）、`matefeishu_starkmesh`（中转站额度：还剩多少号、多久重置、哪些号不可用，早报用它）、`matefeishu_media`（按消息 id 以现在登录的账号把图片或文件下载到本机临时目录（每次重新下载，25 MB 以内），返回本地路径；`matefeishu_messages` 和 /agent 上下文里带图片或文件的消息写着「看图：matefeishu_media message=…」） |
 | 写操作 | `matefeishu_send`、`matefeishu_send_dm`：每次都在手机上确认全文和发给谁；同一个请求只执行一次；结果不确定时绝不重发 |
 | `/agent` | 你自己在飞书里发 `/agent …`，交给 Agent 处理并以你的身份回复到提问的地方：话题里问的回到话题；话题里勾了“也发到群里”的，回复同样回到话题、也发到群里，并引用这条请求；群聊主界面问的（包括引用回复），在主界面引用回复这条请求；私聊里是引用回复，AI 标记放在回复最后一行（话题折叠时直接显示答案；设置“AI 标记位置”可改回第一行）；同一话题里接着发会进同一个会话；助手已经把活派给 Agent（建了待办、Agent 还在做）时，话题里你自己的追问直接转给那个 Agent，话题里回一句“已转给正在做这件事的 Agent”，结果照常经助手回到话题（写“问 Persona”“问助手”、任务结束了、Agent 不在了，就照旧交给助手；设置“话题里的追问直接转给干活的 Agent”可关）；`/stop`、`/停止`、`/停` 可以停下。请求上的表情说明状态：🤔 处理中，✅ 做完了，❌ 失败或超时（停下就撤掉 🤔；三个表情都能在设置里换）。中途进度只占一条消息、原地更新，最终结果另发一条新回复（会提醒你），那条进度消息标成已完成。回复不经手机确认，每一条都记进 Persona 的“以你身份发出的消息”记录，所以安装时 Persona 会提示这个扩展会“以你的身份发消息” |
+| Persona 渠道 | 在 Persona 的“设置 › 渠道”里显示为“飞书（OpenMate）”（绑定、账号、开关跟着连接器走），不用装官方 larkx 也能把飞书当成 Persona 的一个渠道。只在你指定的一个会话里生效：扩展设置里的“Persona 渠道会话”填会话名称或 id（建议用只有你自己的群），默认留空，留空时渠道不发任何消息。在那个会话里：你发的 `/agent …` 不再单独开 /agent 会话，而是交给 Persona 统一的渠道流程（默认进主对话，可在“设置 › 渠道”改目标；`/agent /new …`、`/agent /status` 等 Persona 渠道命令也能用），回答以你的身份回到提问处（话题里问的回到话题，主界面问的引用回复）；`/stop`、`/停止`、`/停` 打断渠道正在跑的对话；引用渠道发的消息回复、或在渠道请求的话题里接着说，直接交给 Persona。Agent 要你回答或批准时（渠道驱动的对话，或“设置 › 渠道”里打开了“所有 Agent 的问题”），问题以你的身份发到这个会话，直接回复就是作答；你在 App 等别处答了，这条问题会自动撤回。别的会话里的 `/agent`、进度原地更新、自动代答、话题追问转给 Agent 都和原来一样 |
 | 历史补收 | 首次登录和每次重连后补收最近会话里漏掉的消息 |
 
 ## 安装（Mac 上的管理端）
@@ -92,6 +93,7 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 
 - **`/agent`**：你自己在微信任意会话里（手机或任何设备）发 `/agent …`，Agent 用你的全部权限处理，以你的身份把结果回复到原会话。要先在设置里打开“启用 /agent”。微信不能编辑消息、没有表情回应：接单时先引用你的消息发一句“接单提示”（默认“🤖 处理中...”，可改可关，不撤回），然后只回复一次最终结果，没有中途进度。
 - **群里自动代答**：在 Persona 的“微信”页里勾选的群，有人真正 @ 你（不是手打名字）时，AI 用访客会话以你的身份引用并 @ 对方直接回复一次（不发“接单提示”，那句只给你自己的 /agent）；只 @所有人、私聊、公众号不代答；每群每小时、每天有上限。
+- **Persona 渠道**：和飞书一样，在“设置 › 渠道”里显示为“微信（OpenMate）”，只在扩展设置“Persona 渠道会话”指定的一个会话里收发（默认留空，不发任何消息）。微信撤回不了消息：你在 App 里答了的问题只是不再等这里的回复，消息留在会话里。
 - **图片、语音、视频、文件**：收到后自动下载到扩展的数据目录（`media/`），消息文字里写着本地路径，`matewechat_messages` 和 `/agent` 的上下文里都能看到，图片可以直接给 AI 读：`[图片] 本地文件：/…/123.jpg`。语音存成 WAV（设置“语音转文字命令”后附上文字）；视频给封面、25 MB 以内的视频文件，装了 ffmpeg 时再抽 3 张截图；文件 25 MB 以内下载并保留原名。合并转发的聊天记录直接展开成文字。下载不了（过期、超过 25 MB、微信专有格式等）时保留占位并写明原因；`matewechat_media` 可以按消息 id 重新下载。本地副本 30 天后清理。下载用的 CDN 地址和密钥只存在扩展自己的数据库里，不进 hub、日志或消息文字。需要 matewechat-native 0.1.10 或更新；在此之前收到的消息没有留下下载信息，看不到内容。本地副本总共超过 2 GB 时先删最旧的。普通文件按消息里的大小和 MD5 校验。已知限制：微信 CDN 下载请求按微信协议以明文 HTTP 发送（与官方客户端相同，文件本身 AES 加密）；同时最多下载两个附件，网速极慢时后面的附件可能等下载名额超时，过后可用 `matewechat_media`（again=true）再取。
 
 连接微信的是本仓库 `native/matewechat-native`（Rust）编译出的小程序，它用 [thisnick/agent-wechat](https://github.com/thisnick/agent-wechat)（MIT）的协议库 `wechat-protocol`（crates.io 2.7.0，只用公开接口）。扩展首次启动时从本仓库的 GitHub release 下载它，并按扩展里钉死的 SHA-256 校验；第三方许可全文见 `native/THIRD-PARTY-NOTICES.md`。只支持 Apple 芯片的 Mac，请在手机旁边的 Mac 上用，不要放在服务器上。和飞书扩展一样，装好后要在 hub 机器上关掉它的沙箱（`personad extension sandbox openmate-wechat off`）：沙箱里它打不开自己的数据库，也起不了连微信的程序。
@@ -102,10 +104,11 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 - **与飞书 / Lark 官方无关。** OpenMate 是独立的开源项目，不是飞书或 Lark 的产品，也没有得到它们的认可；图标是本项目自己画的。
 - **不分发 LarkAgentX。** 本仓库和发布包里都不包含 LarkAgentX，需要你自己安装并遵守它的条款。
 - **微信扩展用的也是非官方协议。** 它以一台新电脑的身份登录你的微信：你已登录的电脑版微信可能会下线；账号被限制的可能无法排除，请自己判断。与腾讯官方无关，“微信”是腾讯的商标。
-- 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。下面三种回复不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（极少数情况下可能缺记一条）：
+- 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。下面四种消息不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（极少数情况下可能缺记一条）：
   - `/agent`：只响应你自己发的消息；
   - 群里自动代答：只在你勾选的群、有人真正 @ 你时，用访客会话（读不到你的私人知识库）回复，每群每天有上限；
   - 文档代答：飞书文档评论里 @ 你时回复，默认关闭，要在设置里单独打开；它经 lark-cli 发出，发之前核对 lark-cli 登录的账号和飞书登录的账号同名（目前只能比对显示名，同名的另一个账号拦不住）。
+  - Persona 渠道：只发到你在设置里指定的“Persona 渠道会话”（默认没有，就一条都不发），内容是 Persona 对你在那里发的消息的回答、Agent 要你回答或批准的问题和 Persona 的提示；在“设置 › 渠道”里打开“通知”“同步”后还有推送。
 
 ## 开发
 
@@ -129,13 +132,16 @@ tests/                         用假的平台后端和假的 hub 驱动完整�
 
 OpenMate is a set of open-source (MIT) [Persona](https://github.com/nwverse/persona) extensions that bridge chat apps
 into Persona: direct and group messages flow into the Inbox and knowledge base, and Persona's assistant and Agents can
-answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first. Three kinds
-of reply go out unconfirmed, and are recorded in Persona's sent-as-user ledger after they go (one can be missing when
+answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first. Four kinds
+of message go out unconfirmed, and are recorded in Persona's sent-as-user ledger after they go (one can be missing when
 the extension exits right after sending; the connector declares `sends_as_user`):
 the replies to your own `/agent` requests; the automatic answers when someone really @-mentions you in a group you
 marked (a guest conversation, capped per group and day); and, off unless you turn it on, the answers to a Feishu
 document comment that @-mentions you (through lark-cli, only while lark-cli's account has the same display name: another account of the same name
-is not told apart yet). The first extension is Feishu / Lark (`openmate-feishu`, connector
+is not told apart yet); and what Persona's channel (listed under Settings › Channels) says in the one chat you
+name in the setting `channel_chat`: the answers to the `/agent` lines you send there, and the questions and
+approvals an Agent waits on (taken back in Feishu once answered elsewhere); no chat is named by default, and then
+nothing is sent. The first extension is Feishu / Lark (`openmate-feishu`, connector
 `matefeishu`); the second is WeChat (`openmate-wechat`, connector `matewechat`: phase one is `/agent`, answering
 real @-mentions in the groups you mark, and pictures, voice notes, videos, files and forwarded chat records fetched
 into local files the assistant can read, over this repository's `native/matewechat-native`, built on thisnick/agent-wechat's

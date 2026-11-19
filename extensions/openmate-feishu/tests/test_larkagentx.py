@@ -1511,6 +1511,24 @@ class ReadTest(Base):
             self.b.edit("500", "101", "改不了")
         self.assertEqual(e.exception.kind, "unavailable")
 
+    def test_taking_a_sent_message_back(self):
+        self.assertTrue(self.b.can_recall)
+        S.api_answers["messages.DeleteMessageRequest"] = {"message": "101"}
+        self.b.recall("500", "101")
+        self.assertEqual(S.api_calls[-1], ("messages.DeleteMessageRequest", {"id": "101"}))
+        for bad in ("", "abc"):
+            with self.assertRaises(larkagentx.BackendError) as e:
+                self.b.recall("500", bad)
+            self.assertEqual(e.exception.kind, "not_found")
+        S.api_answers["messages.DeleteMessageRequest"] = {"status": 403}  # only a status: refused, never "taken back"
+        with self.assertRaises(larkagentx.BackendError) as e:
+            self.b.recall("500", "101")
+        self.assertEqual(e.exception.kind, "unavailable")
+        del S.api_answers["messages.DeleteMessageRequest"]  # refused: a BackendError with no library words
+        with self.assertRaises(larkagentx.BackendError) as e:
+            self.b.recall("500", "102")
+        self.assertEqual(e.exception.kind, "unavailable")
+
     def test_who_is_a_bot(self):
         S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {
             "7003": {"id": "7003", "name": "示例同事丙", "type": "USER"},

@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-feishu",
   "name": "飞书（OpenMate）",
-  "version": "0.11.38",
+  "version": "0.11.39",
   "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -27,6 +27,18 @@
           "mention": "类型：飞书群里有人 @我、我还没回的消息",
           "group": "类型：飞书群里的新消息，没有 @我"
         }
+      }
+    ],
+    "channel": [
+      {
+        "id": "matefeishu",
+        "name": "飞书（OpenMate）",
+        "kind": "im",
+        "connector": "matefeishu",
+        "bind": "qr",
+        "description": "在你指定的一个飞书会话（扩展设置里的「Persona 渠道会话」）里和 Persona 对话：在那里发 /agent 交给 Persona，回答以你的身份回到提问处；Agent 要你回答或批准的问题也发到那里，在 App 里答了会自动撤回。没指定会话时不发任何消息。",
+        "capabilities": {"images_in": false, "files_in": false, "voice_in": false, "format": "plain", "max_text": 0,
+                         "asks": "text", "push": true, "typing": false, "progress": false, "threads": false}
       }
     ],
     "assistant": [
@@ -107,6 +119,12 @@
         "title": "话题里的追问直接转给干活的 Agent",
         "description": "/agent 派出的任务还在做时，你在同一话题里再发的 /agent 直接转给做这件事的 Agent，话题里回一句“已转给正在做这件事的 Agent”，结果照常回到话题。写“问 Persona”或“问助手”，或者任务已经结束，仍交给助手。关掉就总是交给助手。",
         "default": true
+      },
+      "channel_chat": {
+        "type": "string",
+        "title": "Persona 渠道会话",
+        "description": "「设置 › 渠道」里的飞书（OpenMate）只在这个会话里收发：填会话名称（和飞书里显示的一样，只能有一个会话叫这个名字）或会话 id。在这里你发的 /agent 交给 Persona 的渠道流程（默认进主对话，可在「设置 › 渠道」改），回答以你的身份回到提问处；Agent 要你回答或批准的问题也以你的身份发到这里，直接回复就是作答，在 App 里答了会自动撤回。这个会话里别人能看到这些消息，建议用只有你自己的群。留空就不用（默认），渠道不发任何消息，/agent 照旧。",
+        "maxLength": 256
       },
       "agent_reply_header": {
         "type": "string",

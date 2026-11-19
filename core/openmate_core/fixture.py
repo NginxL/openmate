@@ -69,6 +69,9 @@ class FixtureWorld:
         self.react_fail = False
         self.edits: List[Tuple[str, str, str]] = []  # (chat, message, new text) by edit
         self.edit_fail = False
+        self.recalls: List[Tuple[str, str]] = []  # (chat, message) taken back by recall
+        self.recall_ok = True  # the service can take a message back (can_recall)
+        self.recall_fail = False  # recall raises
         self.kinds_calls: List[List[str]] = []
         self.chats: Dict[str, Chat] = {}
         self.history: Dict[str, List[Message]] = {}
@@ -394,6 +397,21 @@ class FixtureBackend(Backend):
                 raise BackendError("不是自己发的消息", "not_found")
             mine[-1]["text"] = text
             w.edits.append((chat_id, message_id, text))
+
+    @property
+    def can_recall(self) -> bool:
+        return self.world.recall_ok
+
+    def recall(self, chat_id: str, message_id: str) -> None:
+        w = self.world
+        with w.lock:
+            if not w.recall_ok:
+                raise BackendError("这个平台不支持撤回消息", "unsupported")
+            if w.recall_fail:
+                raise BackendError("这条消息撤回不了", "unavailable")
+            if not [s for s in w.sent if s["chat"] == chat_id and s["id"] == message_id]:
+                raise BackendError("不是自己发的消息", "not_found")
+            w.recalls.append((chat_id, message_id))
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         w = self.world

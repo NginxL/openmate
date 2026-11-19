@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from . import tools as toolmod
 from . import views
 from .agent import AgentRunner
+from .channel import ChannelBridge
 from .ui import UI, ChatsToday
 from .backend import Account, BackendError, Chat, CredentialsExpired, Message, SendRejected
 from .events import Changed
@@ -157,6 +158,7 @@ class ConnectorApp:
         self._names: Dict[str, str] = {}
         self.changed: Optional[Changed] = None
         self.agent: Optional[AgentRunner] = None
+        self.channel: Optional[ChannelBridge] = None  # Persona's 渠道 (channel.py), made at the start with the agent
         self.people: Optional[People] = None  # who is a bot (made at the start, with the store)
         self._methods = {
             "status": self.m_status,
@@ -205,6 +207,12 @@ class ConnectorApp:
                 raise RPCError("扩展还在启动，请稍后再试")
             ui = self._ui()
             return ui.render(params) if method == "ui.render" else ui.action(params)
+        if method.startswith("channel."):  # Persona's 渠道 (channel.py)
+            if not self.ready.wait(STARTUP_WAIT):
+                raise RPCError("扩展还在启动，请稍后再试", "busy")
+            if self.channel is None:
+                raise RPCError("扩展没有启动起来，渠道不可用", "unavailable")
+            return self.channel.handle(method[len("channel."):], params)
         if method.startswith("connector."):
             rest = method[len("connector."):]
             contribution = params.get("contribution")
@@ -255,9 +263,10 @@ class ConnectorApp:
                 self.initialized = True
                 self._start_today_api()  # /health answers from now on: the host checks it as soon as this returns
         out = {"protocol": PROTOCOL, "id": self.manifest["id"], "version": self.manifest["version"]}
-        connectors = (self.manifest.get("contributes") or {}).get("connectors")
-        if connectors:
-            out["contributes"] = {"connectors": connectors}
+        contributes = self.manifest.get("contributes") or {}
+        said = {k: contributes[k] for k in ("connectors", "channel") if contributes.get(k)}
+        if said:
+            out["contributes"] = said
         return out
 
     # ------------------------------------------------------------------ startup and shutdown
@@ -293,6 +302,7 @@ class ConnectorApp:
                 # reacts as the user from here (the pages still show what is stored)
                 self.agent.enabled = False
                 log.info("/agent and 代答 are off here (%s)", "the connector is off" if not self.connector_on else "a member hub")
+            self.channel = ChannelBridge(self)
             self.people = People(self)
             self._owner = self.store.meta_get("account_id") or ""  # whose this store is
             if self.backend is not None:
@@ -309,6 +319,7 @@ class ConnectorApp:
                 if self.backend is not None and self.connector_on:
                     self._start_link(restore=True)  # off: no link, nothing received or sent in the user's name
             self.agent.start()
+            self.channel.start()
             if self.backend is not None and getattr(self.backend, "done_marks", False):
                 threading.Thread(target=self._done_loop, name="openmate-done", daemon=True).start()
             self._ui().update_badge()  # the hub forgets an extension's badges when it restarts
@@ -337,6 +348,8 @@ class ConnectorApp:
             self._link_stop.set()
         if self.agent is not None:
             self.agent.stop()
+        if self.channel is not None:
+            self.channel.stop()
         if self.changed is not None:
             self.changed.stop()
         if self.backend is not None:

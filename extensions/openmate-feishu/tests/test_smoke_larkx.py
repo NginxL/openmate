@@ -131,6 +131,9 @@ out["also_to_chat"] = [lr.chatId, lr.rootId, lr.parentId, lr.isReplyInThread, lr
 pkt = larkagentx.also_to_chat(b.lx.builders.build_send_message_packet("旧标记", "900", "rid", root_id="80"), "83", "send")
 lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
 out["also_to_chat_send"] = [lr.parentId, lr.syncToChat, lr.sendToChat]
+cmd, req_cls, resp_cls = gateway.resolve_cmd("messages.DeleteMessageRequest")  # recall (the 渠道's ended questions)
+req = gateway.request_from_dict(req_cls, {"id": "101"})
+out["recall"] = [cmd, [f.name for f in req_cls.DESCRIPTOR.fields], req.id]
 files = [f for _, _, fs in os.walk(data) for f in fs]
 out["files"] = files
 from loguru import logger
@@ -177,6 +180,7 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
                          "into the thread, also to the chat, quoting the request")
         self.assertEqual(out["also_to_chat_send"], ["83", False, True])
+        self.assertEqual(out["recall"], [9, ["id"], "101"], "the delete-message request: the message's id alone")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

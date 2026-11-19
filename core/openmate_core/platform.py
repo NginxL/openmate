@@ -103,4 +103,6 @@ class Timing:
     agent_settle: float = 8.0  # a session quiet this long after it answered: its status says whether the turn ended
     secrets_retry: float = 2.0
     sent_retry: Tuple[float, ...] = (5.0, 30.0, 120.0)  # waits before sent.record is tried again (the hub was busy)
+    channel_poll: float = 10.0  # while a question Persona put in the channel chat waits: how often the hub is asked
+    channel_retry: Tuple[float, ...] = (2.0, 5.0)  # waits before a line is handed to Persona again (channel.receive)
     extra: Dict[str, float] = field(default_factory=dict)

@@ -458,6 +458,9 @@ class AgentRunner:
         view = getattr(self.app.platform, "mark_view", None)
         # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after any leading @s
         body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
+        channel = getattr(self.app, "channel", None)
+        if channel is not None and channel.take(row, body, epoch):
+            return  # the 「Persona 渠道会话」's: handed to Persona's channel flow (channel.py), whether /agent is on or not
         if not self.enabled:
             return
         if body.lower() in STOP_WORDS:

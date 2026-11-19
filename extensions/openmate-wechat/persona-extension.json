@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "openmate-wechat",
   "name": "微信（OpenMate）",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
   "publisher": "NginxL",
   "homepage": "https://github.com/NginxL/openmate",
@@ -65,6 +65,28 @@
         }
       }
     ],
+    "channel": [
+      {
+        "id": "matewechat",
+        "name": "微信（OpenMate）",
+        "kind": "im",
+        "connector": "matewechat",
+        "bind": "qr",
+        "description": "在你指定的一个微信会话（扩展设置里的「Persona 渠道会话」）里和 Persona 对话：在那里发 /agent 交给 Persona，回答以你的身份回到这个会话；Agent 要你回答或批准的问题也发到那里，直接回复就是作答（微信撤回不了，在 App 里答了只是不再等这里的回复）。没指定会话时不发任何消息。",
+        "capabilities": {
+          "images_in": false,
+          "files_in": false,
+          "voice_in": false,
+          "format": "plain",
+          "max_text": 3500,
+          "asks": "text",
+          "push": true,
+          "typing": false,
+          "progress": false,
+          "threads": false
+        }
+      }
+    ],
     "assistant": [
       {
         "id": "matewechat",
@@ -109,6 +131,12 @@
         "format": "launcher",
         "title": "/agent 用哪个启动器",
         "description": "不设置就用 Persona 里“Lark /agent”的模型设置（和飞书 /agent 共用）。"
+      },
+      "channel_chat": {
+        "type": "string",
+        "title": "Persona 渠道会话",
+        "description": "「设置 › 渠道」里的微信（OpenMate）只在这个会话里收发：填会话名称（和微信里显示的一样，只能有一个会话叫这个名字）或会话 id。在这里你发的 /agent 交给 Persona 的渠道流程（默认进主对话，可在「设置 › 渠道」改），回答以你的身份回到这个会话；Agent 要你回答或批准的问题也以你的身份发到这里，直接回复就是作答（微信撤回不了，在 App 里答了只是不再等这里的回复）。这个会话里别人能看到这些消息，建议用只有你自己的会话。留空就不用（默认），渠道不发任何消息，/agent 照旧。",
+        "maxLength": 256
       },
       "agent_reply_header": {
         "type": "string",
