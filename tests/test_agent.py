@@ -497,6 +497,22 @@ class StopTest(unittest.TestCase):
         self.assertEqual(len(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid)), 1)
         self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"), "it still answers")
 
+    def test_a_request_sent_after_a_stop_of_the_one_before_still_answers(self):
+        """b gathers its context while the user stops a; b reaches the conversation after the stop (which asks it
+        again): b's own answer goes out, as it always did."""
+        h = agent(self)
+        first = ask(h, "/agent 第一个")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+        gather = h.app.agent.build_prompt
+        h.app.agent.build_prompt = lambda *a, **kw: (time.sleep(0.6), gather(*a, **kw))[1]
+        second = ask(h, "/agent 接着来", root_id=first.id)
+        time.sleep(0.2)
+        ask(h, "/stop", root_id=first.id, parent_id=first.id)
+        wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), what="the stop")
+        run2 = running(h, second)
+        self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"))
+
     def test_only_my_stop_counts(self):
         h = self.h
         h.world.push("chat_example_team", "user_example_a", "/stop", root_id=self.m.id)

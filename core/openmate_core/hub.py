@@ -202,7 +202,7 @@ class HubAPI:
 
     def todos(self) -> List[dict]:
         """Every to-do, as the hub lists them (`origin`: the conversation that handed it out; `done_at`; `agents`)."""
-        res = self.request("GET", "/api/v1/todos", timeout=30) or {}
+        res = self.request("GET", "/api/v1/todos", timeout=10) or {}  # optional: a slow answer asks the conversation
         return [t for t in (res.get("todos") or []) if isinstance(t, dict)] if isinstance(res, dict) else []
 
     def reporter_state(self, session_id: str) -> str:

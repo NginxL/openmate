@@ -948,6 +948,7 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur is not None:
                 cur.update(fields)
+                cur["submitted"] = time.time()  # when its conversation got it: a stop before that is not its own
                 if cur["state"] == "stopped":
                     stopped = True
                 else:
@@ -1024,7 +1025,8 @@ class AgentRunner:
     def _stopped_since_asked(self, run: dict) -> bool:
         """The conversation run is in was stopped here (a /stop of any of its requests in the thread, or in the app)
         since it was last asked."""
-        return self._stopped_since(run, float(self._asked_last(run).get("created") or 0))
+        asked = self._asked_last(run)
+        return self._stopped_since(run, float(asked.get("submitted") or asked.get("created") or 0))
 
     def _same_conversation(self, run: dict) -> List[dict]:
         """The thread's other runs in run's conversation."""
@@ -1064,9 +1066,14 @@ class AgentRunner:
         todo = open_[0]
         agents = [a for a in todo.get("agents") or [] if isinstance(a, dict) and a.get("machine_id") and a.get("session_id")
                   and not a.get("released_at") and not a.get("dismissed_at") and not a.get("start_error")]
-        if not agents:
+        # the Agent the task went to, not a helper it started (a checker, a reviewer): exactly one, else ask
+        working = [a for a in agents if (a.get("source") or "") not in ("spawned", "review")] or \
+            ([agents[0]] if len(agents) == 1 else [])
+        if len(working) != 1:
+            if agents:
+                log.info("/agent follow-up: %d Agents on the task: the conversation is asked", len(agents))
             return None
-        a = agents[0]  # the hub lists the active ones first, the latest linked first
+        a = working[0]
         try:
             reporting = self.hub.reporter_state(conv)
         except HubError as e:
@@ -1079,6 +1086,13 @@ class AgentRunner:
             return None
         target = {"todo_id": str(todo.get("id") or ""), "machine_id": a["machine_id"], "session_id": a["session_id"]}
         return target if self._still_on(target) else None
+
+    def _reporting(self, conv: str) -> bool:
+        """The hub still tells the conversation about its tasks (not stopped in the app meanwhile)."""
+        try:
+            return self.hub.reporter_state(conv) == "reporting"
+        except HubError:
+            return False
 
     def _still_on(self, target: dict) -> bool:
         """The target's session is still on its to-do (the session list names that open to-do) and not offline."""
@@ -1206,7 +1220,10 @@ class AgentRunner:
                 unsure("这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复" % _span(t.agent_hub_wait))
                 return True
             # looked at right before every try (the wait may have been long); after a restart, all of it again
-            fresh = self._forward_target(run) == target if resumed and tries == 0 else self._still_on(target)
+            if resumed and tries == 0:
+                fresh = self._forward_target(run) == target
+            else:
+                fresh = self._still_on(target) and (tries == 0 or self._reporting(conv))
             if not fresh:
                 if not maybe:
                     return False  # moved before anything went out: the conversation is asked
@@ -2197,6 +2214,10 @@ class AgentRunner:
             if cur is None:
                 return  # gone meanwhile (pruned, or wiped by another account's sign-in): nothing here to stop
             before = cur["state"]
+            alone = before == "starting" and cur.get("forwarding") and not cur.get("forward_pending")
+            if alone:  # being looked up: nothing of it went anywhere, the conversation it borrowed is not its own
+                for k in ("machine_id", "session_id", "continued", "asked", "forwarding"):
+                    cur.pop(k, None)
             cur["state"] = "stopped"
             if before != "stopped":
                 cur["stopped_at"] = time.time()
@@ -2206,9 +2227,6 @@ class AgentRunner:
                 return
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
-        if before == "starting" and cur.get("forwarding") and not cur.get("forward_pending"):
-            # being looked up: nothing of it went anywhere, so the stop is its alone (as of any request not sent yet)
-            cur = dict(cur, machine_id="", session_id="")
         for other in (self._same_conversation(cur) if before != "stopped" else []):
             # what this stop stops at the hub is theirs too: a turn still running, a follow-up handed to the task's
             # Agent and waiting for its result (an earlier stop that reached nothing here stops nothing more)

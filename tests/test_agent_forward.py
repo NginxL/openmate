@@ -202,6 +202,22 @@ class ForwardTest(unittest.TestCase):
         self.assertFalse(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), "the conversation goes on")
         self.assertFalse(h.http.messages_to("mac-agent", "agent-1"))
         self.assertFalse(h.http.messages_to("mac-example", sid))
+        self.assertIn("已回复", h.tool("agent_reply", request=run1["id"], text="发版说明整理好了"), "the first still answers")
+
+    def test_the_agent_the_task_went_to_not_a_helper_it_started(self):
+        h = agent(self)
+        first = ask(h, "/agent 帮我把发版说明整理一下")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+        h.http.add_agent("agent-1")
+        h.http.add_agent("agent-2")
+        t = h.http.add_todo("todo_1", sid, [("mac-agent", "agent-2"), ("mac-agent", "agent-1")])
+        t["agents"][1]["source"] = "manual"  # the task's own Agent; agent-2 is a checker it started (spawned), listed first
+        h.http.add(sid, "assistant", "text", "已派出任务")
+        h.http.end_turn(sid)
+        wait_until(lambda: h.app.store.run_get(run1["id"])["state"] == "done", what="the first run done")
+        forwarded(self, h, first, sid)
+        self.assertFalse(h.http.messages_to("mac-agent", "agent-2"), "never the helper")
 
     def test_an_agent_moved_before_anything_went_out_asks_the_conversation(self):
         h, first, run1, sid = dispatched(self)
