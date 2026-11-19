@@ -16,7 +16,10 @@ OpenMate 是 Persona 的扩展（飞书、微信）。这个仓库的任务**做
    - 先把这些提交强推回 PR 的分支（`git push --force-with-lease origin HEAD:<分支>`），再把**同一批提交**快进推到 `main`（`git push origin HEAD:main`）。提交号不变，GitHub 才会把 PR 标成已合并，Persona 的待办才会走到「合入」。不要关 PR、不要在 GitHub 上另做 squash 或 rebase 合并。
    - 推 `main` 被拒，说明别人先推了：重新 fetch、rebase、取号、打包，再按上一步推一遍。已经发布的包永远不改。
    - 推完用 `gh pr view <PR> --json state` 确认是 `MERGED`。
-5. **部署**：刷新装了 OpenMate 的扩展市场：`GET /api/v1/extensions/-/markets` 找到它，再 `POST /api/v1/extensions/-/markets/<market>/refresh`。GitHub raw 有大约 5 分钟缓存，等扩展自动升到新版本。如果显示「需要批准」，就停在这一步，告诉用户去批准什么。
+5. **部署**：Persona 不给 Agent 刷新扩展市场的权限（只有完整凭据能调），不要用别的办法绕。hub 每 6 小时（再加 0–30 分钟）自己读一次市场，读到新版本就在空闲时自动升级。
+   - 用后台命令等升级：每 5 分钟看一次本机 manager 日志（`~/.persona/managers/*/manager.log`）里有没有 `upgraded itself from <旧版本> to <新版本>`，最多等 7 小时。等的时候不要占着别的事。
+   - 日志里出现「需要批准」（needs permission）：停在这一步，告诉用户要批准什么。
+   - 7 小时还没升上去：交付行写「已合未上线」，卡点写「hub 还没读到新版本」。
 6. **验证**：在真实环境里看到效果，并记下证据。
    - 页面类改动：`POST /api/v1/extensions/<扩展>/-/ui/<页面>` 通过 hub 渲染，确认能打开、内容对、不超过 300 项。
    - 收发和数据类改动：用一条真实消息走一遍，或者查库确认。
