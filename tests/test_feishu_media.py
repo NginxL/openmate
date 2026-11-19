@@ -131,6 +131,30 @@ class MediaToolTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(other, "1.png")))
         self.assertTrue(os.path.isdir(os.path.join(os.path.dirname(before), "0123456789abcdef\n")))
 
+    def test_the_account_before_goes_even_when_this_ones_folder_cannot_be_made(self):
+        h = signed(self)
+        row = picture_row(h)
+        h.tool("media", message=row["id"])
+        before = folder_of(h)
+        h.app.store.meta_set("account_id", "user_example_other")
+        from openmate_feishu import media as fm
+
+        real = fm.os.mkdir
+
+        def full(path, mode=0o777):
+            if path == folder_of(h):
+                raise OSError(28, "No space left on device")
+            return real(path, mode)
+
+        fm.os.mkdir = full
+        try:
+            with self.assertRaises(HubSideError) as e:
+                h.tool("media", message=row["id"])
+        finally:
+            fm.os.mkdir = real
+        self.assertIn("存不到本机", e.exception.message)
+        self.assertFalse(os.path.exists(before))
+
     def test_a_folder_is_made_this_users_own_and_old_files_go(self):
         h = signed(self)
         row = picture_row(h)
@@ -208,6 +232,16 @@ class MediaToolTest(unittest.TestCase):
         self.assertNotIn("看图", text)
         with open(path, encoding="utf-8") as f:
             self.assertIn("示例文件", f.read())
+
+    def test_a_generic_answer_takes_the_type_the_message_gave(self):
+        h = signed(self)
+        m = h.world.push(TEAM, "user_example_a", "", type="FILE",
+                         media=[Media("file", ref="file:report", name="report", mime="application/pdf")])
+        stored(h, TEAM, m)
+        h.app.backend.media = lambda ref, most: ("application/octet-stream", b"%PDF-1.4 example")
+        text = h.tool("media", message=m.id)
+        self.assertIn(os.path.join(folder_of(h), m.id + ".pdf"), text)
+        self.assertIn("application/pdf", text)
 
     def test_more_than_the_limit_is_not_fetched(self):
         h = signed(self)

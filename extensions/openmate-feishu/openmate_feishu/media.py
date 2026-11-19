@@ -159,7 +159,10 @@ def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]
         raise BackendError("附件超过 %d MB" % (MEDIA_MOST >> 20), "too_large")
     if not data:
         raise BackendError("飞书给回来的是空的", "unknown")
-    mime = (mime or "application/octet-stream").split(";", 1)[0].strip().lower()
+    mime = (mime or "").split(";", 1)[0].strip().lower()
+    if mime in ("", "application/octet-stream", "binary/octet-stream") and m.get("mime"):
+        mime = str(m["mime"]).split(";", 1)[0].strip().lower()  # what the message itself said it is
+    mime = mime or "application/octet-stream"
     with _WRITING:
         return _write(folder, stem, m, mime, data)
 
@@ -190,8 +193,11 @@ def _write(folder: str, stem: str, m: dict, mime: str, data: bytes) -> Tuple[str
 
 def _own_folder(folder: str) -> None:
     """The folder and the one above it as real directories of this user's, closed to others (in a /tmp shared with
-    other users, one of them may have made the name first), never through a link."""
+    other users, one of them may have made the name first), never through a link. The accounts before are tidied
+    away as soon as the folder above is known to be ours, before this account's is made (which may fail)."""
     for d in (os.path.dirname(folder), folder):
+        if d == folder:
+            _tidy(folder)
         try:
             os.mkdir(d, 0o700)
         except FileExistsError:
@@ -203,7 +209,6 @@ def _own_folder(folder: str) -> None:
             raise OSError(0, "%s 不是这个用户的，不往那里写" % os.path.basename(d))
         if stat.S_IMODE(st.st_mode) != 0o700:
             os.chmod(d, 0o700)
-    _tidy(folder)
 
 
 def _tidy(folder: str) -> None:
