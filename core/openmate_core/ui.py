@@ -411,6 +411,7 @@ class ChatsToday:
         self.expired = self.closed = 0
         if app.store is None:
             return out
+        epoch = account_epoch(app)  # the account the chats are read for: who is a bot is asked for it only
         oldest = time.time() - self.needs_hours() * 3600.0
         since = min(time.time() - app.timing.inbox_window, oldest)  # needs_hours may go back further (7 days)
         chats = app.store.chats_since(since, app.timing.inbox_most if only is None else len(only), only=only)
@@ -438,7 +439,7 @@ class ChatsToday:
         people = getattr(app, "people", None)
         bots: set = set()
         if people is not None and out:
-            bots = people.bots(set().union(*(t["_who"] for t in out)))
+            bots = people.bots(set().union(*(t["_who"] for t in out)), epoch)
             kept = [t for t in out if not (t["_who"] and t["_who"] <= bots)]
             self.bots = len(out) - len(kept)
             out = kept
@@ -484,7 +485,7 @@ class ChatsToday:
                 return "ok"
         return "none"
 
-    def undismiss(self, chat_id: str) -> None:
+    def undismiss(self, chat_id: str) -> bool:
         """Bring a chat's need back (恢复). It stays back while the service still says the chat is done there (the
         mark says so until the service is seen not done). Nothing when it is not 处理完 now (a newer message already
         brought it back: a 恢复 from a page drawn before must not cover that one)."""
@@ -493,15 +494,16 @@ class ChatsToday:
         self.needs(only={chat_id})
         t = next((t for t in self.done if t["_chat"]["id"] == chat_id), None)
         if t is None:
-            return
+            return True
         with owned(app, epoch) as ok:
             if not ok:
-                return  # another account signed in meanwhile: its marks are its own
+                return False  # another account signed in meanwhile (its marks are its own), or one is on its way
             app.store.dismiss_if(t["_done_key"], REOPENED + t["_version"], t["_version"])
         if hasattr(app, "ask_done"):
             app.ask_done([chat_id])  # the service not done there now: a 完成 there from now on counts again
         if hasattr(app, "mark_changed"):
             app.mark_changed("inbox")
+        return True
 
     def done_snapshot(self, only: Optional[set] = None) -> Tuple[List[dict], Dict[str, str]]:
         """The needs to ask the service about and their marks now (恢复 ones included), read before asking."""
@@ -607,7 +609,8 @@ class ChatsPage(Page):
                 return {"toast": "这个会话现在没有要处理的了", "view": here()}
             return {"toast": "已标记处理完，有新消息会再出现", "view": here()}
         if aid.startswith("undone:chat:"):
-            self.data.undismiss(aid[len("undone:chat:"):])
+            if not self.data.undismiss(aid[len("undone:chat:"):]):
+                return {"toast": "刚换了账号，请刷新页面再试", "view": here()}
             return {"toast": "已恢复", "view": here()}
         if aid == "autoreply" or aid.startswith("autoreply:"):
             changes = {}

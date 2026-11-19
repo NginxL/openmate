@@ -304,13 +304,15 @@ class AgentRunner:
                 del self._posted[k]
             return self._digest(text) in self._posted
 
-    def _remember_post(self, body: str, run: Optional[dict] = None) -> None:
-        if run is not None and not self._settle():
-            return  # still being taken in: nothing goes out for it now
-        with self._mu:  # checked where forget empties it: an echo of a wiped run never outlives the switch
+    def _remember_post(self, body: str, run: Optional[dict] = None) -> bool:
+        """What is about to go out, so its echo is never a request; False (nothing remembered, and it must not go out)
+        for a run wiped by the switch: checked where forget empties the echoes, so none outlives the switch. Right
+        before the send, after its last check."""
+        with self._mu:
             if run is not None and self.store.run_wiped(run["id"]):
-                return  # nothing goes out for it: no echo to look for (and none to hide the next account's lines)
+                return False
             self._posted[self._digest(body)] = time.time()
+            return True
 
     def _settle(self) -> bool:
         settle = getattr(self.app, "settle", None)
@@ -693,6 +695,7 @@ class AgentRunner:
         if not self.app.owns(epoch):
             # claimed for the account signed in before; the switch wiped its run: nothing is said or started
             log.info("an /agent request of an account signed out meanwhile: not started")
+            self._not_started(run)
             return
         if run.get("kind") not in GUEST_KINDS:
             self._ack_request(run, epoch)
@@ -713,6 +716,7 @@ class AgentRunner:
         """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
         is touched, once another account's sign-in took the store."""
         if not self.app.owns(epoch):
+            self._not_started(run)
             return
         if not self.hub.available:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
@@ -756,7 +760,7 @@ class AgentRunner:
                     if baseline is None:
                         baseline = self._latest_seq(mid, sid)
                     if not self._may_submit(run, epoch):
-                        return
+                        return self._not_started(run)
                     self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
                               "ours_seen": False, "continued": prev["id"]}
@@ -766,14 +770,14 @@ class AgentRunner:
                         self._fail(run["id"], "hub 不支持访客会话")
                         return
                     if not self._may_submit(run, epoch):
-                        return
+                        return self._not_started(run)
                     sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
                                                        guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True, "guest": True}
                 else:
                     if not self._may_submit(run, epoch):
-                        return
+                        return self._not_started(run)
                     sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True}
@@ -833,6 +837,12 @@ class AgentRunner:
         log.info("/agent request started (%s%s)", "continued" if prev is not None else "new conversation",
                  ", try %d" % tries if tries > 1 else "")
         self._wake.set()
+
+    def _not_started(self, run: dict) -> None:
+        """A start that may not go on: one still in the store (the same account, held off by a hand-over that did not
+        end) fails plainly instead of staying "starting"; one wiped or stopped is left as it is."""
+        if self._state(run["id"]) == "starting":
+            self._fail(run["id"], "正在换%s账号，这个 /agent 请求没有开始处理，请重新发送" % self.app.platform.name)
 
     def _may_submit(self, run: dict, epoch: Optional[int]) -> bool:
         """Right before the request goes to the hub: not stopped, and still the account's it was claimed for (another
@@ -1352,6 +1362,8 @@ class AgentRunner:
 
         def go() -> dict:
             self._still_ours(run)
+            if not self._remember_post(body, run):
+                raise RPCError("换了%s账号，这个 /agent 请求是之前那个账号的，不再以你的身份发出" % self.app.platform.name)
             mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None, to_chat=to_chat)
             chat = self.store.get_chat(run["chat_id"])
             self.app.record_sent(run["chat_id"], body, str(mid or ""), reply_to=reply_to, root=root,
@@ -1411,7 +1423,6 @@ class AgentRunner:
             log.info("%s %s: nothing posted for %s", run.get("kind"), run["id"], key.split(":", 1)[0])
             return ""
         body = self.with_suffix(text, run, model_effort)
-        self._remember_post(body, run)
         try:
             res = self._send(run, key, body, reply_to, root, to_chat)
             return str(res.get("message_ref") or "")
@@ -1495,7 +1506,6 @@ class AgentRunner:
                     self.store.run_put(cur)
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
         body = self.with_suffix(text, cur, me)
-        self._remember_post(body, cur)
         sent_id = ""
         try:
             if cur.get("kind") == "doc":
@@ -1604,7 +1614,6 @@ class AgentRunner:
             if cur is None:  # wiped by another account's sign-in meanwhile
                 raise RPCError("这个 /agent 请求已经不在了（换了%s账号），不再回复" % self.app.platform.name)
             body = self.with_suffix(PROGRESS_MARK + "\n" + text.strip(), cur)
-            self._remember_post(body, cur)
             pid = str(cur.get("progress_id") or "")
             if pid and self._edit(cur, pid, body, "/agent 更新了进度消息"):
                 self._keep_progress(cur["id"], pid, text)
@@ -1629,7 +1638,6 @@ class AgentRunner:
             if cur is None or not cur.get("progress_id") or cur.get("progress_closed"):
                 return
             body = self.with_suffix(PROGRESS_DONE_MARK + "\n" + (cur.get("progress_text") or ""), cur)
-            self._remember_post(body, cur)
             if self._edit(cur, cur["progress_id"], body, "/agent 把进度消息标成已完成"):
                 with self._lock(cur["id"]):
                     cur = self.store.run_get(cur["id"])
@@ -1641,7 +1649,7 @@ class AgentRunner:
         """Edit a message /agent sent, as the user; told to the sent-as-user ledger like a send. False when the
         service has no editing or refused it."""
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run["id"]):
+        if backend is None or self._gone(run["id"]) or not self._remember_post(body, run):
             return False
         try:
             backend.edit(run["chat_id"], mid, body)

@@ -41,8 +41,9 @@ class People:
         backend = getattr(self.app, "backend", None)
         return backend is not None and type(backend).people_kinds is not Backend.people_kinds
 
-    def bots(self, ids: Iterable[str]) -> Set[str]:
-        """Those of ids known to be programs. The unknown ones are asked about behind."""
+    def bots(self, ids: Iterable[str], epoch: Optional[int] = None) -> Set[str]:
+        """Those of ids known to be programs. The unknown ones are asked about behind, for the account generation the
+        caller read them for (epoch; None: now)."""
         ids = {str(i) for i in ids if i}
         store = getattr(self.app, "store", None)
         if not ids or store is None:
@@ -50,7 +51,7 @@ class People:
         known = store.people_kinds(ids)
         unknown = ids - set(known)
         if unknown:
-            self._ask(unknown)
+            self._ask(unknown, epoch)
         return {i for i, k in known.items() if k == "bot"}
 
     def _epoch(self) -> Optional[int]:
@@ -92,10 +93,11 @@ class People:
             return kind
         return ""
 
-    def _ask(self, ids: Set[str]) -> None:
+    def _ask(self, ids: Set[str], epoch: Optional[int] = None) -> None:
         if not self._can():
             return
-        epoch = self._epoch()  # the account whose draw wants them: asked and kept for that one only
+        if epoch is None:
+            epoch = self._epoch()  # the account whose draw wants them: asked and kept for that one only
         owns = getattr(self.app, "owns", None)
         now = self.clock()
         with self._mu:

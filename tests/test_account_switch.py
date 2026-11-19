@@ -11,7 +11,7 @@ import time
 import unittest
 
 from harness import CID, Harness, HubSideError, secret_json, wait_until
-from openmate_core.backend import Account, Chat, DocMention, Message, SendRejected
+from openmate_core.backend import Account, BackendError, Chat, DocMention, Message, SendRejected
 from openmate_core.fixture import ME
 from openmate_core.people import People
 from openmate_core.store import Store
@@ -645,6 +645,113 @@ class SignInTest(unittest.TestCase):
         self.assertIn("error", signing.out)
         wait_until(lambda: app._creds_writer is None, what="the rotation writer to end")
         self.assertEqual(secret_json(h.hub.secrets[CID]), a_creds, "the failed sign-in's rotation sealed over A's")
+
+    def test_a_send_that_reaches_the_adapter_during_the_hand_over_is_refused(self):
+        h = signed_in(self)  # A stays signed in; the user scans the other account's QR
+        app = h.app
+        binding = hold(self, app, "_bind_account", lambda *a, **kw: True)
+        h.world.me = OTHER
+        signing = background(h.sign_in)
+        self.assertTrue(binding.entered.wait(5), "the adapter answers as the other account; the store is A's")
+        try:
+            with self.assertRaises(SendRejected):  # an action asked as A (it checked nothing of the hand-over)
+                app.send_as_user("chat_example_team", "A 那边要发的话")
+        finally:
+            binding.go.set()
+        signing.join(10)
+        self.assertNotIn("error", signing.out)
+        self.assertEqual(h.sent(), [])
+
+    def test_a_rotation_of_a_sign_in_not_bound_is_never_written(self):
+        h = signed_in(self)
+        app = h.app
+        a_creds = secret_json(h.hub.secrets[CID])
+        binding = hold(self, app, "_bind_account", lambda *a, **kw: True)
+
+        def wipe_fails(owner=""):
+            raise RuntimeError("disk full")
+
+        app.store.wipe_account_data = wipe_fails  # the store cannot be taken over
+        self.addCleanup(lambda: app.store.__dict__.pop("wipe_account_data", None))
+        h.world.me = OTHER
+        signing = background(h.sign_in)
+        self.assertTrue(binding.entered.wait(5))
+        try:
+            app._credentials_rotated({"fixture_token": "rotated", "user": OTHER.id})  # its session refreshed meanwhile
+        finally:
+            binding.go.set()
+        signing.join(10)
+        self.assertIn("error", signing.out)
+        wait_until(lambda: app._creds_writer is None, what="the rotation writer to end")
+        self.assertEqual(secret_json(h.hub.secrets[CID]), a_creds, "a sign-in not bound sealed its rotation over A's")
+
+    def test_the_name_kept_for_a_start_waits_for_the_seal(self):
+        h = signed_in(self)
+        app = h.app
+        paused, go = threading.Event(), threading.Event()
+
+        def sealing(creds):
+            paused.set()
+            go.wait(10)
+
+        h.hub.save_hook = sealing
+        h.world.me = OTHER
+        signing = background(h.sign_in)
+        try:
+            self.assertTrue(paused.wait(5))
+            self.assertNotEqual(app.store.meta_get("account_name"), OTHER.name,
+                                "a sign-in not sealed yet would be the account a start shows")
+            self.assertEqual(app.account.id, OTHER.id)
+        finally:
+            go.set()
+        signing.join(10)
+        self.assertNotIn("error", signing.out)
+        self.assertEqual(app.store.meta_get("account_name"), OTHER.name)
+
+    def test_a_line_during_a_hand_over_that_does_not_end_is_handed_over_again(self):
+        from openmate_core import app as appmod
+
+        h = signed_in(self)
+        app = h.app
+        self.addCleanup(setattr, appmod, "HANDOFF_WAIT", appmod.HANDOFF_WAIT)
+        appmod.HANDOFF_WAIT = 0.2
+        epoch = app.account_epoch()
+        binding = hold(self, app, "_bind_account", lambda *a, **kw: True)
+        h.world.me = ME  # the same account scans again, and taking it in takes long
+        signing = background(h.sign_in)
+        self.assertTrue(binding.entered.wait(5))
+        try:
+            line = Message(id="msg_example_during_hand_over", chat_id="chat_example_team", position=995,
+                           sender_id="user_example_a", sender_name="示例同事甲", text="交接时到的消息", at=time.time())
+            with self.assertRaises(BackendError):  # not taken: the link hands it over again (not dropped as another's)
+                app.ingest([line], live=True, epoch=epoch)
+        finally:
+            binding.go.set()
+        signing.join(10)
+        self.assertNotIn("error", signing.out)
+
+    def test_a_start_held_off_by_a_hand_over_that_does_not_end_fails_plainly(self):
+        from openmate_core import app as appmod
+
+        h = signed_in(self, {"agent": True, "agent_reply_header": " ", "agent_ack_reaction": ""})
+        app = h.app
+        self.addCleanup(setattr, appmod, "HANDOFF_WAIT", appmod.HANDOFF_WAIT)
+        appmod.HANDOFF_WAIT = 0.2
+        starting = hold(self, app.agent, "_start_run", lambda *a, **kw: True)
+        m = h.world.push("chat_example_team", "me", "/agent 帮我总结今天的讨论")
+        self.assertTrue(starting.entered.wait(5), "the request was claimed")
+        binding = hold(self, app, "_bind_account", lambda *a, **kw: True)
+        signing = background(h.sign_in)  # the same account scans again, and taking it in takes long
+        self.assertTrue(binding.entered.wait(5))
+        try:
+            starting.go.set()
+            self.assertTrue(starting.done.wait(5))
+            run = next(r for r in app.store.runs_in_chat(m.chat_id) if r["request_id"] == m.id)
+            self.assertEqual(run["state"], "failed", "the request stays \"starting\" for ever")
+        finally:
+            binding.go.set()
+        signing.join(10)
+        self.assertNotIn("error", signing.out)
 
     def test_a_hand_over_that_does_not_end_counts_as_another_account(self):
         from openmate_core import app as appmod

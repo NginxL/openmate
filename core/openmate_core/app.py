@@ -824,7 +824,7 @@ class ConnectorApp:
         or a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
         if self._handoff and self._handoff_by is not threading.current_thread():
             self._handed.wait(HANDOFF_WAIT)
-            return not self._handoff or self.closing.is_set()
+            return not self._handoff and not self.closing.is_set()
         return True
 
     def owns(self, epoch: Optional[int], account: str = "", owner: str = "", settle: bool = True) -> bool:
@@ -843,9 +843,11 @@ class ConnectorApp:
         """Hold off an account switch's wipe (and the store's close) while writing down what a read or a live line of
         one account brought: yields owns(epoch, account, owner). Only store work under it, nothing that waits on the
         network. A sign-in's hand-over is waited for first (settle)."""
-        settled = self.settle()
+        if not self.settle():
+            yield False  # still being taken in (or closing): no write, and no wait for the lock either
+            return
         with self._wipe_mu:
-            yield settled and self.owns(epoch, account, owner, settle=False)
+            yield self.owns(epoch, account, owner, settle=False)
 
     def _bind_account(self, acct: Account) -> None:
         """The store belongs to this account from now on: another account's chats and marks are forgotten first, in
@@ -1147,6 +1149,10 @@ class ConnectorApp:
             epoch = self.account_epoch()
 
         def stale() -> List[dict]:
+            if self._handoff and not self.closing.is_set():
+                # a sign-in still being taken in after the wait: not dropped as another account's; not taken now
+                # (a live line is handed over again, a read is not counted as read)
+                raise BackendError("正在换%s账号，稍后再收" % self.platform.name, "unreachable")
             log.info("%d message(s) read for an account signed out meanwhile (or while closing): not stored", len(msgs))
             return []
         if not self.owns(epoch):
@@ -1393,7 +1399,8 @@ class ConnectorApp:
         self._handoff = True
         try:
             self._bind_account(done.account)
-            self._remember_account(done.account)  # the store is its: what is said of the account is this one's
+            self.account = done.account  # the store is its: what is said of the account now is this one's (the name
+            # kept for a start, and the adapter's word, wait for the seal: _remember_account)
         except Exception:
             log.exception("the store could not be taken over by the account signed in")
             self._abandon_sign_in("登录没有完成，请重新扫码登录")
@@ -1440,6 +1447,7 @@ class ConnectorApp:
         self._login = None
         acct = done.account
         self.creds = "present"
+        self._remember_account(acct)
         self._catchup_done.clear()
         if not self.connector_on:
             # signed in, but the user turned the connector off in Persona: nothing is received or sent
@@ -1461,6 +1469,8 @@ class ConnectorApp:
         may have reconnected as the new account meanwhile), the status says why, and the adapter lets it go."""
         self._login = None
         self.account = None  # not signed in as it here
+        with self._creds_cv:
+            self._creds_gen += 1  # what its session handed over is never written (after the hold is let go)
         with self.lock:
             self._gen += 1
             self._link_stop.set()
@@ -1536,10 +1546,17 @@ class ConnectorApp:
         finally:
             self._inflight.discard(key)
 
+    def _not_handing_off(self) -> None:
+        """A send that reaches the adapter while a sign-in is being taken in is refused: whoever asked for it checked
+        whose it was before that began (the adapter may answer as the new account already)."""
+        if self._handoff and self._handoff_by is not threading.current_thread():
+            raise SendRejected("正在换%s账号，这条没有发出，请稍后再发" % self.platform.name)
+
     def send_as_user(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
                      to_chat: bool = False) -> str:
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
+        self._not_handing_off()
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
@@ -1550,6 +1567,7 @@ class ConnectorApp:
         """A picture (an /agent reply's, checked and copied by images.take) into the chat as the user."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
+        self._not_handing_off()
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if not getattr(self.backend, "can_send_images", False):
