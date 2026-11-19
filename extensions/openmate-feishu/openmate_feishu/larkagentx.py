@@ -1460,32 +1460,44 @@ class LarkXBackend(Backend):
             return False
 
     def _plain_group(self, client, chat_id: str, chat_type=None) -> bool:
-        """Whether the chat is known as an ordinary group (not thread-first): its own record, read now, says a group
-        (entities.Chat.Type GROUP) in no thread mode. Kept CHAT_TTL; not known (not read, no type, a failure, a
-        thread-first group, the push's chat type says one) is False, and a failure is asked again only after
-        KIND_UNKNOWN_TTL."""
+        """Whether the chat is known as an ordinary group (not thread-first): its own record says a group
+        (entities.Chat.Type GROUP) in no thread mode (_note_kind, from any read of it). Kept CHAT_TTL; not known (not
+        read, no type, a failure, a thread-first group, the push's chat type says one) is False, and a failure is
+        asked again only after KIND_UNKNOWN_TTL (never over a kind still known)."""
         if chat_type in (3, "TOPIC_GROUP") or client is None:
             return False
-        now = time.monotonic()
         with self._lock:
-            hit = self._kinds.get(chat_id)
-        if hit is not None and hit[0] > now:
+            hit = self._kinds.get(chat_id) if self._client is client else None
+        if hit is not None and hit[0] > time.monotonic():
             return hit[1]
-        plain, ttl = False, KIND_UNKNOWN_TTL
         try:
-            info, _ = self._chat_read(client, chat_id)
-            dec = self.lx.decoders
-            if "type" in info:
-                ttl = CHAT_TTL
-                plain = dec.enum_to_int(info.get("type")) == 2 and not dec.is_thread_chat(info)
+            self._chat_read(client, chat_id)  # notes the kind
         except Exception:
             pass
         with self._lock:
-            if self._client is client:  # still the account it was asked for
-                self._kinds[chat_id] = (now + ttl, plain)
-                while len(self._kinds) > SYNCED_KEEP:
-                    del self._kinds[next(iter(self._kinds))]
-        return plain
+            if self._client is not client:
+                return False
+            now = time.monotonic()
+            hit = self._kinds.get(chat_id)
+            if hit is not None and hit[0] > now:
+                return hit[1]
+            self._kinds[chat_id] = (now + KIND_UNKNOWN_TTL, False)  # not read, or no type: not known for a while
+            self._trim_kinds()
+        return False
+
+    def _note_kind(self, chat_id: str, info: dict) -> None:
+        """What a chat's record just read says of its kind (_plain_group); with the lock held, for the account it was
+        read for. A record without a type says nothing."""
+        if not isinstance(info, dict) or "type" not in info:
+            return
+        dec = self.lx.decoders
+        plain = dec.enum_to_int(info.get("type")) == 2 and not dec.is_thread_chat(info)
+        self._kinds[chat_id] = (time.monotonic() + CHAT_TTL, plain)
+        self._trim_kinds()
+
+    def _trim_kinds(self) -> None:
+        while len(self._kinds) > SYNCED_KEEP:
+            del self._kinds[next(iter(self._kinds))]
 
     def _learn_peer(self, chat_id: str, user_id: str, me_id: str) -> None:
         """The other person of a direct chat, from their message in it (the chat's own record may have no name), for
@@ -1774,9 +1786,10 @@ class LarkXBackend(Backend):
         with self._lock:
             if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
                 self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
-            last = _int(info.get("lastMessagePosition"))
-            if last > self._last_pos.get(chat_id, 0):
-                self._last_pos[chat_id] = last
+                self._note_kind(chat_id, info)
+                last = _int(info.get("lastMessagePosition"))
+                if last > self._last_pos.get(chat_id, 0):
+                    self._last_pos[chat_id] = last
         return info, chat
 
     def _chat_of(self, chat_id: str, info: dict) -> Chat:

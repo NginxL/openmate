@@ -369,6 +369,18 @@ class MappingTest(Base):
         self.assertEqual(self.m(chat_id="507", msg_id="124", _placement=none, **bare).root_id, "90", "read again")
         self.m(chat_id="506", msg_id="125", _placement=none, **bare)
         self.assertEqual(S.chat_info_calls.count("506"), 1, "a failure is not asked again per message")
+        # a read of the chat's record for anything else says its kind too
+        S.chats["509"] = {"id": "509", "type": 2, "name": "示例群", "chatMode": 3}
+        self.b._kinds["509"] = (time.monotonic() + 600, True)
+        self.b._chat_read(self.b._client, "509")
+        self.assertEqual(self.m(chat_id="509", msg_id="126", _placement=none, **bare).root_id, "90", "now thread-first")
+        # a failure that ends after another read said the kind does not undo it
+        def late(client, chat_id, me=None):
+            self.b._kinds[chat_id] = (time.monotonic() + 600, True)
+            raise ValueError("timed out")
+        self.b._chat_read = late
+        self.assertEqual(self.m(chat_id="510", msg_id="127", _placement=none, **bare).root_id, "")
+        self.assertTrue(self.b._kinds["510"][1])
         self.assertEqual(self.m(chat_id="504", chat_type=1, root_id="90", anchor="90", content_data=t).placement, "",
                          "a direct chat")
         self.b._peers["501"] = "7003"  # known as a direct chat, though the push did not say so
