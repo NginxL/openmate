@@ -65,6 +65,9 @@ def _agent_reply_tool(app, c: str, p: str) -> dict:
         what = "可以多次调用发进度，不要编造没做到的事。"
     else:
         what = "只回复一次最终结果（%s不能编辑消息，进度不发），不要编造没做到的事。" % p
+    if getattr(app.backend, "can_send_images", False):
+        props["image"] = {"type": "string", "description": "可选：随最终回复一起发的一张图片的绝对路径（PNG 或 JPG，放在 /tmp 下，最多 10 MB），比如流程图、表格。文字先发，图片紧跟着单独发出；进度消息、自动代答不能带图"}
+        what += "要发图片就在同一次调用里带上 image（之后不能再单独补发）。"
     return {"name": c + "_agent_reply",
             "description": "只给 /agent 用：把处理结果以我的身份回复到发出 /agent 的那个%s话题。request 必须是这次请求给出的 id；" % p + what,
             "input_schema": _obj(props, ["request", "text"])}
@@ -444,7 +447,11 @@ def _docs(app, a: dict) -> str:
 def _agent_reply(app, a: dict) -> str:
     if app.agent is None:
         raise RPCError("扩展还在启动，请稍后再试")
-    return app.agent.reply_tool(_need(a, "request", "请求 id"), _need(a, "text", "回复内容"), progress=a.get("progress") is True)
+    image = a.get("image")
+    if image is not None and not isinstance(image, str):
+        raise RPCError("image 要填图片的绝对路径（字符串）")
+    return app.agent.reply_tool(_need(a, "request", "请求 id"), _need(a, "text", "回复内容"), progress=a.get("progress") is True,
+                                image=(image or "").strip())
 
 
 # ---------------------------------------------------------------- writes

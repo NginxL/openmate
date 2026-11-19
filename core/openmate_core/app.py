@@ -1376,6 +1376,16 @@ class ConnectorApp:
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         return self.backend.send(chat_id, text, reply_to or None, root or None)
 
+    def send_image_as_user(self, chat_id: str, path: str) -> str:
+        """A picture (an /agent reply's, checked and copied by images.take) into the chat as the user."""
+        if not self.signed_in:
+            raise SendRejected("还没有登录%s" % self.platform.name)
+        if self.link == "expired":
+            raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
+        if not getattr(self.backend, "can_send_images", False):
+            raise SendRejected("%s这里现在不能发图片" % self.platform.name)
+        return self.backend.send_image(chat_id, path)
+
     # ------------------------------------------------------------------ inbox
 
     def m_inbox_collect(self, params: dict) -> dict:

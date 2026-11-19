@@ -33,7 +33,7 @@ import uuid
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
-from . import views
+from . import images, views
 from .backend import BackendError
 from .hub import HubError
 from .textutil import clip, local_stamp, strip_leading_mentions
@@ -849,7 +849,9 @@ class AgentRunner:
             "- 最终结果：不要带 progress，它会作为一条新回复发出并提醒我，之前那条进度消息会标成已完成。",
         ] if self._can_edit() else [
             "- 只回复一次最终结果：%s不能编辑消息，中途进度不要发（会以我的身份在群里刷屏）。" % p,
-        ]) + [
+        ]) + ([
+            "- 需要流程图、步骤图、表格这类图示时，可以画成一张 PNG（比如先手写 SVG，再用无头 Chrome 渲染成 PNG），存到 /tmp 下，在最终回复时把它的绝对路径填进 image：文字照常写，图片紧跟着单独发出。只能带一张，最多 10 MB；文字里不要贴图片路径。",
+        ] if self._can_send_images() else []) + [
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
             "- 下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c),
         ])
@@ -1308,9 +1310,13 @@ class AgentRunner:
             log.warning("an /agent message was not sent: %s", e.code or "error")
             return ""
 
-    def reply_tool(self, request: str, text: str, progress: bool = False) -> str:
+    def _can_send_images(self) -> bool:
+        return bool(getattr(self.app.backend, "can_send_images", False))
+
+    def reply_tool(self, request: str, text: str, progress: bool = False, image: str = "") -> str:
         """<connector>_agent_reply: only the run this request id names, and only while it may still reply. progress:
-        the run's progress message, edited in place (_progress), not the answer."""
+        the run's progress message, edited in place (_progress), not the answer. image: a picture sent right after the
+        answer's text, part of the same one reply (checked before anything goes out)."""
         run = self.store.run_get(request.split(".", 1)[0])
         if run is None:
             raise RPCError("没有这个 /agent 请求：request 不对，或者已经过期")
@@ -1330,6 +1336,16 @@ class AgentRunner:
             return "文档评论不发进度；做完后不带 progress 回复一次最终结果"
         if not progress and not self._clean_answer(text, run).strip():
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
+        pic = None
+        replied = int(run.get("replies") or 0) + int(run.get("reply_inflight") or 0) > 0
+        if image and not (replied and not self._can_edit()):  # answered here already: one reply, nothing to check
+            if progress:
+                raise RPCError("进度消息不能带图片：做完后在最终回复里带上 image")
+            if run.get("kind") in QUIET_KINDS:
+                raise RPCError("自动代答和文档代答不能发图片，只回文字")
+            if not self._can_send_images():
+                raise RPCError("%s这里现在不能发图片：请只回文字（不带 image）" % self.app.platform.name)
+            pic = images.take(image, self.app.data_dir)  # checked before the text goes: nothing is half sent
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message
             if not self._can_edit():  # every update would be one more message in the chat, as the user
                 return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
@@ -1353,7 +1369,7 @@ class AgentRunner:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got
                     ref = (done.get("result") or {}).get("message_ref") or "未知"
-                    return "已回复到%s（消息 id=%s）" % (self.app.platform.name, ref)
+                    return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, ref, cur.get("image_note") or "")
                 raise RPCError("%s只回复一次，这条已经回复过了（或者结果还不确定），不要再发" % self.app.platform.name)
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
@@ -1395,7 +1411,54 @@ class AgentRunner:
             self.store.run_put(cur)
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
-        return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
+        note = self._send_image(cur, pic) if pic is not None else ""
+        return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, sent_id or "未知", note)
+
+    def _send_image(self, run: dict, pic: tuple) -> str:
+        """The answer's picture, once (its own key in the send journal: by its bytes), right after the answer's text;
+        what became of it, for the Agent (kept with the run: the same answer asked again tells it again). Its failure
+        leaves the answer as it is (one reply: never tried again). A /stop that landed first keeps it from going: the
+        run's lock orders the two (a /stop after it began is like one after the text began)."""
+        path, sha, name = pic
+        key = "agent:%s:image:%s" % (run["id"], sha[:32])
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"]) or run
+            if cur["state"] in ("stopped", "failed"):
+                cur["image_note"] = "；任务已经停止，图片没有发"
+                self.store.run_put(cur)
+                return cur["image_note"]
+            cur["image_started"] = time.time()
+            self.store.run_put(cur)
+
+        def go() -> dict:
+            mid = self.app.send_image_as_user(run["chat_id"], path)
+            chat = self.store.get_chat(run["chat_id"])
+            self.app.record_sent(run["chat_id"], "[图片] %s" % name, str(mid or ""),
+                                 session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "",
+                                 setting="agent",
+                                 summary="/agent 以你的身份发了一张图片到" + views.where(self.app.platform.name, chat,
+                                                                                run["chat_id"]))
+            return {"text": "已发出", "message_ref": mid}
+
+        mid = ""
+        try:
+            mid = str((self.app.send_once(key, "agent", go) or {}).get("message_ref") or "")
+            note = "；图片也发出了"
+        except RPCError as e:
+            row = self.store.send_get(key)
+            if row is not None and row["state"] in ("uncertain", "done"):
+                log.warning("an /agent reply's picture has an unknown outcome")
+                note = "；图片的发送结果不确定（可能已经发出去了），不会重发（文字已经发了，这次请求不要再回复）"
+            else:
+                log.warning("an /agent reply's picture was not sent: %s", e.code or "error")
+                note = "；但图片没发出去：%s（文字已经发了，这次请求不要再回复）" % e.message
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"]) or run
+            cur["image_note"] = note
+            if mid:  # a /stop quoting the picture finds this run too
+                cur["reply_ids"] = (cur.get("reply_ids") or []) + [mid]
+            self.store.run_put(cur)
+        return note
 
     def _other_ai(self, text: str) -> bool:
         """Another AI's message: Feishu, any line starting "🤖 AI"; WeChat, its first or last line is "🤖 AI" as a mark

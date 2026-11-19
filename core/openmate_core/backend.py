@@ -370,5 +370,14 @@ class Backend(abc.ABC):
     def create_chat(self, user_id: str) -> str:
         """The direct chat with a person (created when there is none yet, without sending anything); its chat id."""
 
+    #: Whether send_image works now (an /agent reply may carry a picture then; the tool offers it only then)
+    can_send_images: bool = False
+
+    def send_image(self, chat_id: str, path: str) -> str:
+        """Send the picture at path (a PNG or JPEG of at most 10 MB the core checked and copied into the extension's
+        data) into chat_id as the account; the new message's id. Raise SendRejected only when it surely did not go
+        out; BackendError for an unknown outcome (never sent again)."""
+        raise BackendError("这个平台不支持发图片", "unsupported")
+
     def close(self) -> None:
         """The program is stopping."""

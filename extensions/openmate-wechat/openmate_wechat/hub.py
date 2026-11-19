@@ -55,6 +55,8 @@ TAKEN_SLACK = 0.0  # one clock on this computer: committed before the stream was
 OWN_WAIT = 20.0  # a send to the chat still in flight is waited for this long before an outgoing message is judged
 PENDING_KEEP = 30 * 86400.0  # how long a send with no known outcome is asked about (as long as the core keeps it)
 SEND_WAIT = 40.0  # how long a send is followed before its outcome is "unknown"
+IMAGE_WAIT = 120.0  # a picture: the hub checks the upload and puts it on WeChat's CDN before it is sent
+IMAGE_MOST = 10 << 20  # what the core hands over at most (images.IMAGE_MOST)
 GROUP_SYNC_EVERY = 3600.0  # at most this often the hub is asked to sync the group catalog from WeChat
 CATCH_UP_CHATS = 200
 CATCH_UP_EACH = 50
@@ -151,6 +153,14 @@ def loopback(host: str) -> bool:
         return False
 
 
+class _Raw:
+    """A request body as it is (not JSON), with its content type."""
+
+    def __init__(self, data: bytes, content_type: str):
+        self.data = data
+        self.content_type = content_type
+
+
 class HubClient:
     """The hub's HTTP API, with the extension's token. No proxy: the hub is reached directly. Plain http only to this
     computer (the token goes in every request), as the AgentWechat clients themselves require."""
@@ -209,7 +219,10 @@ class HubClient:
         """One request; its JSON answer. HubError for an error answer, HubDown when there was no answer."""
         h = self._headers(headers)
         data = None
-        if body is not None:
+        if isinstance(body, _Raw):
+            data = body.data
+            h["Content-Type"] = body.content_type
+        elif body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")  # the hub takes 128 KiB at most
             h["Content-Type"] = "application/json"
         conn = self._conn(timeout)
@@ -232,6 +245,16 @@ class HubClient:
             return json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             raise HubDown("answer is not JSON")
+
+    def upload(self, path: str, name: str, data: bytes, mime: str, timeout: float = 120.0) -> Any:
+        """One file to the hub's /uploads (multipart, the field "file"); its answer (the staged source: its id)."""
+        boundary = "openmate-" + os.urandom(12).hex()
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80] or "image"
+        head = ('--%s\r\nContent-Disposition: form-data; name="file"; filename="%s"\r\nContent-Type: %s\r\n\r\n'
+                % (boundary, safe, mime)).encode("ascii")
+        raw = _Raw(head + data + ("\r\n--%s--\r\n" % boundary).encode("ascii"),
+                   "multipart/form-data; boundary=" + boundary)
+        return self.call("POST", path, raw, timeout=timeout)
 
     def download(self, url: str, out: str, most: int, sha256: str = "", timeout: float = 120.0) -> Tuple[int, str]:
         """The bytes at the hub's url ("/v1/…", as its contentUrl) into out, whole and checked (its length, its
@@ -800,6 +823,10 @@ class HubLink:
         with self._mu:
             return bool((hub_id and hub_id in self._own_hub) or (server_id and server_id in self._own_server))
 
+    def remember_own(self, hub_id: str, server_id: str) -> None:
+        """A message of ours known by its ids (kept by the backend across a restart): its echo is ours."""
+        self._keep_own(hub_id, server_id)
+
     def remember_pending(self, chat: str, at: float, key: str) -> None:
         """A send of ours whose outcome is not known (kept by the backend across a restart): its echo is ours."""
         if chat and time.time() - at < PENDING_KEEP:
@@ -843,13 +870,13 @@ class HubLink:
                 continue  # never made: not this message
             if not isinstance(s, dict):
                 return True
-            ids = (str(s.get("localMessageId") or ""), str(s.get("serverId") or ""))
+            ids = (str(s.get("localMessageId") or ""), str(s.get("serverId") or s.get("serverMessageId") or ""))
             state = str(s.get("state") or "")
             if (hub_id and hub_id == ids[0]) or (server_id and server_id == ids[1]):
                 self._keep_own(hub_id, server_id)
                 self._settle(chat, entry)
                 return True
-            if state in ("failed", "cancelled"):
+            if state in ("failed", "cancelled", "unsupported"):
                 self._settle(chat, entry)  # never went out: no message of it will come
             elif not any(ids):
                 # went out or may be going out (submitting, needs_review, accepted not saved yet) and the hub cannot
@@ -935,7 +962,57 @@ class HubLink:
                     del self._inflight[chat]
                 self._sent.notify_all()
 
-    def _send(self, body: dict, key: str, wait: float) -> dict:
+    def _op_send_image(self, timeout: float, chat: str = "", path: str = "", key: str = "", **_: Any) -> dict:
+        """A picture into chat: staged on the hub (/uploads), then sent as an image under key, followed to its end like
+        a text. Its echo is told by its ids (WeChat's, from the send's answer), or by its key while those are not
+        known."""
+        try:
+            with open(path, "rb") as f:
+                data = f.read(IMAGE_MOST + 1)
+        except OSError as e:
+            return {"status": "rejected", "message": "读不了要发的图片（%s）" % (e.strerror or type(e).__name__)}
+        mime = "image/png" if data.startswith(b"\x89PNG") else "image/jpeg" if data.startswith(b"\xff\xd8\xff") else ""
+        if not data or len(data) > IMAGE_MOST or not mime:
+            return {"status": "rejected", "message": "只能发 10 MB 以内的 PNG 或 JPG 图片"}
+
+        def stage(body: dict) -> Optional[dict]:
+            try:
+                up = self.client.upload(self._path("/uploads"), os.path.basename(path), data, mime,
+                                        timeout=min(timeout, 60.0))
+            except _Closed:
+                return {"status": "rejected", "message": "已退出登录，没有发送"}
+            except HubDown:
+                return {"status": "rejected", "message": "图片没传到 AgentWechat，没有发送"}
+            except HubError as e:
+                if e.code in ("auth_required", "profile_keys_missing"):
+                    return {"status": "rejected", "message": SIGNED_OUT}
+                return {"status": "rejected", "message": "AgentWechat 没收下这张图片：%s" % e.code}
+            sid = str(up.get("id") or "") if isinstance(up, dict) else ""
+            if not sid:
+                return {"status": "rejected", "message": "AgentWechat 没给出上传的编号，没有发送"}
+            body["sourceId"] = sid
+            return None
+
+        entry = (time.time(), key)
+        with self._mu:
+            self._inflight[chat] = self._inflight.get(chat, 0) + 1
+            self._pending.setdefault(chat, []).append(entry)  # pending before it goes, as a text's
+        try:
+            r = self._send({"threadId": chat, "kind": "image"}, key, min(timeout, IMAGE_WAIT), before=stage)
+            if r.get("status") == "sent":
+                self._receipt(chat, entry, str(r.get("hub_id") or ""), str(r.get("message_id") or ""))
+            elif r.get("status") == "rejected":
+                self._settle(chat, entry, tell=False)  # surely not sent
+            return r
+        finally:
+            with self._sent:
+                self._inflight[chat] -= 1
+                if not self._inflight[chat]:
+                    del self._inflight[chat]
+                self._sent.notify_all()
+
+    def _send(self, body: dict, key: str, wait: float,
+              before: Optional[Callable[[dict], Optional[dict]]] = None) -> dict:
         try:
             a = self._get("", timeout=10)
             if not isinstance(a, dict) or not a.get("authenticated") or (
@@ -949,6 +1026,10 @@ class HubLink:
             return {"status": "rejected", "message": "AgentWechat 拒绝了：%s" % e.code}
         except _Closed:
             return {"status": "rejected", "message": "已退出登录，没有发送"}
+        if before is not None:
+            refused = before(body)  # what the send needs first (a picture's upload): nothing is sent when it fails
+            if refused is not None:
+                return refused
         try:
             try:
                 s = self._post("/sends", body, headers={"Idempotency-Key": key})
@@ -981,14 +1062,17 @@ class HubLink:
         deadline = time.time() + wait
         while True:
             state = str(s.get("state") or "") if isinstance(s, dict) else ""
-            if state in ("failed", "cancelled"):
-                return {"status": "rejected", "message": "微信没有接受这条消息（%s）" % (s.get("errorCode") or state)}
+            if state in ("failed", "cancelled", "unsupported"):
+                why = s.get("errorCode") or s.get("reason") or state
+                return {"status": "rejected", "message": "微信没有接受这条消息（%s）" % why}
             if state == "needs_review":
-                return {"status": "unknown", "message": "AgentWechat 说结果要核对（%s）" % (s.get("errorCode") or "")}
-            if state == "accepted" and (s.get("serverId") or time.time() > deadline):
+                why = s.get("errorCode") or s.get("reason") or ""
+                return {"status": "unknown", "message": "AgentWechat 说结果要核对（%s）" % why}
+            server = str(s.get("serverId") or s.get("serverMessageId") or "") if isinstance(s, dict) else ""
+            if state == "accepted" and (server or time.time() > deadline):
                 # WeChat's id is the message's id here (its echo has the same); the hub's own id comes once the
-                # message is saved there, a moment later: the echo brings it then
-                hub_id, server = str(s.get("localMessageId") or ""), str(s.get("serverId") or "")
+                # message is saved there, a moment later: the echo brings it then (a picture's job has none)
+                hub_id = str(s.get("localMessageId") or "")
                 return {"status": "sent", "message_id": server or (
                     "hub-" + hashlib.sha256(hub_id.encode()).hexdigest()[:32] if hub_id else ""),
                         "created_at": seconds(s.get("createdAt")) or int(time.time()), "hub_id": hub_id}

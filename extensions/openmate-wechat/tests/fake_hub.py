@@ -46,9 +46,12 @@ class FakeHub:
         self.lookup_missing_once = False  # only the next such lookup finds nothing
         self.big_chats: set = set()  # chats whose message list answers 503 pagination_capacity_exceeded
         self.sends: Dict[str, dict] = {}
+        self.uploads: Dict[str, dict] = {}  # staged sources: name, mime, the bytes
+        self.upload_fail = ""  # /uploads answers this error code (409, or 500 for "operation_failed")
         self.send_outcome = "accepted"  # accepted | failed | needs_review | refuse | silent | lost_answer
         self.echo_first = False  # the echo is committed before the send says accepted
-        self.echo_origin = "local_send"  # "live": WeChat's sync brought our message back before the hub's own copy
+        self.echo_origin = "local_send"
+        self.echo_delay = 0.0  # a picture's echo comes this long after its job says accepted  # "live": WeChat's sync brought our message back before the hub's own copy
         self.requests: List[tuple] = []
         self.streams = 0
         self._ids = itertools.count(1)
@@ -150,7 +153,11 @@ class FakeHub:
             def _route(self, method: str) -> None:
                 u = urllib.parse.urlsplit(self.path)
                 q = dict(urllib.parse.parse_qsl(u.query))
-                body = self._body() if method == "POST" else None
+                ctype = self.headers.get("Content-Type") or ""
+                if method == "POST" and ctype.startswith("multipart/form-data"):
+                    body = {"_multipart": self._multipart(ctype)}
+                else:
+                    body = self._body() if method == "POST" else None
                 hub.requests.append((method, urllib.parse.unquote(u.path), body, dict(self.headers), q))
                 if self.headers.get("Authorization") != "Bearer " + hub.token:
                     return self._err(401, "unauthorized")
@@ -248,6 +255,16 @@ class FakeHub:
                                          contentUrl="/v1/accounts/%s/media/%s/content" % (hub.account, a["id"]))
                         j["state"] = "available"
                     return self._json(200, {k: v for k, v in j.items() if not k.startswith("_")})
+                if rest == ["uploads"] and method == "POST":
+                    if hub.upload_fail:
+                        return self._err(500 if hub.upload_fail == "operation_failed" else 409, hub.upload_fail)
+                    part = (body or {}).get("_multipart")
+                    if not part:
+                        return self._err(400, "invalid_upload")
+                    uid = "src_%d" % next(hub._ids)
+                    hub.uploads[uid] = part
+                    return self._json(201, {"id": uid, "name": part["name"], "mimeType": part["mime"],
+                                            "size": len(part["data"])})
                 if rest == ["sends"]:
                     return self._send(body or {})
                 if rest == ["sends", "by-idempotency-key"]:
@@ -263,6 +280,24 @@ class FakeHub:
                     return self._json(200, s) if s else self._err(404, "send_not_found")
                 return self._err(404, "no_route")
 
+            def _multipart(self, ctype: str) -> Optional[dict]:
+                """The one "file" field of a multipart body: its file name, content type and bytes."""
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n)
+                boundary = ctype.split("boundary=", 1)[-1].encode()
+                parts = raw.split(b"--" + boundary)
+                for p in parts:
+                    head, sep, data = p.partition(b"\r\n\r\n")
+                    if not sep or b'name="file"' not in head:
+                        continue
+                    name = head.split(b'filename="', 1)[-1].split(b'"', 1)[0].decode()
+                    mime = ""
+                    for line in head.split(b"\r\n"):
+                        if line.lower().startswith(b"content-type:"):
+                            mime = line.split(b":", 1)[1].strip().decode()
+                    return {"name": name, "mime": mime, "data": data[:-2] if data.endswith(b"\r\n") else data}
+                return None
+
             def _send(self, body: dict) -> None:
                 key = self.headers.get("Idempotency-Key") or ""
                 if not key:
@@ -273,7 +308,9 @@ class FakeHub:
                     return self._err(409, "mention_member_unavailable")
                 for s in hub.sends.values():
                     if s["_key"] == key:
-                        return self._json(202, s)
+                        return self._json(202, {k: v for k, v in s.items() if not k.startswith("_")})
+                if body.get("kind") == "image":
+                    return self._send_image(body, key)
                 sid = "send-%d" % next(hub._ids)
                 s = {"id": sid, "_key": key, "accountId": hub.account, "destination": body.get("threadId"),
                      "state": "queued", "clientId": None, "serverId": None, "localMessageId": None,
@@ -305,6 +342,48 @@ class FakeHub:
                 threading.Timer(0.2, settle).start()
                 if outcome == "lost_answer":  # taken, but the answer never reaches the extension
                     s["_lost"] = True
+                    self.close_connection = True
+                    self.wfile.write(b"HTTP/1.1 202 Accepted\r\nContent-Length: 999\r\n\r\n{")
+                    return
+                return self._json(202, {k: v for k, v in s.items() if not k.startswith("_")})
+
+            def _send_image(self, body: dict, key: str) -> None:
+                """A picture's send: a media job (its WeChat id is serverMessageId), settled a moment later."""
+                if set(body) - {"threadId", "kind", "sourceId"} or body.get("sourceId") not in hub.uploads:
+                    return self._err(400, "invalid_request")
+                jid = "job_%d" % next(hub._ids)
+                s = {"id": jid, "jobId": jid, "_key": key, "accountId": hub.account, "kind": "send", "state": "queued",
+                     "phase": "upload", "attempts": 1, "retryable": False, "reason": None, "assetId": None,
+                     "sourceId": body["sourceId"], "threadId": body["threadId"], "serverMessageId": None,
+                     "createdAt": iso(), "updatedAt": iso()}
+                hub.sends[jid] = s
+                outcome = hub.send_outcome
+
+                def settle():
+                    nonlocal outcome
+                    if outcome == "lost_answer":
+                        outcome = "accepted"
+                    if outcome == "silent":
+                        s["state"] = "running"
+                        return
+                    if outcome == "accepted":
+                        m = hub.message(body["threadId"], "", direction="outgoing", origin="local_send", wire=3,
+                                        commit=False)
+                        echo = {"messageId": m["id"], "threadId": m["threadId"], "origin": hub.echo_origin,
+                                "direction": "outgoing"}
+                        if hub.echo_first:
+                            hub.push("message.committed", echo)
+                            time.sleep(0.3)
+                        s.update(state="accepted", serverMessageId=m["serverId"], updatedAt=iso())
+                        if hub.echo_delay:
+                            threading.Timer(hub.echo_delay, hub.push, ("message.committed", echo)).start()
+                        elif not hub.echo_first:
+                            hub.push("message.committed", echo)
+                    else:
+                        s.update(state=outcome, reason="refused_by_wechat" if outcome == "failed" else "unclear")
+
+                threading.Timer(0.2, settle).start()
+                if outcome == "lost_answer":
                     self.close_connection = True
                     self.wfile.write(b"HTTP/1.1 202 Accepted\r\nContent-Length: 999\r\n\r\n{")
                     return

@@ -82,6 +82,8 @@ class FixtureWorld:
         self.hold_up = False  # listen connects but does not come up until cleared
         self.send_fail: Optional[str] = None  # "rejected" | "uncertain" for the next send
         self.send_fail_always: Optional[str] = None
+        self.images_ok = False  # the backend can send pictures (an /agent reply's image)
+        self.image_fail: Optional[str] = None  # "rejected" | "uncertain" for the next picture
         self.send_delay = 0.0
         self.create_fail = False
         self.history_fail = False
@@ -89,6 +91,7 @@ class FixtureWorld:
         self.recent_fail = False  # recent_chats raises
         # what happened
         self.sent: List[dict] = []
+        self.images: List[dict] = []  # pictures sent: chat, path, size, id
         self.history_calls: List[Tuple[str, Optional[int], int]] = []
         self.created_chats: List[str] = []
         self.connections = 0
@@ -439,6 +442,27 @@ class FixtureBackend(Backend):
         m = w.push(chat_id, "me", text, parent_id=reply_to or "", root_id=root or "")
         with w.lock:
             w.sent.append({"chat": chat_id, "text": text, "reply_to": reply_to, "root": root, "id": m.id})
+        return m.id
+
+    @property
+    def can_send_images(self) -> bool:
+        return self.world.images_ok
+
+    def send_image(self, chat_id: str, path: str) -> str:
+        w = self.world
+        with w.lock:
+            fail, w.image_fail = w.image_fail, None
+        if fail == "rejected":
+            raise SendRejected("示例服务拒绝了这张图片")
+        if fail == "uncertain":
+            raise BackendError("发送超时", "unreachable")
+        if chat_id not in w.chats:
+            raise SendRejected("没有这个会话")
+        with open(path, "rb") as f:
+            data = f.read()
+        m = w.push(chat_id, "me", "[图片]")
+        with w.lock:
+            w.images.append({"chat": chat_id, "path": path, "size": len(data), "id": m.id})
         return m.id
 
     def create_chat(self, user_id: str) -> str:

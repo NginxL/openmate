@@ -61,6 +61,8 @@ MEMBER_MOST = 50  # at most this many groups' member lists per round
 KINDS_LOOKUP_MOST = 20  # people_kinds asks WeChat about at most this many undescribed ids per call
 SURE_PEOPLE = ("@openim", "@qy_u")  # WeCom accounts: people's (WeChat gives them no verify flag)
 SEND_WAIT = 45.0
+OWN_ID_KEEP = 2 * 86400.0  # a sent picture's id is kept on disk this long (its echo comes within moments)
+IMAGE_SEND_WAIT = 150.0  # a picture through AgentWechat: staged and checked there first (hub.IMAGE_WAIT + room)
 # Accounts that are WeChat's own or a program, never a person (official accounts are gh_…, ClawBot bots …@im.bot)
 SERVICE_IDS = {"filehelper", "weixin", "weibo", "fmessage", "floatbottle", "medianote", "qmessage", "tmessage",
                "masssendapp", "newsapp", "blogapp", "qqmail", "qqsync", "lbsapp", "shakeapp", "brandsessionholder",
@@ -430,6 +432,12 @@ class WeChatBackend(Backend):
                 u = {}
             if not isinstance(u, dict) or time.time() - float(u.get("at") or 0) > PENDING_KEEP:
                 self.store.drop(key)
+                continue
+            if u.get("server"):  # a picture of ours known by its WeChat id: its echo is told by that
+                if time.time() - float(u.get("at") or 0) > OWN_ID_KEEP:
+                    self.store.drop(key)
+                else:
+                    link.remember_own("", str(u["server"]))
                 continue
             link.remember_pending(str(u.get("chat") or ""), float(u.get("at") or 0), key[len("hub_unsure:"):])
         link.on_settled = lambda k: self.store.drop("hub_unsure:" + k)
@@ -1426,6 +1434,52 @@ class WeChatBackend(Backend):
         if status in ("rejected", "not_sent"):
             raise SendRejected(str(r.get("message") or "微信没有接受这条消息"))
         raise BackendError("发送结果不确定：%s；不会自动重发" % (r.get("message") or "微信没有确认"), "unknown")
+
+    @property
+    def can_send_images(self) -> bool:
+        """Through AgentWechat only, for now (it stages and sends pictures itself; the program has no picture send)."""
+        return bool(self.hub_url)
+
+    def send_image(self, chat_id: str, path: str) -> str:
+        """The picture at path (checked by the core) into chat_id as the account, through AgentWechat. Its echo comes
+        back from the hub as a send of ours (history). Only a send that surely did not go out raises SendRejected."""
+        if not self.hub_url:
+            raise SendRejected("微信现在不能发图片（只有通过 AgentWechat 时可以）")
+        with self._auth_mu:
+            epoch, me = self._auth_epoch, self.me  # the sign-in this send belongs to
+        key = "om-" + uuid.uuid4().hex
+        try:
+            n = self._link()
+        except BackendError as e:
+            raise SendRejected("微信组件没准备好，没有发送：%s" % e.message)
+        if self._ready_for is not n:
+            raise SendRejected("AgentWechat 的微信号还没确认，没有发送")
+        unsure = "hub_unsure:" + key
+        with self._auth_mu:
+            if self._signed_out or self._auth_epoch != epoch or self.me != me:
+                raise SendRejected("登录状态变了（退出或换了账号），没有发送")
+            # kept before it goes, in this account's store: an echo after a crash is still ours
+            self.store.put(unsure, json.dumps({"chat": chat_id, "at": time.time()}, ensure_ascii=False))
+        try:
+            r = n.call("send_image", timeout=IMAGE_SEND_WAIT, chat=chat_id, path=path, key=key)
+        except NativeGone as e:
+            raise BackendError("图片发送结果不确定（%s），不会自动重发" % e.message, "unknown")
+        except NativeError as e:
+            self.store.drop(unsure)
+            raise SendRejected("没有发送：%s" % e.message)
+        status = r.get("status")
+        if status in ("rejected", "not_sent"):
+            self.store.drop(unsure)
+            raise SendRejected(str(r.get("message") or "微信没有接受这张图片"))
+        if status == "sent":
+            mid = str(r.get("message_id") or "")
+            if mid:
+                # known by its id from now on, on disk too (its echo may come after a reconnect or a restart): the
+                # record names the id instead of a key to ask about, and goes after a while
+                self.store.put(unsure, json.dumps({"chat": chat_id, "at": time.time(), "server": mid},
+                                                  ensure_ascii=False))
+            return mid
+        raise BackendError("图片发送结果不确定：%s；不会自动重发" % (r.get("message") or "微信没有确认"), "unknown")
 
     def _keep_own_send(self, chat_id: str, mid: str, text: str, params: Dict[str, Any], sent_at: int = 0,
                        notice: bool = False, hub_id: str = "", quoted: bool = True, mentioned: bool = True,
