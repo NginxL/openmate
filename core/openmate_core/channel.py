@@ -60,12 +60,13 @@ NEW_COMMANDS = ("/new", "/新对话")
 _ASK_REF = re.compile(r"^ask:([^#]+)(?:#\d+)?$")
 ENDED_NOTE = "（这个问题已经在别处处理了，不用在这里回答）"
 FAILED_NOTE = "没能交给 Persona（%s），请稍后再发一次。"
-NEW_ASK_NOTE = "这条没有交给 Persona：在它交出去之前 Agent 又提了一个新问题，它会被当成新问题的答案。请看清问题后再发一次。"
+NEW_ASK_NOTE = "这条没有交给 Persona：现在等你回答的已经是另一个问题，这条会被当成它的答案。请看清问题后再发一次。"
 FINAL = ("resolved", "dismissed", "expired", "cancelled")  # how a question ends for good (its history's status)
 FINAL_CODES = ("invalid_params", "no_contribution", "unknown_method", "permission_denied")
 SEARCH_MOST = 200  # the service's search for the chat's name: a full page may not have every chat of that name
 UNSURE_AGAIN = 30.0  # a name the service could not be asked about is asked about again after this long
-HISTORY_PAGES = 10
+HISTORY_PAGES = 100  # pages of the history a round reads at most (since an hour before the question)
+CLOCK_SLACK = 2.0  # a line's time (the service's clock) against when a question was sent (this computer's)
 REF_KEEP = 300.0  # a ref is the account's it was first tried under for this long (the hub's tries take seconds)
 ASK_STALE = 3 * 86400.0  # a question still followed after this long is let go (Persona's wait is a day at most)
 KEEP = 7 * 86400.0  # what the channel remembers of its messages
@@ -99,6 +100,7 @@ class ChannelBridge:
         self._checked: Optional[Tuple[int, str, str, float]] = None  # (account epoch, chat, ok | other | unsure, when)
         self._epochs: Dict[Tuple[str, str], int] = {}  # a line taken → the account generation it was heard in
         self._refs: Dict[str, Tuple[int, float, threading.Lock]] = {}  # a ref → its account generation, its lock
+        self._outs: Dict[Tuple[str, str], float] = {}  # (chat, text) this program sent lately (outgoing)
         self._wake = threading.Event()  # the question follower
         self._queued = threading.Event()  # the hand-over worker
         self._stop = threading.Event()
@@ -136,15 +138,13 @@ class ChannelBridge:
             known = self._checked
         if known is not None and known[0] == epoch and known[1] == mine:
             verdict, age = known[2], now - known[3]
-            if verdict == "unsure" and age < UNSURE_AGAIN:
+            if verdict == "unsure" and not wait and age < UNSURE_AGAIN:
                 return "", False
             if verdict != "unsure" and (not wait or age < app.timing.channel_resolve):
                 return (mine if verdict == "ok" else ""), True
         verdict = self._search(s, mine)
         if verdict == "unsure" and known is not None and known[:3] == (epoch, mine, "ok"):
-            with self._mu:  # what was found before stays, asked about again soon
-                self._checked = (epoch, mine, "ok", now - app.timing.channel_resolve + UNSURE_AGAIN)
-            return mine, True
+            return "", False  # due to be checked and it cannot be now: nothing goes out till it can (the old verdict stays)
         with self._mu:
             self._checked = (epoch, mine, verdict, now)
         if verdict == "unsure":
@@ -174,11 +174,18 @@ class ChannelBridge:
             log.info("the channel chat's name matches too many chats to be checked")
             return "unsure"
         peer = (app.store.get_chat(mine) or {}).get("peer_id") or ""
+        found = False
         for h in hits:
-            if (h.name or "").strip() != name or h.id == mine or (h.kind == "user" and peer and h.id == peer):
+            if (h.name or "").strip() != name:
+                continue
+            if h.id == mine or (h.kind == "user" and peer and h.id == peer):
+                found = True  # the service names the stored chat so too
                 continue
             log.warning("「Persona 渠道会话」 names another chat too: the channel sends nowhere")
             return "other"
+        if not found:  # the service does not say the stored chat has that name (renamed there, or not found)
+            log.info("the service does not find the channel chat by its name: it cannot be checked now")
+            return "unsure"
         return "ok"
 
     # ---------------------------------------------------------------- lifecycle
@@ -240,7 +247,10 @@ class ChannelBridge:
             if done is not None and done["state"] == "done":
                 self._track(epoch, done["result"], ref, kind)  # what a cut-off first time did not write down
                 return _answer(done["result"])  # the same ref: the same message, sent once
-            if first != epoch:
+            if done is not None:  # an outcome nobody knows (it may be in the chat): the journal says so, never again
+                return app.send_once(key, "channel", _never)
+            owner = getattr(app, "_owner", "")
+            if first != epoch or app.store.channel_ref_bind(key, owner) != owner:
                 raise RPCError("换了%s账号，这条是之前那个账号的，不再发出" % app.platform.name, "cannot_send")
             chat, sure = self.chat()
             if not chat:
@@ -315,24 +325,29 @@ class ChannelBridge:
             return False
         app, agent = self.app, self.app.agent
         store = app.store
-        body = (body or "").strip()
-        if body.lower() in STOP_WORDS:
+        said = (row.get("text") or "").strip()  # as the user said it (an @ in it is theirs to keep)
+        if agent._other_ai(said) or self._ours(chat, row):
+            return True  # an AI's line, or what this program sent there itself (a tool's, an inbox reply): not theirs
+        req = match_prefix(said, agent.prefix)
+        if req is None:
+            req = match_prefix(body or "", agent.prefix)  # after the @s it starts with: "@x /agent …"
+        text = said if req is None else req
+        if text.lower() in STOP_WORDS:
             parent, root = row.get("parent_id") or "", row.get("root_id") or ""
             if (parent or root) and not (parent and store.channel_msg(chat, parent)):
                 with app.owned(epoch) as ok:  # an /agent request's from before the channel, by its quote or thread
                     if ok and agent._target(row) is not None:
                         return False
             text = "/stop"
-        else:
-            req = match_prefix(body, agent.prefix)
-            text = body if req is None else req
         quote = self._quote(chat, row)
         if not text and not quote:
             return True  # a bare /agent: nothing to hand over (and no /agent of its own here)
         with app.owned(epoch) as ok:
             if not ok:
                 return True
-            ask_ix = store.channel_latest_ask(chat) if may_answer(text) else ""
+            # the question that was the latest one here when it was said (by its time; a little early for clocks)
+            said_at = float(row.get("at") or 0) or time.time()
+            ask_ix = store.channel_latest_ask(chat, said_at + CLOCK_SLACK) if may_answer(text) else ""
             if not store.channel_msg_put(chat, row["id"], "in", owner=getattr(app, "_owner", ""),
                                          placement=row.get("placement") or "", root_id=row.get("root_id") or "",
                                          text=text, quote=quote, ask_ix=ask_ix, state="pending"):
@@ -342,6 +357,33 @@ class ChannelBridge:
                     self._epochs[(chat, row["id"])] = epoch
         self._queued.set()
         return True
+
+    def outgoing(self, chat_id: str, text: str, message_id: str = "") -> None:
+        """Something this program sends into a chat as the user (any send: a tool's, an inbox reply): its echo in the
+        channel chat is never a line of the user's. Called before the send (by its text) and after it (by its id)."""
+        if not self.declared:
+            return
+        now = time.monotonic()
+        with self._mu:
+            for k in [k for k, at in self._outs.items() if now - at > 600]:
+                del self._outs[k]
+            self._outs[(chat_id, (text or "").strip())] = now
+        if message_id and self.app.store is not None:
+            self.app.store.channel_msg_put(chat_id, message_id, "out", owner=getattr(self.app, "_owner", ""))
+
+    def _ours(self, chat: str, row: dict) -> bool:
+        m = self.app.store.channel_msg(chat, row["id"])
+        if m is not None and m["dir"] == "out":
+            return True
+        with self._mu:
+            return (chat, (row.get("text") or "").strip()) in self._outs
+
+    def forget_pending(self) -> None:
+        """Signed out: the lines not handed over yet go nowhere."""
+        if self.declared and self.app.store is not None:
+            n = self.app.store.channel_forget_pending()
+            if n:
+                log.info("signed out: %d line(s) not handed to Persona were let go", n)
 
     def _quote(self, chat: str, row: dict) -> str:
         parent = row.get("parent_id") or ""
@@ -390,6 +432,10 @@ class ChannelBridge:
             return "gone"  # wiped by another account's sign-in, or settled
         if not app.owns(epoch, owner=r["owner"]):
             return "expired"  # heard for another account
+        if not app.signed_in or app.account is None:
+            raise _Later()  # not signed in (yet): after a restart the account is restored first
+        if r["owner"] and app.account.id != r["owner"]:
+            return "expired"
         if time.time() - float(r["at"]) > app.timing.agent_fresh:
             return "stale"
         chat, sure = self.chat(wait=False)
@@ -397,8 +443,25 @@ class ChannelBridge:
             if not sure:
                 raise _Later()
             return "dropped"  # the channel chat is another one by now (or none)
-        if may_answer(r["text"]) and store.channel_latest_ask(r["chat_id"]) != r["ask_ix"]:
-            return "new_ask"  # Persona would read it as the answer to a question that came after it was said
+        if may_answer(r["text"]):
+            if store.channel_latest_ask(r["chat_id"]) != r["ask_ix"]:
+                return "new_ask"  # Persona would read it as the answer to a question that came after it was said
+            if self._picked(r["chat_id"]) not in ("", r["ask_ix"]):
+                return "new_ask"  # the one it was said for ended: Persona would read it as another one's answer
+        return ""
+
+    def _picked(self, chat: str) -> str:
+        """The question Persona would read a line here as the answer to: the latest one put here that still waits
+        ("" when none; the latest open one here when the hub cannot be asked)."""
+        opens = self.app.store.channel_asks_open(chat)
+        if not opens:
+            return ""
+        waiting = self._waiting()
+        if waiting is None:
+            return opens[-1]["ix"]
+        for a in reversed(opens):
+            if a["ix"] in waiting:
+                return a["ix"]
         return ""
 
     def _hand_over(self, r: dict) -> None:
@@ -576,6 +639,10 @@ class ChannelBridge:
         except BackendError as e:
             log.info("a channel question could not be marked ended either (%s)", e.kind)
             return "failed"
+
+
+def _never() -> dict:
+    raise RPCError("没有发出")  # never called: send_once answers a key it has seen from its journal
 
 
 def _answer(res) -> dict:

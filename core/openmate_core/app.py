@@ -1529,6 +1529,8 @@ class ConnectorApp:
                 self.backend.saved_credentials = None  # gone for good now (a failed delete keeps it, for the checks)
         self.creds = "none"
         self.account = None
+        if self.channel is not None:
+            self.channel.forget_pending()  # signed out: nothing said before goes to Persona's 渠道 after it
         self.mark_changed("inbox")
         return {}
 
@@ -1579,9 +1581,15 @@ class ConnectorApp:
         self._not_handing_off()
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
+        if self.channel is not None:
+            self.channel.outgoing(chat_id, text)  # its echo in the 渠道's chat is no line of the user's
         if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
-            return self.backend.send(chat_id, text, reply_to or None, root, to_chat=True)
-        return self.backend.send(chat_id, text, reply_to or None, root or None)
+            mid = self.backend.send(chat_id, text, reply_to or None, root, to_chat=True)
+        else:
+            mid = self.backend.send(chat_id, text, reply_to or None, root or None)
+        if self.channel is not None:
+            self.channel.outgoing(chat_id, text, str(mid or ""))
+        return mid
 
     def send_image_as_user(self, chat_id: str, path: str) -> str:
         """A picture (an /agent reply's, checked and copied by images.take) into the chat as the user."""
@@ -1592,7 +1600,10 @@ class ConnectorApp:
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if not getattr(self.backend, "can_send_images", False):
             raise SendRejected("%s这里现在不能发图片" % self.platform.name)
-        return self.backend.send_image(chat_id, path)
+        mid = self.backend.send_image(chat_id, path)
+        if self.channel is not None:
+            self.channel.outgoing(chat_id, "", str(mid or ""))  # its echo in the 渠道's chat is no line of the user's
+        return mid
 
     # ------------------------------------------------------------------ inbox
 

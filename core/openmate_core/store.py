@@ -133,6 +133,9 @@ _SCHEMA = [
         state TEXT NOT NULL DEFAULT 'open',
         ended REAL NOT NULL DEFAULT 0,
         PRIMARY KEY (ix, ref))""",
+    # the account a channel.send ref was first tried under: a later try of it under another account sends nothing (kept
+    # through restarts and account switches, so it is not in the wipe)
+    "CREATE TABLE IF NOT EXISTS channel_refs (key TEXT PRIMARY KEY, owner TEXT NOT NULL, at REAL NOT NULL)",
 ]
 
 _MESSAGE_COLUMNS = (
@@ -867,15 +870,36 @@ class Store:
             "UPDATE channel_msgs SET state = ? WHERE chat_id = ? AND id = ? AND dir = 'in' AND state = 'pending'",
             (state, chat_id, msg_id)).rowcount == 1)
 
-    def channel_latest_ask(self, chat_id: str) -> str:
-        """The question put in the chat last that is not known to have ended ("" when none)."""
-        r = self._one("SELECT ix FROM channel_asks WHERE chat_id = ? AND state = 'open' ORDER BY at DESC, rowid DESC "
-                      "LIMIT 1", (chat_id,))
+    def channel_latest_ask(self, chat_id: str, until: Optional[float] = None) -> str:
+        """The question put in the chat last (up to then, when given) that is not known to have ended ("" when none)."""
+        if until is None:
+            r = self._one("SELECT ix FROM channel_asks WHERE chat_id = ? AND state = 'open' ORDER BY at DESC, rowid DESC "
+                          "LIMIT 1", (chat_id,))
+        else:
+            r = self._one("SELECT ix FROM channel_asks WHERE chat_id = ? AND state = 'open' AND at <= ? "
+                          "ORDER BY at DESC, rowid DESC LIMIT 1", (chat_id, until))
         return r["ix"] if r else ""
 
     def channel_mark_here(self, ix: str, line_id: str) -> None:
-        """The line that may answer question ix here (every piece of it)."""
-        self._tx(lambda db: db.execute("UPDATE channel_asks SET here = ? WHERE ix = ? AND state = 'open'", (line_id, ix)))
+        """The line that may answer question ix here (every piece of it), unless a line before it may have answered
+        it already (one handed over, or still on its way)."""
+        self._tx(lambda db: db.execute(
+            "UPDATE channel_asks SET here = ? WHERE ix = ? AND state = 'open' AND (here = '' OR here NOT IN "
+            "(SELECT id FROM channel_msgs WHERE chat_id = channel_asks.chat_id AND dir = 'in' "
+            "AND state IN ('pending', 'handed')))", (line_id, ix)))
+
+    def channel_forget_pending(self) -> int:
+        """Signed out: the lines not handed over yet go nowhere."""
+        return self._tx(lambda db: db.execute(
+            "UPDATE channel_msgs SET state = 'expired' WHERE dir = 'in' AND state = 'pending'").rowcount)
+
+    def channel_ref_bind(self, key: str, owner: str, now: Optional[float] = None) -> str:
+        """The account key was first tried under (this one, when it is new)."""
+        def run(db):
+            db.execute("INSERT OR IGNORE INTO channel_refs (key, owner, at) VALUES (?, ?, ?)", (key, owner, now or time.time()))
+            return db.execute("SELECT owner FROM channel_refs WHERE key = ?", (key,)).fetchone()["owner"]
+
+        return self._tx(run)
 
     def channel_ask_put(self, ix: str, ref: str, chat_id: str, message_id: str, now: Optional[float] = None) -> bool:
         """Follow a question's piece (once: False when it was followed already)."""
@@ -927,6 +951,7 @@ class Store:
         def run(db):
             db.execute("DELETE FROM channel_msgs WHERE at < ? AND state != 'pending'", (before,))
             db.execute("DELETE FROM channel_asks WHERE at < ?", (before,))
+            db.execute("DELETE FROM channel_refs WHERE at < ?", (before,))
 
         self._tx(run)
 
