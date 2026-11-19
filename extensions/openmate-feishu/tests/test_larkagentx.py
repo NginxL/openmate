@@ -1325,6 +1325,55 @@ class ReadTest(Base):
             b.media("img:example-1", 10)
         self.assertEqual(e.exception.kind, "not_found")
 
+    def test_media_failure_kinds(self):
+        """What each failed download is (the core turns it into the code Persona's history import acts on)."""
+        b = self.b
+        host = "https://files.feishu.example/download/messages/101/keys/"
+        S.files[host + "img_v3_enc?chat_id=500"] = (b"\x13\x37" * 10, "image/png")
+        S.files[host + "img_v3_page?chat_id=500"] = (b"<html>sign in</html>", "text/html")
+        S.files[host + "img_v3_k?chat_id=500"] = (b"\x89PNG\r\n\x1a\n" + b"\0" * 20, "image/png")
+        ref = larkagentx.media_ref("image", "500", "101", "img_v3_k")
+        cases = [(R.HTTPError("x", response=R.Response(404)), "not_found"),
+                 (R.HTTPError("x", response=R.Response(410)), "not_found"),
+                 (R.HTTPError("x", response=R.Response(401)), "expired"),
+                 (R.HTTPError("x", response=R.Response(403)), "rejected"),
+                 (R.HTTPError("x", response=R.Response(408)), "unreachable"),
+                 (R.HTTPError("x", response=R.Response(429)), "unreachable"),
+                 (R.HTTPError("x", response=R.Response(503)), "unreachable"),
+                 (R.HTTPError("x", response=R.Response(400)), "unknown"),
+                 (R.HTTPError("x", response=R.Response(422)), "unknown"),
+                 (R.ChunkedEncodingError("broke off"), "unreachable"),
+                 (R.ReadTimeout("slow"), "unreachable"),
+                 (R.ConnectionError("down"), "unreachable")]
+        for err, kind in cases:
+            S.download_error = err
+            with self.assertRaises(BackendError, msg=repr(err)) as e:
+                b.media(ref, 1 << 20)
+            self.assertEqual(e.exception.kind, kind, repr(err))
+        S.download_error = None
+        with self.assertRaises(BackendError) as e:
+            b.media(larkagentx.media_ref("image", "500", "101", "img_v3_enc"), 1 << 20)
+        self.assertEqual(e.exception.kind, "unsupported", "a picture that is not one: asking again won't help")
+        with self.assertRaises(BackendError) as e:
+            b.media(larkagentx.media_ref("image", "500", "101", "img_v3_page"), 1 << 20)
+        self.assertEqual(e.exception.kind, "unknown", "a page instead of the picture: not this file's fault")
+        odd = {"img_v3_nl": (b"\n\n<html>sign in</html>", "application/octet-stream", "unknown"),
+               "img_v3_bom": (b"\xef\xbb\xbf{\"code\": 99991663}", "application/octet-stream", "unknown"),
+               "img_v3_json": (b"\x00\x01", "application/json; charset=utf-8", "unknown"),
+               "img_v3_svg": (b"<svg xmlns='http://www.w3.org/2000/svg'/>", "image/svg+xml", "unsupported"),
+               "img_v3_xsvg": (b"<?xml version='1.0'?>\n<svg/>", "application/octet-stream", "unsupported"),
+               "img_v3_xhtml": (b"<?xml version='1.0'?><!DOCTYPE html><html/>", "application/octet-stream", "unknown"),
+               "img_v3_comment": (b"<!-- login --><html/>", "application/octet-stream", "unknown"),
+               "img_v3_spaces": (b" " * 256 + b"<html/>", "application/octet-stream", "unknown"),
+               "img_v3_bin": (b"[\x00\xff\x10", "application/octet-stream", "unsupported"),
+               "img_v3_xml": (b"\x00\x01", "application/problem+xml", "unknown")}
+        for key, (body, ctype, kind) in odd.items():
+            S.files[host + key + "?chat_id=500"] = (body, ctype)
+            with self.assertRaises(BackendError, msg=key) as e:
+                b.media(larkagentx.media_ref("image", "500", "101", key), 1 << 20)
+            self.assertEqual(e.exception.kind, kind, key)
+        self.assertEqual(b.media(ref, 1 << 20)[0], "image/png")
+
 
 # ---------------------------------------------------------------- the live link
 

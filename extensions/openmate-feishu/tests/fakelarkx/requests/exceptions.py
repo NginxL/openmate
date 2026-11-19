@@ -24,6 +24,10 @@ class Timeout(RequestException):
     pass
 
 
+class ChunkedEncodingError(RequestException):
+    """The body broke off midway (real requests: the connection dropped while reading it)."""
+
+
 class ConnectTimeout(ConnectionError, Timeout):
     pass
 

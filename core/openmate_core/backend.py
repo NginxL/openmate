@@ -148,6 +148,7 @@ class BackendError(Exception):
     config       the adapter is not set up (a missing path, an unsupported setting)
     too_large    media() would return more than max_bytes
     not_found    no such chat, user or media
+    unsupported  media() got this file, and it is not what it should be (an encrypted picture): asking again won't help
     rejected     the service refused a request (raise SendRejected for a send that surely did not go out)
     unknown      anything else
     """

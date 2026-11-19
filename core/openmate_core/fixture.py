@@ -418,6 +418,8 @@ class FixtureBackend(Backend):
         elif ref.startswith("file:"):
             data = ("示例文件 " + ref).encode("utf-8")
             mime = "text/plain"
+        elif ref.startswith("fail:"):  # fail:<kind>: the adapter's own failure of that kind
+            raise BackendError("示例附件下载失败", ref.split(":", 1)[1])
         else:
             raise BackendError("没有这个附件", "not_found")
         if len(data) > max_bytes:

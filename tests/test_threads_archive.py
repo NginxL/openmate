@@ -82,6 +82,76 @@ class ThreadTest(unittest.TestCase):
         with self.assertRaises(HubSideError):
             self.h.c("archive.media", ref="big:%d" % (21 << 20))
 
+    def test_media_failures_carry_codes(self):
+        """A failed download says what it was (Persona's history import: a placeholder and on, a wait and again, or a
+        stop), for the archive and for the app alike; an unknown failure keeps no code."""
+        want = {"not_found": "not_found", "rejected": "forbidden", "too_large": "forbidden", "unsupported": "forbidden",
+                "unreachable": "busy", "expired": "not_signed_in", "unknown": "", "proxy": "", "config": ""}
+        for kind, code in want.items():
+            for method in ("archive.media", "thread.media"):
+                with self.assertRaises(HubSideError, msg=(kind, method)) as e:
+                    self.h.c(method, ref="fail:" + kind)
+                self.assertEqual(e.exception.code or "", code, (kind, method))
+        with self.assertRaises(HubSideError) as e:
+            self.h.c("archive.media", ref="nothing-like-this")
+        self.assertEqual(e.exception.code, "not_found")
+        with self.assertRaises(HubSideError) as e:
+            self.h.c("archive.media", ref="big:%d" % (21 << 20))
+        self.assertEqual(e.exception.code, "forbidden")
+
+    def test_media_codes_follow_the_session(self):
+        """Signed out, starting, set up wrong or expired: the code says so, and no file is skipped for the session."""
+        import openmate_core.app as appmod
+        app = self.h.app
+        ref = "img:example-1"
+        app.link = "expired"  # the session is gone: what can still be had is handed over, a failure is the session's
+        self.assertEqual(self.h.c("archive.media", ref=ref)["mime"], "image/png")
+        self.assertEqual(self.h.c("thread.media", ref=ref)["mime"], "image/png")
+        for kind in ("rejected", "not_found", "expired", "unreachable"):
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref="fail:" + kind)
+            self.assertEqual(e.exception.code, "not_signed_in", kind)
+        for link in ("idle", "connecting", "down"):  # being restored: a moment
+            app.link = link
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref="fail:expired")
+            self.assertEqual(e.exception.code, "busy", link)
+        app.link = "up"  # up, and the service still says the session is gone: a person signs in again
+        with self.assertRaises(HubSideError) as e:
+            self.h.c("archive.media", ref="fail:expired")
+        self.assertEqual(e.exception.code, "not_signed_in")
+        backend = app.backend
+        try:
+            app.backend = None  # starting: the adapter is on its way
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref=ref)
+            self.assertEqual(e.exception.code, "busy")
+            app.setup_error = "示例：设置不对"  # set up wrong: a person looks
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref=ref)
+            self.assertEqual(e.exception.code or "", "")
+            self.assertIn("设置不对", e.exception.message)
+            app.setup_error = ""
+            app.creds, app.creds_error = "error", "示例：读不出登录信息"
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref=ref)
+            self.assertEqual(e.exception.code or "", "")
+            app.creds = "none"  # signed out since: an old read error is not what holds it now
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref=ref)
+            self.assertEqual(e.exception.code, "not_signed_in")
+        finally:
+            app.backend, app.creds, app.creds_error, app.setup_error = backend, "present", "", ""
+        wait, appmod.STARTUP_WAIT = appmod.STARTUP_WAIT, 0.01
+        try:
+            app.ready.clear()  # not ready yet at all: a moment
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("archive.media", ref=ref)
+            self.assertEqual(e.exception.code, "busy")
+        finally:
+            appmod.STARTUP_WAIT = wait
+            app.ready.set()
+
     def test_unknown_thread(self):
         with self.assertRaises(HubSideError):
             self.h.c("thread.page", thread="chat_nope", limit=10)

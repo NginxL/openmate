@@ -1900,9 +1900,14 @@ class LarkXBackend(Backend):
             status = _int(getattr(getattr(e, "response", None), "status_code", 0))
             if status in (404, 410):
                 raise BackendError("附件不在了（可能已被撤回或过期）", "not_found")
-            if status in (401, 403):
+            if status == 401:  # the session, not this file: signing in again brings it back
+                raise BackendError("%s登录已失效，下载不了附件" % self.region.label, "expired")
+            if status == 403:
                 raise BackendError("没有权限下载这个附件", "rejected")
-            raise BackendError("下载附件时%s出错了（HTTP %d）" % (self.region.label, status), "unreachable")
+            if status in (408, 429) or status >= 500 or status == 0:
+                raise BackendError("下载附件时%s出错了（HTTP %d）" % (self.region.label, status), "unreachable")
+            # any other answer would be the same next time: not a moment's trouble, and not this file's alone
+            raise BackendError("下载附件时%s回答 HTTP %d" % (self.region.label, status), "unknown")
         except R.RequestException as e:
             raise self._net(e, "下载附件")
         except ValueError:  # larkx.media.download: more than max_bytes
@@ -1916,7 +1921,9 @@ class LarkXBackend(Backend):
         picture = sniff_image(data)
         if kind in ("image", "sticker"):
             if not picture:
-                raise BackendError("这张图片下载下来不是能识别的格式（可能是加密的图片），暂时不能预览", "unknown")
+                if _answer_not_file(mime, data):  # a page or an error instead of the picture: the session, not the file
+                    raise BackendError("下载图片时%s回答的不是图片" % self.region.label, "unknown")
+                raise BackendError("这张图片下载下来不是能识别的格式（可能是加密的图片），暂时不能预览", "unsupported")
             mime = picture
         elif not mime or mime in ("application/octet-stream", "binary/octet-stream"):
             mime = picture or "application/octet-stream"
@@ -2032,7 +2039,7 @@ class LarkXBackend(Backend):
             return BackendError("连不上代理（%s时）：请检查代理设置" % what, "proxy")
         if isinstance(e, R.InvalidSchema):
             return BackendError("代理不能用（%s时）：代理要写 http:// 或 https://；系统代理是 SOCKS 时，LarkAgentX 的 Python 里要装 PySocks" % what, "proxy")
-        if isinstance(e, (R.ConnectionError, R.Timeout)):
+        if isinstance(e, (R.ConnectionError, R.Timeout, getattr(R, "ChunkedEncodingError", R.Timeout))):
             return BackendError("连不上%s（%s时）" % (label, what), "unreachable")
         if isinstance(e, R.HTTPError):
             status = _int(getattr(getattr(e, "response", None), "status_code", 0))
@@ -2041,6 +2048,21 @@ class LarkXBackend(Backend):
             return BackendError("%s的回答看不懂（%s时）" % (label, what), "unknown")
         log.info("%s failed: %s", what, type(e).__name__)
         return BackendError("%s时出错了（%s）" % (what, type(e).__name__), "unknown")
+
+
+def _answer_not_file(mime: str, data: bytes) -> bool:
+    """A download that came back as an answer (a page, an error: HTML, XML, JSON, text) rather than the file asked
+    for. An SVG is a picture (one this adapter does not hand over), not an answer. When in doubt it is an answer: that
+    stops a history import for a person to look, where taking it for a bad picture would skip the file for good."""
+    if mime.startswith("text/") or mime in ("application/json", "application/xhtml+xml", "application/xml") \
+            or mime.endswith(("+json", "+xml")) and mime != "image/svg+xml":
+        return True
+    head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n\x0b\x0c").lower()
+    if head.startswith(b"<?xml"):
+        head = head[head.find(b"?>") + 2:].lstrip() if b"?>" in head else b""
+    if head.startswith(b"<svg"):
+        return False
+    return head.startswith((b"<", b"{"))
 
 
 def _never_connected(e: Exception) -> bool:

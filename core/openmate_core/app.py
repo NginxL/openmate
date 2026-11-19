@@ -48,6 +48,11 @@ SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
 # a chat since it signed in (live messages, catch-ups, history reads). Pages are hints of HISTORY_PAGE messages, at most
 # HISTORY_MOST (the hub's own cap); history.chats lists every chat (the cap only guards the query). The store is read
 # HISTORY_STEP lines at a time at least.
+# What a failed media() is for the caller (connector protocol codes; Persona's history import reads them): gone or not
+# handed over (kept as a placeholder, the import goes on), a moment's trouble (it waits and asks again), or signed out.
+# Any other kind (proxy, config, a bug) has no code: the import stops for a person to look.
+MEDIA_CODES = {"not_found": "not_found", "rejected": "forbidden", "too_large": "forbidden", "unsupported": "forbidden",
+               "unreachable": "busy", "expired": "not_signed_in"}
 HISTORY_PAGE = 50
 HISTORY_MOST = 200
 HISTORY_STEP = 200
@@ -196,7 +201,7 @@ class ConnectorApp:
             fn = self._methods.get(rest)
             if fn is not None:
                 if rest != "status" and not self.ready.wait(STARTUP_WAIT):
-                    raise RPCError("扩展还在启动，请稍后再试")
+                    raise RPCError("扩展还在启动，请稍后再试", "busy")
                 return fn(params)
             if rest in UNDECLARED:
                 raise RPCError("连接器 %s 没有声明这项能力：%s" % (self.cid, rest), "no_capability")
@@ -1502,13 +1507,22 @@ class ConnectorApp:
         if not ref:
             raise RPCError("缺少 ref")
         if self.backend is None or not self.signed_in:
-            raise RPCError("还没有登录%s" % self.platform.name)
+            if self.creds == "none":
+                raise RPCError("还没有登录%s" % self.platform.name, "not_signed_in")
+            if self.setup_error or self.creds == "error":  # not a sign-in matter: a person looks
+                raise RPCError(self.setup_error or self.creds_error or "读取保存的登录信息失败，请重启扩展")
+            raise RPCError("扩展还在启动，请稍后再试", "busy")  # loading, or the adapter is on its way
         try:
             mime, data = self.backend.media(ref, most)
         except BackendError as e:
-            raise RPCError(e.message)
+            code = MEDIA_CODES.get(e.kind, "")
+            if self.link == "expired":  # the session is gone (perhaps while this was on its way): never skip a file for it
+                code = "not_signed_in"
+            elif e.kind == "expired" and self.link in ("idle", "connecting", "down"):
+                code = "busy"  # the session is still being restored after a start or a drop: a moment
+            raise RPCError(e.message, code)
         if len(data) > most:
-            raise RPCError("附件超过 %d MB" % (most >> 20))
+            raise RPCError("附件超过 %d MB" % (most >> 20), "forbidden")
         return {"mime": mime or "application/octet-stream", "data": base64.b64encode(data).decode("ascii")}
 
     # ------------------------------------------------------------------ archive
