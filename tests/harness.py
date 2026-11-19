@@ -216,6 +216,9 @@ class FakeHubHTTP:
         self.start_unknown = False  # the next start ends with nobody knowing whether it started (202 unknown)
         self.todos: List[dict] = []  # GET /api/v1/todos (todos.read): the to-dos, as the hub lists them
         self.todos_status: Optional[int] = None  # an HTTP status GET /api/v1/todos answers instead (403: no todos.read)
+        self.todos_delay = 0.0  # seconds GET /api/v1/todos takes
+        self.send_refused: Dict[str, int] = {}  # session id → HTTP status its messages are refused with (nothing sent)
+        self.lost_send_status = (502, "hub_unreachable")  # what a lost send (lost_sends) answers
         self._n = itertools.count(1)
         hub = self
 
@@ -302,6 +305,16 @@ class FakeHubHTTP:
             self.todos.append(t)
         return t
 
+    def _todo_of(self, mid: str, sid: str) -> Optional[dict]:
+        for t in self.todos:
+            if t.get("done_at"):
+                continue
+            for a in t.get("agents") or []:
+                if (a.get("machine_id"), a.get("session_id")) == (mid, sid) and not a.get("released_at") \
+                        and not a.get("dismissed_at"):
+                    return t
+        return None
+
     def messages_to(self, mid: str, sid: str) -> List[dict]:
         return self.posts("/api/v1/sessions/%s/%s/messages" % (mid, sid))
 
@@ -384,6 +397,12 @@ class FakeHubHTTP:
                 tasks = s.get("tasks") or []
                 return 200, {"conversation": was, "tasks": tasks, "already": not was and not tasks}
             if method == "GET" and p == "/api/v1/todos":
+                if self.todos_delay:
+                    self.lock.release()
+                    try:
+                        time.sleep(self.todos_delay)
+                    finally:
+                        self.lock.acquire()
                 if self.todos_status:
                     return self.todos_status, {"error": "refused", "code": "forbidden"}
                 return 200, {"todos": [dict(t) for t in self.todos]}
@@ -401,6 +420,9 @@ class FakeHubHTTP:
                     row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"))
                 if s.get("background"):
                     row.update(background_working=True, state="working")
+                on = self._todo_of(mid, sid)
+                if on is not None:  # the hub's decoration: the open to-do the session is active on
+                    row["todo"] = {"id": on["id"], "title": on.get("title") or ""}
                 return 200, {"sessions": [row],
                              "total": 1, "has_more": False}
             if len(parts) >= 6 and parts[:3] == ["api", "v1", "sessions"]:
@@ -410,6 +432,8 @@ class FakeHubHTTP:
                     return 404, {"error": "no such session"}
                 rest = parts[5:]
                 if method == "POST" and rest == ["messages"]:
+                    if sid in self.send_refused:
+                        return self.send_refused[sid], {"error": "refused", "code": "refused"}
                     kw = {}
                     cmid = (body or {}).get("client_msg_id")
                     if cmid:
@@ -420,7 +444,8 @@ class FakeHubHTTP:
                     self.add(sid, "user", "text", (body or {}).get("text") or "", **kw)
                     if self.lost_sends > 0:
                         self.lost_sends -= 1
-                        return 502, {"error": "the manager could not reach the hub", "code": "hub_unreachable"}
+                        status, code = self.lost_send_status
+                        return status, {"error": "the answer was lost", "code": code}
                     return 200, {"ok": True}
                 if method == "POST" and rest == ["interrupt"]:
                     s["working"] = False

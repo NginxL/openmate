@@ -810,14 +810,19 @@ class Store:
         else:
             self._tx(lambda db: db.execute("DELETE FROM autoreply WHERE chat_id = ?", (chat_id,)))
 
-    def runs_prune(self, before: float, keep: int) -> None:
+    def runs_prune(self, before: float, keep: int, protect=()) -> None:
+        """Forget runs older than before, and all but the newest keep; never one still starting or running, nor one
+        in protect (a request a newer one still waits on)."""
+        spare = sorted({p for p in protect if p})
+        extra = (" AND id NOT IN (%s)" % ",".join("?" * len(spare))) if spare else ""
+
         def run(db):
-            old = "created < ? AND state NOT IN ('starting', 'running')"
-            many = "id NOT IN (SELECT id FROM runs ORDER BY created DESC LIMIT ?) AND state NOT IN ('starting', 'running')"
-            ids = [r["id"] for r in db.execute("SELECT id FROM runs WHERE " + old, (before,)).fetchall()]
-            db.execute("DELETE FROM runs WHERE " + old, (before,))
-            ids += [r["id"] for r in db.execute("SELECT id FROM runs WHERE " + many, (keep,)).fetchall()]
-            db.execute("DELETE FROM runs WHERE " + many, (keep,))
+            old = "created < ? AND state NOT IN ('starting', 'running')" + extra
+            many = "id NOT IN (SELECT id FROM runs ORDER BY created DESC LIMIT ?) AND state NOT IN ('starting', 'running')" + extra
+            ids = [r["id"] for r in db.execute("SELECT id FROM runs WHERE " + old, (before, *spare)).fetchall()]
+            db.execute("DELETE FROM runs WHERE " + old, (before, *spare))
+            ids += [r["id"] for r in db.execute("SELECT id FROM runs WHERE " + many, (keep, *spare)).fetchall()]
+            db.execute("DELETE FROM runs WHERE " + many, (keep, *spare))
             return ids
 
         with self._lock:  # remembered a day: an account switch meanwhile counts them wiped too (run_put, run_wiped)
