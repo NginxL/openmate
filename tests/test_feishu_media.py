@@ -204,12 +204,17 @@ class MediaToolTest(unittest.TestCase):
         elsewhere = os.path.join(h.data_dir, "elsewhere")
         os.makedirs(elsewhere)
         os.makedirs(os.path.dirname(folder_of(h)))
+        kept = os.path.join(elsewhere, "old-but-not-ours.png")
+        with open(kept, "wb") as f:
+            f.write(PNG)
+        os.utime(kept, (1, 1))
         os.symlink(elsewhere, folder_of(h))
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("存不到本机", e.exception.message)
         self.assertIn("不是一个目录", e.exception.message)
-        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(os.listdir(elsewhere), ["old-but-not-ours.png"], "nothing written, nothing removed there")
+        os.remove(kept)
         # a link where the file goes is replaced by the file itself, not followed
         os.remove(folder_of(h))
         os.makedirs(folder_of(h))

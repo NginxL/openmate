@@ -197,7 +197,7 @@ def _own_folder(folder: str) -> None:
     away as soon as the folder above is known to be ours, before this account's is made (which may fail)."""
     for d in (os.path.dirname(folder), folder):
         if d == folder:
-            _tidy(folder)
+            _tidy_others(folder)
         try:
             os.mkdir(d, 0o700)
         except FileExistsError:
@@ -209,11 +209,11 @@ def _own_folder(folder: str) -> None:
             raise OSError(0, "%s 不是这个用户的，不往那里写" % os.path.basename(d))
         if stat.S_IMODE(st.st_mode) != 0o700:
             os.chmod(d, 0o700)
+    _tidy_old(folder)  # only now that it is known to be this user's own folder
 
 
-def _tidy(folder: str) -> None:
-    """What no one should read any more: the folders of the accounts signed in here before (one account at a time),
-    and this account's files older than KEEP_SECONDS (each call fetches again)."""
+def _tidy_others(folder: str) -> None:
+    """The folders of the accounts signed in here before (one account at a time): no one should read them any more."""
     parent, mine = os.path.split(folder)
     try:
         names = os.listdir(parent)
@@ -224,6 +224,10 @@ def _tidy(folder: str) -> None:
         if n == mine or not _ACCOUNT_DIR.fullmatch(n) or os.path.islink(p) or not os.path.isdir(p):
             continue
         _remove_tree(p)
+
+
+def _tidy_old(folder: str) -> None:
+    """This account's files older than KEEP_SECONDS (each call fetches again)."""
     old = time.time() - KEEP_SECONDS
     try:
         names = os.listdir(folder)
