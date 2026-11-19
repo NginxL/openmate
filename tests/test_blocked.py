@@ -11,6 +11,7 @@ import unittest
 
 from harness import Harness, wait_until
 from openmate_core.backend import BackendError, Message
+from openmate_core import store as store_module
 from openmate_core.store import Store
 
 import openmate_feishu
@@ -102,27 +103,44 @@ class BlockedTest(unittest.TestCase):
         self.check(h, archived(h))
         self.check(h, imported(h))
 
-    def test_a_blocked_message_that_reads_later_is_archived_then(self):
+    def test_a_later_reading_never_unmarks_it(self):
         h = self.signed_in()
         store = h.app.store
         store.add_messages([line("msg_held", DLP_BLOCKED_TEXT, 300, blocked=True)], from_history=True)
-        first = archived(h)
-        self.assertNotIn("msg_held", [m["id"] for m in first])
-        cursor = h.c("archive.changes", cursor="", limit=100)["next"]
-        store.add_messages([line("msg_held", "放行后的正文", 300)], from_history=True)
-        self.assertFalse(store.message(CHAT, "msg_held")["blocked"])
-        page = h.c("archive.changes", cursor=cursor, limit=100)
-        self.assertIn("放行后的正文", str(page), "moved past the cursor: handed over with its text now")
+        store.add_messages([line("msg_held", "[不支持的消息：TEXT]", 300)], from_history=False)  # a decode failure
+        row = store.message(CHAT, "msg_held")
+        self.assertEqual((row["text"], row["blocked"]), (DLP_BLOCKED_TEXT, True))
+        for rows in (archived(h), imported(h)):
+            self.assertNotIn("msg_held", [m["id"] for m in rows])
+        store.add_messages([line("msg_plain_later", "普通", 250)], from_history=True)
+        store.add_messages([line("msg_plain_later", DLP_BLOCKED_TEXT, 250, blocked=True)], from_history=True)
+        self.assertTrue(store.message(CHAT, "msg_plain_later")["blocked"], "a reading that is blocked marks it")
+
+    def test_a_blocked_line_at_a_position_does_not_move_the_history_bound(self):
+        h = self.signed_in()
+        now = time.time()
+
+        def at(mid, pos, ago, blocked=False):
+            m = Message(id=mid, chat_id=CHAT, position=pos, sender_id="user_example_b", text="第 %s 条" % mid, at=now - ago)
+            if blocked:
+                m.text, m.blocked = DLP_BLOCKED_TEXT, True
+            return m
+
+        # a topic reply shares its root's position and comes later than the line after it
+        h.app.store.add_messages([at("p7", 7007, 30), at("p8", 7008, 20), at("p7_reply", 7007, 10, blocked=True)],
+                                 from_history=True)
+        page = h.c("archive.history", chat=CHAT, after="7007", limit=10)
+        self.assertEqual([m["id"] for m in page.get("messages") or []], ["p8"])
 
 
 class MigrationTest(unittest.TestCase):
     def old_store(self, d: str) -> str:
         """openmate.db as a version before messages.blocked left it: a blocked line, and a plain one."""
         path = os.path.join(d, "openmate.db")
-        Store(path).close()
         db = sqlite3.connect(path)
-        if "blocked" in [r[1] for r in db.execute("PRAGMA table_info(messages)")]:
-            db.execute("ALTER TABLE messages DROP COLUMN blocked")
+        for stmt in store_module._SCHEMA:  # without the column (no DROP COLUMN: SQLite before 3.35 has none)
+            db.execute(stmt.replace("blocked INTEGER NOT NULL DEFAULT 0,", ""))
+        self.assertNotIn("blocked", [r[1] for r in db.execute("PRAGMA table_info(messages)")])
         now = time.time()
         for mid, text, at in (("msg_old_blocked", DLP_BLOCKED_TEXT, now - 300), ("msg_old_plain", "旧的普通消息", now - 200)):
             db.execute("INSERT INTO messages (chat_id, id, position, sender_id, text, at, received) "

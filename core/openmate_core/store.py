@@ -182,11 +182,16 @@ class Store:
 
     def _migrate(self, legacy_blocked_texts: List[str]) -> None:
         """An older store's messages table gains the columns of this version, in one transaction."""
-        cols = {r[1] for r in self._db.execute("PRAGMA table_info(messages)").fetchall()}
+        def columns(db) -> set:
+            return {r[1] for r in db.execute("PRAGMA table_info(messages)").fetchall()}
+
+        cols = columns(self._db)
         if not cols or "blocked" in cols:
             return  # a new store (made with every column below), or one migrated already
 
         def run(db):
+            if "blocked" in columns(db):
+                return  # another connection to the file migrated it meanwhile
             db.execute("ALTER TABLE messages ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
             if legacy_blocked_texts:
                 # what told a blocked message then: its text was the backend's note (once: later rows say themselves)
@@ -460,19 +465,22 @@ class Store:
                 )
                 if cur.rowcount != 1:
                     blank = db.execute("SELECT " + _INSERT_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ? "
-                                       "AND (text = '' OR blocked = 1)", (m.chat_id, m.id)).fetchone() \
-                        if (m.text or "").strip() and not m.blocked else None
+                                       "AND text = ''", (m.chat_id, m.id)).fetchone() if (m.text or "").strip() else None
                     if blank is not None:
-                        # stored with no text by an older reading, or blocked then: moved to the end (a new seq), so
-                        # the archive's cursor, already past it, hands it over with its text now
+                        # stored with no text by an older reading: moved to the end (a new seq), so the archive's
+                        # cursor, already past it, hands it over with its text now
                         db.execute("DELETE FROM messages WHERE chat_id = ? AND id = ?", (m.chat_id, m.id))
                         db.execute("INSERT INTO messages (" + _INSERT_COLUMNS + ") VALUES (%s)"
                                    % ",".join("?" * len(tuple(blank))), tuple(blank))
-                    if m.text:  # the blocked mark goes with the text it came with
-                        db.execute("UPDATE messages SET text = ?, type = ?, blocked = ? WHERE chat_id = ? AND id = ? "
-                                   "AND (text != ? OR blocked != ?)",
-                                   (m.text, (m.type or "TEXT").upper(), int(bool(m.blocked)), m.chat_id, m.id, m.text,
-                                    int(bool(m.blocked))))
+                    kind = (m.type or "TEXT").upper()
+                    if m.text and m.blocked:
+                        db.execute("UPDATE messages SET text = ?, type = ?, blocked = 1 WHERE chat_id = ? AND id = ? "
+                                   "AND (text != ? OR blocked = 0)", (m.text, kind, m.chat_id, m.id, m.text))
+                    elif m.text:
+                        # a blocked message stays so (a later reading that is not the note, a decode failure's
+                        # placeholder, never brings it to the archive); only a recall's notice replaces its note
+                        db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ? "
+                                   "AND (blocked = 0 OR ? = 'SYSTEM')", (m.text, kind, m.chat_id, m.id, m.text, kind))
                     if (m.type or "").upper() == "SYSTEM" and not m.media:
                         # turned into a notice (a recall): what it carried is not offered any more
                         db.execute("UPDATE messages SET media = '[]' WHERE chat_id = ? AND id = ? AND media != '[]'",

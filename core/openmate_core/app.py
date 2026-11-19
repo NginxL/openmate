@@ -1640,7 +1640,7 @@ class ConnectorApp:
         rows = self.store.position_rows(chat_id, p)
         # the lines a page can hold decide (a blank or system line sharing the position must not move the bound past
         # a line between them); a position holding none of those still names a place
-        shown = [r for r in rows if not views.is_system(r) and views.has_content(r)] or rows
+        shown = [r for r in rows if not views.is_system(r) and views.has_content(r) and not r.get("blocked")] or rows
         if not shown:
             raise RPCError("这个会话里没有位置 %s 的消息" % raw[:40])
         return shown[0]["_key"] if mark == "before" else shown[-1]["_key"]
