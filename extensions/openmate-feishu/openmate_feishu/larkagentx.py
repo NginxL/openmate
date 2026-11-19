@@ -296,7 +296,8 @@ def pushed_done(payload: bytes) -> Dict[str, float]:
 def pushed_threads(payload: bytes) -> Dict[str, dict]:
     """What says where each message of a messages.PushMessagesRequest shows, which LarkAgentX's message dicts leave
     out: by message id, its thread kind (threadMessageType), and whether it also went to the main stream (sendToChat,
-    or the syncToChat marks: syncToChatMessageType, the related message, the thread's root). Ids only, no content."""
+    or the syncToChat marks: syncToChatMessageType, the related message, the thread's root), and whether it carried
+    the thread kind at all (thread_known; a proto2 field, unset reads as 0). Ids only, no content."""
     from larkx.proto import lark_all_pb2
 
     req = lark_all_pb2.messages.PushMessagesRequest()
@@ -305,21 +306,25 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
     for key, m in req.messages.items():
         mid = _id(m.id) or _id(key)
         if mid:
-            out[mid] = {"thread_type": int(m.threadMessageType), "send_to_chat": bool(m.sendToChat),
+            out[mid] = {"thread_type": int(m.threadMessageType), "thread_known": m.HasField("threadMessageType"),
+                        "send_to_chat": bool(m.sendToChat),
                         "sync_type": int(m.syncToChatMessageType), "sync_related": _id(m.syncToChatRelatedMessageId),
                         "sync_root": _id(m.syncToChatThreadRootId)}
     return out
 
 
-_MARK_NAMES = {"THREAD_ROOT": 1, "THREAD_REPLY": 2, "SYNC_TO_CHAT_TARGET": 1, "SYNC_TO_CHAT_SOURCE": 2}
+_MARK_NAMES = {"THREAD_ROOT_MESSAGE": 1, "THREAD_REPLY_MESSAGE": 2, "SYNC_TO_CHAT_TARGET_MESSAGE": 1,
+               "SYNC_TO_CHAT_SOURCE_MESSAGE": 2}  # entities.Message's enums by name
 
 
 def entity_marks(entity: dict) -> dict:
-    """pushed_threads' marks of one message entity as LarkClient.api answers it (a dict; enums as numbers or names)."""
+    """pushed_threads' marks of one message entity as LarkClient.api answers it (a dict; enums as numbers or names),
+    read from history (never remembered for a reply to copy: a history page must not push out a live request's)."""
     def num(v) -> int:
         return _MARK_NAMES.get(v, 0) if isinstance(v, str) and not v.isdigit() else _int(v)
 
-    return {"thread_type": num(entity.get("threadMessageType")), "send_to_chat": bool(entity.get("sendToChat")),
+    return {"thread_type": num(entity.get("threadMessageType")), "thread_known": "threadMessageType" in entity,
+            "history": True, "send_to_chat": bool(entity.get("sendToChat")),
             "sync_type": num(entity.get("syncToChatMessageType")),
             "sync_related": _id(entity.get("syncToChatRelatedMessageId")),
             "sync_root": _id(entity.get("syncToChatThreadRootId"))}
@@ -1376,11 +1381,11 @@ class LarkXBackend(Backend):
         # ordinary group may open a thread), so its root is only the quoted chain's.
         in_thread = bool(root) and anchor == root
         # A quote in the main stream may have no threadId yet (no one replied in its thread), so the anchor falls back
-        # to its root; a live push's marks tell: only a thread reply is in a thread (not in a thread-first group,
-        # where the old reading stays; asked only for such a quote, LarkAgentX keeps the answer).
+        # to its root; the marks tell (threadMessageType): only a thread reply is in a thread. Only when they carry
+        # it, and in a group known as an ordinary one: else (a thread-first group, or not known) the old reading.
         marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
-        if (in_thread and marks is not None and marks.get("thread_type") != THREAD_REPLY
-                and not self._topic_group(client, chat_id, True)):
+        if (in_thread and marks is not None and marks.get("thread_known") and marks.get("thread_type") != THREAD_REPLY
+                and (marks.get("plain_group") or self._plain_group(client, chat_id, d.get("chat_type")))):
             in_thread = False
         topic_root = not root and d.get("scope") == "topic" and anchor == msg_id  # a thread-first group's root
         thread_id = anchor if in_thread else (msg_id if topic_root else "")
@@ -1419,12 +1424,12 @@ class LarkXBackend(Backend):
             placement = ""  # not as it was read: replies keep the old way
         else:
             placement = "chat"
-        if mark:
+        if mark and not marks.get("history"):
             with self._lock:
                 self._synced[msg_id] = mark
                 while len(self._synced) > SYNCED_KEEP:
                     del self._synced[next(iter(self._synced))]
-        if mine and marks is not None and (in_thread or mark or marks.get("thread_type")):
+        if mine and marks is not None and not marks.get("history") and (in_thread or mark or marks.get("thread_type")):
             log.info("own message %s: threadMessageType=%d sendToChat=%s syncToChatMessageType=%d related=%s "
                      "syncRoot=%s; read as %s", msg_id, marks.get("thread_type", 0), marks.get("send_to_chat", False),
                      marks.get("sync_type", 0), marks.get("sync_related") or "-", marks.get("sync_root") or "-",
@@ -1449,6 +1454,24 @@ class LarkXBackend(Backend):
             return bool(client.is_thread_chat(chat_id))
         except Exception:
             return False
+
+    def _plain_group(self, client, chat_id: str, chat_type=None) -> bool:
+        """Whether the chat is known as an ordinary group (not thread-first): from the push's chat type, the chats
+        read, or the chat's own record read now (and kept); False when it cannot tell."""
+        if chat_type in (3, "TOPIC_GROUP"):
+            return False
+        with self._lock:
+            hit = self._chats.get(chat_id)
+        if hit is None:
+            if client is None:
+                return False
+            try:
+                _, chat = self._chat_read(client, chat_id)
+            except Exception:
+                return False
+        else:
+            chat = hit[1]
+        return chat.kind == "group" and not chat.topic
 
     def _learn_peer(self, chat_id: str, user_id: str, me_id: str) -> None:
         """The other person of a direct chat, from their message in it (the chat's own record may have no name), for
@@ -1661,13 +1684,13 @@ class LarkXBackend(Backend):
         """History carries no thread marks (pushed_threads), and a quote in the main stream no one replied to in its
         thread reads as a reply in that thread (its anchor is its root): for those a page has, the entities are asked
         once and their threadMessageType kept as the marks (_message reads them as a push's). One that does not carry
-        it, a thread-first group, or a failed read: the old reading."""
+        it, a group not known as an ordinary one (asked once a page), or a failed read: the old reading."""
         maybe = {}
         for d in got:
             if (isinstance(d, dict) and "_placement" not in d and _id(d.get("root_id"))
                     and _id(d.get("anchor")) == _id(d.get("root_id")) and _int(d.get("position")) > 0):
                 maybe[_id(d.get("msg_id"))] = d
-        if not maybe or self._topic_group(client, chat_id, True):
+        if not maybe or not self._plain_group(client, chat_id, next(iter(maybe.values())).get("chat_type")):
             return
         try:
             raw = self._answer(client.api("messages.PullMessagesByPositionsRequest", {
@@ -1679,7 +1702,7 @@ class LarkXBackend(Backend):
         for v in (raw.get("messages") or {}).values():
             d = maybe.get(_id(v.get("id"))) if isinstance(v, dict) else None
             if d is not None and "threadMessageType" in v:
-                d["_placement"] = entity_marks(v)
+                d["_placement"] = dict(entity_marks(v), plain_group=True)
 
     def _fill_blank(self, client, chat_id: str, msgs: List[Message]) -> None:
         """A text or post read as nothing: the message's own entity is asked for once more and its preview hang points
