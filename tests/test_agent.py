@@ -684,22 +684,22 @@ class PlacementTest(unittest.TestCase):
         ask(h, "/stop", parent_id=progress["id"], placement="chat")  # no thread to find it by: the quote does
         wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "stopped", what="stopped")
 
-    def test_a_copy_of_the_request_is_taken_once(self):
-        h = self.make()
+    def test_a_copy_is_never_a_command(self):
+        h = self.make(agent_reply_header=" ", agent_reply_suffix=SUFFIX, agent_ack_reaction="", agent_auto=True)
         root, under = self.thread(h)
-        msg = ask(h, "/agent 只做一次", root_id=root.id, thread_id=root.id, parent_id=under.id, placement="thread_chat")
-        ask(h, "/agent 只做一次", placement="chat", same_as=msg.id)  # the main stream's copy of it
-        running(h, msg)
-        time.sleep(0.3)
+        ask(h, "/agent 副本先到", placement="chat", same_as="msg_example_source")  # the main stream's copy
+        msg = ask(h, "/agent 副本先到", root_id=root.id, thread_id=root.id, parent_id=under.id,
+                  placement="thread_chat", id="msg_example_source")
+        run = running(h, msg)
+        self.assertEqual(run["placement"], "thread_chat", "the original is the request, wherever the copy came")
+        ask(h, "/stop", placement="chat", same_as="msg_example_stop")
+        ask(h, "/stop", root_id=root.id, thread_id=root.id, parent_id=msg.id, placement="thread_chat",
+            id="msg_example_stop")
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "stopped", what="the original /stop stops it")
+        time.sleep(0.2)
         self.assertEqual(len(h.http.starts()), 1)
-        h2 = self.make()
-        first = ask(h2, "/agent 副本先到", placement="chat", same_as="msg_example_source")
-        ask(h2, "/agent 副本先到", placement="thread_chat", id="msg_example_source")
-        self.assertEqual(running(h2, first)["placement"], "chat", "the copy came first: answered in the main stream")
-        time.sleep(0.3)
-        self.assertEqual(len(h2.http.starts()), 1)
 
-    def test_a_placement_goes_only_with_its_thread(self):
+    def test_a_placement_comes_with_its_own_reading(self):
         from openmate_core.backend import Message
 
         h = self.make()
@@ -708,8 +708,9 @@ class PlacementTest(unittest.TestCase):
         live = Message(id="msg_example_x", chat_id="chat_example_team", position=999, mine=True, text="x",
                        root_id="msg_example_r", placement="thread_chat", same_as="msg_example_s")
         (row,) = h.app.store.add_messages([live], from_history=False)
-        self.assertNotIn("placement", row, "read with another thread than stored: none (the old way)")
+        self.assertEqual((row["placement"], row["root_id"]), ("thread_chat", "msg_example_r"), "the live reading wins")
         self.assertEqual(row["same_as"], "msg_example_s")
+        self.assertEqual(h.app.store.message("chat_example_team", "msg_example_x")["root_id"], "", "the store's as it was")
         self.assertNotIn("placement", h.app.store.message("chat_example_team", "msg_example_x"), "never stored")
 
     def test_unknown_placement_keeps_the_old_way(self):

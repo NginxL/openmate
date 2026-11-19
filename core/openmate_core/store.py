@@ -150,10 +150,10 @@ def _message_row(r: sqlite3.Row) -> dict:
 
 def _live_row(r: sqlite3.Row, m: Message) -> dict:
     """A stored row as add_messages answers it: with the placement and same_as the backend read (not columns). A
-    placement goes only with the thread it was read with: a row stored otherwise (an older reading) keeps none."""
+    placement comes with the thread and quote it was read with, which win over a row an older reading stored."""
     d = _message_row(r)
-    if m.placement and (d.get("root_id") or "") == (m.root_id or ""):
-        d["placement"] = m.placement
+    if m.placement:
+        d.update(placement=m.placement, root_id=m.root_id or "", thread_id=m.thread_id or "", parent_id=m.parent_id or "")
     if m.same_as:
         d["same_as"] = m.same_as
     return d
@@ -463,8 +463,8 @@ class Store:
         otherwise (an edit, or a better reading by a newer version). Answers the new rows, and, for a live copy of a
         message a history read stored first, that row once (its first live delivery, claimed here: from_history
         turns 0), so a command or an @me read in by a catch-up before its push still reaches /agent. An answered row
-        also has the message's placement and same_as when the backend read them (never stored: /agent keeps them with
-        its run)."""
+        also has the message's placement and same_as when the backend read them, and, with a placement, the thread and
+        quote of that same live reading (none of it stored: /agent keeps what it needs with its run)."""
         now = now or time.time()
 
         def run(db):

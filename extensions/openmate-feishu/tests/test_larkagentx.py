@@ -338,7 +338,10 @@ class MappingTest(Base):
         quote = self.m(root_id="90", parent_id="95", anchor="104", scope="topic", msg_id="104", content_data=t)
         self.assertEqual(quote.placement, "chat", "a quote in the main stream")
         self.assertEqual(self.m(content_data=t).placement, "chat", "a plain group message")
-        self.assertEqual(self.m(chat_type=1, root_id="90", anchor="90", content_data=t).placement, "", "a direct chat")
+        self.assertEqual(self.m(chat_id="504", chat_type=1, root_id="90", anchor="90", content_data=t).placement, "",
+                         "a direct chat")
+        self.b._peers["501"] = "7003"  # known as a direct chat, though the push did not say so
+        self.assertEqual(self.m(chat_id="501", msg_id="109", content_data=t).placement, "")
         self.assertEqual(self.m(scope="topic", anchor="101", content_data=t).placement, "", "a thread-first group's root")
         marked = dict(alone, thread_type=2)  # its marks say a thread reply, it was not read as one: the old way
         self.assertEqual(self.m(msg_id="105", _placement=marked, content_data=t).placement, "")

@@ -1357,7 +1357,7 @@ class LarkXBackend(Backend):
         message its marks call a thread reply though it was not read as one. How it also went is remembered for a
         reply to copy (send). The account's own say what they carried in the log (ids and the marks, never
         content)."""
-        if _int(d.get("chat_type")) == CHAT_P2P or topic_root:
+        if _int(d.get("chat_type")) == CHAT_P2P or topic_root or self._known_dm(chat_id):
             return ""
         marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
         mark = synced_mark(marks)
@@ -1378,6 +1378,11 @@ class LarkXBackend(Backend):
                      marks.get("sync_type", 0), marks.get("sync_related") or "-", marks.get("sync_root") or "-",
                      placement or "unknown")
         return placement
+
+    def _known_dm(self, chat_id: str) -> bool:
+        with self._lock:
+            hit = self._chats.get(chat_id)
+            return chat_id in self._peers or (hit is not None and hit[1].kind == "dm")
 
     def _topic_group(self, client, chat_id: str, ask: bool) -> bool:
         """Whether the chat is a thread-first group: from the chats read (no request), or, with ask, LarkAgentX's

@@ -359,8 +359,8 @@ class AgentRunner:
 
     def on_message(self, row: dict) -> None:
         """A newly stored live message."""
-        if row.get("from_history") or views.is_system(row):
-            return
+        if row.get("from_history") or views.is_system(row) or row.get("same_as"):
+            return  # a copy (Feishu: a thread reply's copy in the main stream): its original is the one taken
         if not row.get("mine"):
             self._maybe_auto(row)
             return
@@ -378,16 +378,14 @@ class AgentRunner:
         body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
         if not self.enabled:
             return
-        # a copy of a message (Feishu: a thread reply's copy in the main stream) is the same command: taken once
-        once = row.get("same_as") or row["id"]
         if body.lower() in STOP_WORDS:
-            if self.store.seen_add("stop:%s:%s" % (row["chat_id"], once)):
+            if self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"])):
                 threading.Thread(target=self._on_stop, args=(row,), name="openmate-agent-stop", daemon=True).start()
             return
         req = match_prefix(body, self.prefix)
         if req is None:
             return
-        if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], once)):
+        if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
             return
         run = self._new_run(row, req, now)
         run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)

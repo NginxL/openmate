@@ -47,8 +47,8 @@ class Message:
     placement: where a group message shows, as the service says it when it is read: "thread" (only in the thread on
     root_id), "thread_chat" (in that thread and also in the chat's main stream), "chat" (in the main stream, quoting
     or not); "" when the backend cannot tell (a direct chat, a thread-first group). A /agent reply goes back there.
-    same_as: the message this one is a copy of (Feishu's copy in the main stream of a thread reply also sent there),
-    so a command in both is taken once. Neither is stored: only a live read hands them on (the core's rows of new
+    same_as: the message this one is a copy of (Feishu's copy in the main stream of a thread reply also sent there):
+    a copy is never a command or a question to answer, its original is. Neither is stored: only a live read hands them on (the core's rows of new
     messages carry them).
     """
 
