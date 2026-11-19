@@ -72,6 +72,7 @@ class FixtureWorld:
         self.recalls: List[Tuple[str, str]] = []  # (chat, message) taken back by recall
         self.recall_ok = True  # the service can take a message back (can_recall)
         self.recall_fail = False  # recall raises
+        self.search_fail = False  # search raises (the service away)
         self.kinds_calls: List[List[str]] = []
         self.chats: Dict[str, Chat] = {}
         self.history: Dict[str, List[Message]] = {}
@@ -312,6 +313,8 @@ class FixtureBackend(Backend):
 
     def search(self, query: str, limit: int = 20) -> List[Person]:
         w = self.world
+        if w.search_fail:
+            raise BackendError("连不上（搜索时）", "unreachable")
         q = (query or "").lower()
         out: List[Person] = []
         with w.lock:

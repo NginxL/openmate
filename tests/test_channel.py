@@ -143,7 +143,7 @@ class NoChatTest(unittest.TestCase):
         h2.world.add_chat(Chat("chat_example_twin", "group", SOLO_NAME, members=1))
         h2.world.push("chat_example_twin", "me", "同名的另一个群")
         wait_until(lambda: h2.app.store.get_chat("chat_example_twin"), what="the twin stored")
-        h2.app.channel._resolved = None  # checked again now
+        h2.app.channel._checked = None  # checked again now
         with self.assertRaises(HubSideError) as e:
             send(h2, ref="r2", text="你好", kind="push")
         self.assertEqual(e.exception.code, "cannot_send")
@@ -153,25 +153,25 @@ class NoChatTest(unittest.TestCase):
         world = h.world
         world.add_chat(Chat("chat_example_unread", "group", SOLO_NAME, members=30))  # never read here
         self.assertIsNone(h.app.store.get_chat("chat_example_unread"))
-        h.app.channel._resolved = None
+        h.app.channel._checked = None
         with self.assertRaises(HubSideError) as e:
             send(h, ref="r1", text="你好", kind="push")
         self.assertEqual(e.exception.code, "cannot_send")
         world.people["user_example_same"] = SOLO_NAME  # a person of that name: their chat would be that name too
         world.chats.pop("chat_example_unread")
-        h.app.channel._resolved = None
+        h.app.channel._checked = None
         with self.assertRaises(HubSideError) as e:
             send(h, ref="r2", text="你好", kind="push")
         self.assertEqual(e.exception.code, "cannot_send")
         world.people.pop("user_example_same")
-        h.app.channel._resolved = None
+        h.app.channel._checked = None
         self.assertIn("message_id", send(h, ref="r3", text="你好", kind="push"))
 
     def test_a_chat_left_is_no_chat(self):
         h = channel(self, channel_chat=SOLO)
         h.app.store.chat_gone(SOLO)
         wait_until(lambda: h.app.store.is_gone(SOLO), what="gone")
-        h.app.channel._resolved = None
+        h.app.channel._checked = None
         with self.assertRaises(HubSideError) as e:
             send(h, ref="r1", text="你好", kind="push")
         self.assertEqual(e.exception.code, "cannot_send")
@@ -206,15 +206,40 @@ class ReceiveTest(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(h.hub.received, [])
 
-    def test_only_the_users_own_lines_that_are_for_persona(self):
+    def test_every_line_of_the_users_own_goes_to_persona(self):
         h = channel(self)
         h.world.push(SOLO, "user_example_a", "/agent 别人发的")
-        say(h, "随手记一句，不是给 Persona 的")
         say(h, "/agent")  # nothing to hand over
         say(h, "/agent 这是一条代答\n\n> " + HEADER)  # an AI's own line
+        m = say(h, "明天提醒我交周报")  # no prefix needed: the chat is the user's conversation with Persona
+        self.assertEqual(received(h)["message"], {"id": m.id, "text": "明天提醒我交周报"})
+        time.sleep(0.3)
+        self.assertEqual(len(h.hub.received), 1)
+        self.assertEqual(h.http.starts(), [])
+
+    def test_a_line_waits_while_the_chat_cannot_be_checked(self):
+        world = FixtureWorld()
+        world.search_fail = True  # the service away: the name cannot be checked
+        h = channel(self, world=world)
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="r1", text="你好", kind="push")
+        self.assertNotEqual(e.exception.code, "cannot_send", "the hub tries again")
+        m = say(h, "/agent 你好")
         time.sleep(0.3)
         self.assertEqual(h.hub.received, [])
-        self.assertEqual(h.http.starts(), [])
+        self.assertEqual(h.http.starts(), [], "never the /agent way meanwhile")
+        world.search_fail = False
+        h.app.channel._checked = None
+        h.app.channel._queued.set()
+        self.assertEqual(received(h)["message"]["id"], m.id)
+
+    def test_a_chat_renamed_is_no_chat_at_once(self):
+        h = channel(self)
+        send(h, ref="r1", text="你好", kind="push")
+        h.app.store._tx(lambda db: db.execute("UPDATE chats SET name = '改过的名字' WHERE id = ?", (SOLO,)))
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="r2", text="你好", kind="push")
+        self.assertEqual(e.exception.code, "cannot_send")
 
     def test_the_channel_works_with_agent_off(self):
         h = channel(self, agent=False)
@@ -241,7 +266,7 @@ class ReceiveTest(unittest.TestCase):
 
     def test_a_follow_up_in_a_thread_a_request_was_asked_in(self):
         h = channel(self)
-        root = say(h, "这周的事")
+        root = h.world.push(SOLO, "user_example_a", "这周的事")
         say(h, "/agent 总结一下这个话题", root_id=root.id, parent_id=root.id, placement="thread")
         received(h)
         follow = say(h, "再列一下负责人", root_id=root.id, parent_id=root.id, placement="thread")
@@ -249,7 +274,7 @@ class ReceiveTest(unittest.TestCase):
 
     def test_a_stop_quoting_a_channel_answer_is_the_channels_even_in_an_old_requests_thread(self):
         h = channel(self)
-        root = say(h, "这周的事")
+        root = h.world.push(SOLO, "user_example_a", "这周的事")
         old = h.app.agent._new_run({"chat_id": SOLO, "id": root.id}, "以前的请求", time.time())
         old["state"] = "running"
         h.app.store.run_put(old)  # an /agent request asked in this thread before the channel
@@ -317,7 +342,7 @@ class SendTest(unittest.TestCase):
 
     def test_a_request_in_a_thread_is_answered_in_the_thread(self):
         h = channel(self)
-        root = say(h, "这周的事")
+        root = h.world.push(SOLO, "user_example_a", "这周的事")
         m = say(h, "/agent 总结一下这个话题", root_id=root.id, parent_id=root.id, placement="thread")
         received(h)
         send(h, ref="run2:0", text="总结如下。", kind="answer", reply_to=m.id)
@@ -405,32 +430,33 @@ class AskTest(unittest.TestCase):
         self.assertEqual(h.world.recalls, [])
         self.assertTrue(any(s["id"] == mid for s in h.sent()))
         line = say(h, "这句不是答案了")
-        time.sleep(0.3)
-        self.assertEqual(len(h.hub.received), 1, "nothing waits any more: an ordinary line")
-        self.assertIsNone(h.app.store.channel_msg(SOLO, line.id))
+        self.assertEqual(received(h, 2)["message"]["id"], line.id, "Persona's to read as it will")
 
-    def test_a_line_after_the_question_ended_elsewhere_is_not_an_answer(self):
-        h = channel(self, timing=fast(channel_poll=30.0, channel_retry=(0.05,), channel_unseen=0.3))
-        self.ask(h)  # seen at once (a question sent wakes the follower); the next round is far away
-        answered_elsewhere(h, "ix_example_1")
-        line = say(h, "晚饭吃什么")
-        self.assertEqual(line_state(h, line.id), "dropped")
-        self.assertEqual(h.hub.received, [])
+    def test_a_line_said_before_a_new_question_is_not_its_answer(self):
+        h = channel(self, timing=fast(channel_poll=0.05, channel_retry=(0.5,), channel_unseen=0.3))
+        self.ask(h)
+        tries = [1]
 
-    def test_a_question_only_the_app_can_answer_takes_no_line(self):
-        h = channel(self, timing=fast(channel_poll=30.0, channel_retry=(0.05,), channel_unseen=0.3))
-        self.ask(h, item=waiting("ix_example_1", fields=[{"name": "password"}]))
-        line = say(h, "随便说一句")
+        def flaky(p):
+            if tries[0]:
+                tries[0] -= 1
+                raise HubSideError("", "the assistant is away")
+        h.hub.receive_answer = flaky
+        line = say(h, "允许")  # said for the first question
+        wait_until(lambda: h.hub.receive_calls >= 1, what="tried once")
+        h.http.interactions.append(waiting("ix_example_2"))
+        send(h, ref="ask:ix_example_2", text="Agent 想删除 build 目录。回复「允许」或「拒绝」。", kind="ask")
         self.assertEqual(line_state(h, line.id), "dropped")
-        self.assertEqual(h.hub.received, [])
+        self.assertEqual(h.hub.received, [], "never read as the second question's answer")
+        note = wait_until(lambda: [x for x in h.sent() if "新问题" in x["text"]], what="the note")[0]
+        self.assertEqual(note["reply_to"], line.id)
 
     def test_a_refused_answer_answers_nothing(self):
         h = channel(self)
         self.ask(h)
         h.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("invalid_params", "refused"))
         line = say(h, "允许")
-        self.assertEqual(line_state(h, line.id), "failed")
-        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"], 0)
+        self.assertEqual(line_state(h, line.id), "failed")  # it answered nothing: taken back all the same
         h.hub.receive_answer = None
         answered_elsewhere(h, "ix_example_1")
         self.assertEqual(ended(h, "ix_example_1"), "recalled")
@@ -440,10 +466,11 @@ class AskTest(unittest.TestCase):
         self.ask(h)
         say(h, "/agent /status")
         received(h)
-        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"], 0)
-        say(h, "/agent /new 允许")
+        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"], "")
+        line = say(h, "/agent /new 允许")
         self.assertEqual(received(h, 2)["message"]["text"], "/new 允许")
-        wait_until(lambda: h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"] == 1, what="marked")
+        self.assertEqual(line_state(h, line.id), "handed")
+        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"], line.id)
         answered_elsewhere(h, "ix_example_1")
         self.assertEqual(ended(h, "ix_example_1"), "answered_here")
         self.assertEqual(h.world.recalls, [])
@@ -479,7 +506,7 @@ class AskTest(unittest.TestCase):
         h = channel(self)
         self.ask(h)
         h.app.channel.setting = "另一个群"  # the setting changed (the extension starts again with it)
-        h.app.channel._resolved = None
+        h.app.channel._checked = None
         answered_elsewhere(h, "ix_example_1")
         self.assertEqual(ended(h, "ix_example_1"), "dropped")
         self.assertEqual((h.world.recalls, h.world.edits), ([], []))
@@ -509,9 +536,58 @@ class AskTest(unittest.TestCase):
         backend = h.app.backend
         real = backend.send
         backend.send = lambda *a, **k: (real(*a, **k), "")[1]  # WeChat may not say the new message's id
-        self.ask(h)
+        self.assertEqual(self.ask(h), "")
         a = say(h, "允许")
         self.assertEqual(received(h)["message"]["id"], a.id)
+        self.assertEqual(line_state(h, a.id), "handed")
+        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"], a.id)
+        answered_elsewhere(h, "ix_example_1")
+        self.assertEqual(ended(h, "ix_example_1"), "answered_here")
+
+    def test_the_history_is_read_page_after_page(self):
+        h = channel(self)
+        self.ask(h)
+        h.http.interactions = []
+        h.http.history = [{"interaction": waiting("ix_example_1"), "status": "resolved"}] + [
+            {"interaction": waiting("ix_newer_%d" % i), "status": "resolved"} for i in range(450)]  # newer ones first
+        self.assertEqual(ended(h, "ix_example_1"), "recalled")
+
+    def test_two_calls_for_one_ref_at_once_send_it_once(self):
+        import threading
+        h = channel(self)
+        h.world.send_delay = 0.5
+        out = []
+        ts = [threading.Thread(target=lambda: out.append(send(h, ref="slow1", text="慢慢发", kind="push")))
+              for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(10)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0], out[1])
+        self.assertEqual(len([x for x in h.sent() if "慢慢发" in x["text"]]), 1)
+
+    def test_a_ref_first_tried_under_another_account_is_not_sent(self):
+        h = channel(self)
+        h.world.send_fail = "rejected"
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="push9", text="换号前的通知", kind="push")
+        self.assertNotEqual(e.exception.code, "cannot_send")  # surely not sent: the hub tries again
+        with h.app.lock:
+            h.app._account_epoch += 1  # another account signed in meanwhile
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="push9", text="换号前的通知", kind="push")
+        self.assertEqual(e.exception.code, "cannot_send")
+        self.assertEqual([x for x in h.sent() if "换号前" in x["text"]], [])
+
+    def test_a_replay_writes_nothing_down_for_another_account(self):
+        h = channel(self)
+        mid = self.ask(h)
+        h.app.store._tx(lambda db: db.execute("DELETE FROM channel_asks"))
+        h.app._owner = "user_example_other"  # the store is another account's now
+        again = send(h, ref="ask:ix_example_1", text="Agent 想运行 make test。回复「允许」或「拒绝」。", kind="ask")
+        self.assertEqual(again["message_id"], mid)  # the same answer
+        self.assertIsNone(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1"))
 
     def test_wechat_answers_and_asks_but_takes_nothing_back(self):
         h = channel(self, platform=openmate_wechat.platform(), agent_reply_header=" ")

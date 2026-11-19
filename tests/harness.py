@@ -430,9 +430,17 @@ class FakeHubHTTP:
                                                    if s.get("stopped") else {}))
                                            for sid, s in self.sessions.items() if s.get("reporter")]}
             if method == "GET" and p == "/api/v1/interactions/history":
-                return 200, {"interactions": [dict(r) for r in self.history
-                                              if r["interaction"].get("machine_id") == query.get("machine_id")
-                                              and r["interaction"].get("session_id") == query.get("session_id")]}
+                # newest first, paged by limit with a cursor (the hub's next_before / next_before_id: here a position)
+                recs = [dict(r) for r in reversed(self.history)
+                        if r["interaction"].get("machine_id") == query.get("machine_id")
+                        and r["interaction"].get("session_id") == query.get("session_id")]
+                start = int(query.get("before_id") or 0) if query.get("before") else 0
+                limit = int(query.get("limit") or 500)
+                page = recs[start:start + limit]
+                out = {"interactions": page}
+                if start + limit < len(recs):
+                    out.update(next_before="2026-11-19T00:00:00Z", next_before_id=str(start + limit))
+                return 200, out
             if method == "GET" and p == "/api/v1/interactions":
                 if self.interactions_status:
                     return self.interactions_status, {"error": "refused"}

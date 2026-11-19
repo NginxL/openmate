@@ -236,14 +236,19 @@ class HubAPI:
             raise HubError(0, "Persona hub 的待答列表看不懂", NETWORK)
         return [i for i in items if isinstance(i, dict) and i.get("id")]
 
-    def interaction_history(self, machine_id: str, session_id: str, limit: int = 200) -> List[dict]:
-        """How a session's questions ended, the newest first: [{interaction: {id, …}, status}, …]."""
-        doc = self.request("GET", "/api/v1/interactions/history",
-                           query={"machine_id": machine_id, "session_id": session_id, "limit": limit}, timeout=15)
+    def interaction_history(self, machine_id: str, session_id: str, since: str, before: str = "", before_id: str = "",
+                            limit: int = 200) -> tuple:
+        """How a session's questions raised since then ended, the newest first, one page: ([{interaction: {id, …},
+        status}, …], the next older page's (before, before_id), or ("", "") when this was the last)."""
+        q = {"machine_id": machine_id, "session_id": session_id, "since": since, "limit": limit}
+        if before:
+            q.update(before=before, before_id=before_id)
+        doc = self.request("GET", "/api/v1/interactions/history", query=q, timeout=15)
         items = doc.get("interactions") if isinstance(doc, dict) else None
         if not isinstance(items, list):
             raise HubError(0, "Persona hub 的问题记录看不懂", NETWORK)
-        return [i for i in items if isinstance(i, dict) and isinstance(i.get("interaction"), dict)]
+        recs = [i for i in items if isinstance(i, dict) and isinstance(i.get("interaction"), dict)]
+        return recs, (str(doc.get("next_before") or ""), str(doc.get("next_before_id") or ""))
 
     def kb_chat_context(self, kb_chat_id: str) -> Optional[dict]:
         try:
