@@ -235,6 +235,20 @@ class ForwardTest(unittest.TestCase):
         self.assertFalse(h.http.sessions["agent-1"]["items"])
         self.assertNotIn("forward", run_of(h, msg))
 
+    def test_a_stop_in_persona_before_a_retry_stops_the_follow_up(self):
+        h, first, run1, sid = dispatched(self)
+
+        def stopped_meanwhile():  # nothing sent (the manager is offline); meanwhile it is stopped in the app
+            h.http.sessions[sid]["stopped"] = True
+            return 503, {"error": "offline", "code": "manager_offline"}
+
+        h.http.send_hook["agent-1"] = stopped_meanwhile
+        msg = follow_up(h, first, "/agent 顺便把 README 也改一下")
+        wait_until(lambda: run_of(h, msg)["state"] == "stopped", what="stopped with its conversation")
+        time.sleep(0.3)
+        self.assertFalse(h.http.messages_to("mac-example", sid), "the stopped conversation is not woken")
+        self.assertFalse(h.http.sessions["agent-1"]["items"])
+
     def test_a_result_before_the_send_answered_goes_under_the_follow_up(self):
         h, first, run1, sid = dispatched(self)
         out = {}
