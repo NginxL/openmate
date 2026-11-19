@@ -115,6 +115,11 @@ class BlockedTest(unittest.TestCase):
         store.add_messages([line("msg_plain_later", "普通", 250)], from_history=True)
         store.add_messages([line("msg_plain_later", DLP_BLOCKED_TEXT, 250, blocked=True)], from_history=True)
         self.assertTrue(store.message(CHAT, "msg_plain_later")["blocked"], "a reading that is blocked marks it")
+        store.add_messages([line("msg_plain_bare", "普通", 240)], from_history=True)
+        store.add_messages([line("msg_plain_bare", "", 240, blocked=True)], from_history=True)
+        self.assertTrue(store.message(CHAT, "msg_plain_bare")["blocked"], "even one with no text")
+        for rows in (archived(h), imported(h)):
+            self.assertFalse({"msg_plain_later", "msg_plain_bare"} & {m["id"] for m in rows})
 
     def test_a_blocked_line_at_a_position_does_not_move_the_history_bound(self):
         h = self.signed_in()
@@ -171,6 +176,21 @@ class MigrationTest(unittest.TestCase):
         self.addCleanup(st.close)
         self.assertTrue(st.message(CHAT, "msg_old_blocked")["blocked"])
         self.assertFalse(st.message(CHAT, "msg_new_says_the_note")["blocked"])
+
+    def test_a_rollback_and_upgrade_marks_again(self):
+        d = tempfile.mkdtemp(prefix="openmate-migrate-")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = self.old_store(d)
+        Store(path, legacy_blocked_texts=(DLP_BLOCKED_TEXT,)).close()
+        db = sqlite3.connect(path)  # an older version opens it again: user_version 1, and stores a blocked line
+        db.execute("PRAGMA user_version=1")
+        db.execute("INSERT INTO messages (chat_id, id, position, text, at) VALUES (?, 'msg_rolled_back', 5, ?, 5)",
+                   (CHAT, DLP_BLOCKED_TEXT))
+        db.commit()
+        db.close()
+        st = Store(path, legacy_blocked_texts=(DLP_BLOCKED_TEXT,))
+        self.addCleanup(st.close)
+        self.assertTrue(st.message(CHAT, "msg_rolled_back")["blocked"])
 
 
 if __name__ == "__main__":

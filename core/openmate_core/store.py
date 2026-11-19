@@ -181,18 +181,25 @@ class Store:
             self._db.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
 
     def _migrate(self, legacy_blocked_texts: List[str]) -> None:
-        """An older store's messages table gains the columns of this version, in one transaction."""
+        """An older store's messages table gains the columns of this version, in one transaction. A version before
+        this one sets user_version 1 again when it opens the store (a rollback): what it stored meanwhile carries no
+        blocked mark, so the old texts mark it at the next upgrade."""
         def columns(db) -> set:
             return {r[1] for r in db.execute("PRAGMA table_info(messages)").fetchall()}
 
-        cols = columns(self._db)
-        if not cols or "blocked" in cols:
-            return  # a new store (made with every column below), or one migrated already
+        def pending(db) -> bool:
+            cols = columns(db)  # none: a new store, made with every column below
+            return bool(cols) and ("blocked" not in cols or db.execute("PRAGMA user_version").fetchone()[0] < 2)
+
+        if not pending(self._db):
+            return
 
         def run(db):
-            if "blocked" in columns(db):
+            if not pending(db):
                 return  # another connection to the file migrated it meanwhile
-            db.execute("ALTER TABLE messages ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
+            if "blocked" not in columns(db):
+                db.execute("ALTER TABLE messages ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
+            db.execute("PRAGMA user_version=2")  # with the marks, in this transaction
             if legacy_blocked_texts:
                 # what told a blocked message then: its text was the backend's note (once: later rows say themselves)
                 db.execute("UPDATE messages SET blocked = 1 WHERE text IN (%s)" % ",".join("?" * len(legacy_blocked_texts)),
@@ -473,9 +480,11 @@ class Store:
                         db.execute("INSERT INTO messages (" + _INSERT_COLUMNS + ") VALUES (%s)"
                                    % ",".join("?" * len(tuple(blank))), tuple(blank))
                     kind = (m.type or "TEXT").upper()
-                    if m.text and m.blocked:
-                        db.execute("UPDATE messages SET text = ?, type = ?, blocked = 1 WHERE chat_id = ? AND id = ? "
-                                   "AND (text != ? OR blocked = 0)", (m.text, kind, m.chat_id, m.id, m.text))
+                    if m.blocked:  # marked whatever its text (a reading with none keeps the stored one, now blocked)
+                        db.execute("UPDATE messages SET text = CASE WHEN ? != '' THEN ? ELSE text END, "
+                                   "type = CASE WHEN ? != '' THEN ? ELSE type END, blocked = 1 "
+                                   "WHERE chat_id = ? AND id = ? AND (text != ? OR blocked = 0)",
+                                   (m.text or "", m.text or "", m.text or "", kind, m.chat_id, m.id, m.text or ""))
                     elif m.text:
                         # a blocked message stays so (a later reading that is not the note, a decode failure's
                         # placeholder, never brings it to the archive); only a recall's notice replaces its note
