@@ -340,6 +340,15 @@ class MappingTest(Base):
         self.assertEqual(self.m(content_data=t).placement, "chat", "a plain group message")
         self.assertEqual(self.m(chat_type=1, root_id="90", anchor="90", content_data=t).placement, "", "a direct chat")
         self.assertEqual(self.m(scope="topic", anchor="101", content_data=t).placement, "", "a thread-first group's root")
+        marked = dict(alone, thread_type=2)  # its marks say a thread reply, it was not read as one: the old way
+        self.assertEqual(self.m(msg_id="105", _placement=marked, content_data=t).placement, "")
+        S.thread_chats.add("503")  # a thread-first group whose root was read as a plain message
+        self.assertEqual(self.m(chat_id="503", msg_id="106", from_id=ME, content_data=t).placement, "", "asked: mine")
+        self.assertEqual(self.m(chat_id="503", msg_id="107", content_data=t).placement, "chat", "others' never ask")
+        copy = {"thread_type": 0, "send_to_chat": False, "sync_type": 1, "sync_related": "101", "sync_root": "90"}
+        c = self.m(msg_id="108", _placement=copy, content_data=t)
+        self.assertEqual((c.same_as, c.placement), ("101", "chat"), "the main stream's copy of a thread reply")
+        self.assertEqual(self.m(_placement=sync, **thread).same_as, "", "the reply itself is no copy")
         for i in range(larkagentx.SYNCED_KEEP + 5):
             self.m(msg_id=str(1000 + i), _placement=sync, **thread)
         self.assertEqual(len(self.b._synced), larkagentx.SYNCED_KEEP, "only the newest are remembered")
@@ -1262,6 +1271,12 @@ class ReadTest(Base):
         for bad in (("500", "", "x"), ("500", "abc", "x"), ("500", "101", "  ")):
             with self.assertRaises(larkagentx.BackendError):
                 self.b.edit(*bad)
+        S.api_answers["messages.EditMessageRequest"] = {"status": 403}  # only a status: refused, never "edited"
+        with self.assertRaises(larkagentx.BackendError) as e:
+            self.b.edit("500", "101", "被拒了")
+        self.assertEqual(e.exception.kind, "unavailable")
+        S.api_answers["messages.EditMessageRequest"] = {"status": 200}
+        self.b.edit("500", "101", "可以")
         del S.api_answers["messages.EditMessageRequest"]
         with self.assertRaises(larkagentx.BackendError) as e:
             self.b.edit("500", "101", "改不了")

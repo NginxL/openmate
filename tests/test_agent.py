@@ -623,8 +623,8 @@ class PlacementTest(unittest.TestCase):
         root, under = self.thread(h)
         msg = ask(h, "/agent 这个是什么货", root_id=root.id, thread_id=root.id, parent_id=under.id, placement="thread")
         run, places = self.progress_answer_and_where(h, msg)
-        self.assertEqual(run["placement"], "thread")
         self.assertEqual(places, [(msg.id, root.id, False)] * 2)
+        self.assertEqual(run["placement"], "thread")
         self.assertIn("回复会以我的身份发到这个话题里，", started(h)["body"]["prompt"])
 
     def test_in_the_thread_and_the_chat_goes_back_to_both(self):
@@ -633,8 +633,8 @@ class PlacementTest(unittest.TestCase):
         msg = ask(h, "/agent 这个是什么货", root_id=root.id, thread_id=root.id, parent_id=under.id,
                   placement="thread_chat")
         run, places = self.progress_answer_and_where(h, msg)
-        self.assertEqual(run["placement"], "thread_chat")
         self.assertEqual(places, [(msg.id, root.id, True)] * 2, "into the thread, also to the chat, quoting the request")
+        self.assertEqual(run["placement"], "thread_chat")
         self.assertIn("回复会以我的身份发到这个话题里，同时也发到群里", started(h)["body"]["prompt"])
 
     def test_in_the_main_stream_quotes_it_there(self):
@@ -674,6 +674,43 @@ class PlacementTest(unittest.TestCase):
         stop = ask(h, "/stop", root_id=root.id, thread_id=root.id, parent_id=msg.id, placement="thread_chat")
         said = wait_until(lambda: next((x for x in h.sent() if "已停止" in x["text"]), None), what="the /stop answer")
         self.assertEqual(self.where(said), (stop.id, root.id, True))
+
+    def test_a_stop_quoting_the_progress_message_in_the_main_stream(self):
+        h = self.make(agent_reply_header=" ", agent_reply_suffix=SUFFIX, agent_ack_reaction="")
+        msg = ask(h, "/agent 慢慢做", placement="chat")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="第一步", progress=True)
+        progress = h.sent()[-1]
+        ask(h, "/stop", parent_id=progress["id"], placement="chat")  # no thread to find it by: the quote does
+        wait_until(lambda: h.app.store.run_get(run["id"])["state"] == "stopped", what="stopped")
+
+    def test_a_copy_of_the_request_is_taken_once(self):
+        h = self.make()
+        root, under = self.thread(h)
+        msg = ask(h, "/agent 只做一次", root_id=root.id, thread_id=root.id, parent_id=under.id, placement="thread_chat")
+        ask(h, "/agent 只做一次", placement="chat", same_as=msg.id)  # the main stream's copy of it
+        running(h, msg)
+        time.sleep(0.3)
+        self.assertEqual(len(h.http.starts()), 1)
+        h2 = self.make()
+        first = ask(h2, "/agent 副本先到", placement="chat", same_as="msg_example_source")
+        ask(h2, "/agent 副本先到", placement="thread_chat", id="msg_example_source")
+        self.assertEqual(running(h2, first)["placement"], "chat", "the copy came first: answered in the main stream")
+        time.sleep(0.3)
+        self.assertEqual(len(h2.http.starts()), 1)
+
+    def test_a_placement_goes_only_with_its_thread(self):
+        from openmate_core.backend import Message
+
+        h = self.make()
+        m = Message(id="msg_example_x", chat_id="chat_example_team", position=999, mine=True, text="x")
+        h.app.store.add_messages([m], from_history=True)  # an older reading: not in a thread
+        live = Message(id="msg_example_x", chat_id="chat_example_team", position=999, mine=True, text="x",
+                       root_id="msg_example_r", placement="thread_chat", same_as="msg_example_s")
+        (row,) = h.app.store.add_messages([live], from_history=False)
+        self.assertNotIn("placement", row, "read with another thread than stored: none (the old way)")
+        self.assertEqual(row["same_as"], "msg_example_s")
+        self.assertNotIn("placement", h.app.store.message("chat_example_team", "msg_example_x"), "never stored")
 
     def test_unknown_placement_keeps_the_old_way(self):
         h = self.make()

@@ -378,14 +378,16 @@ class AgentRunner:
         body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
         if not self.enabled:
             return
+        # a copy of a message (Feishu: a thread reply's copy in the main stream) is the same command: taken once
+        once = row.get("same_as") or row["id"]
         if body.lower() in STOP_WORDS:
-            if self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"])):
+            if self.store.seen_add("stop:%s:%s" % (row["chat_id"], once)):
                 threading.Thread(target=self._on_stop, args=(row,), name="openmate-agent-stop", daemon=True).start()
             return
         req = match_prefix(body, self.prefix)
         if req is None:
             return
-        if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
+        if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], once)):
             return
         run = self._new_run(row, req, now)
         run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)
@@ -1547,7 +1549,8 @@ class AgentRunner:
         parent = row.get("parent_id") or ""
         if parent:
             for r in self.store.runs_in_chat(chat_id):
-                if r["request_id"] == parent or parent in (r.get("reply_ids") or []) or parent == r.get("ack_id"):
+                if (r["request_id"] == parent or parent in (r.get("reply_ids") or []) or parent == r.get("ack_id")
+                        or parent == r.get("progress_id")):  # the progress message too (in the main stream: no thread)
                     return r
         root = row.get("root_id") or ""
         if root:

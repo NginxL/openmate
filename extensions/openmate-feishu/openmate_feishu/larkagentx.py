@@ -1334,7 +1334,9 @@ class LarkXBackend(Backend):
         topic_root = not root and d.get("scope") == "topic" and anchor == msg_id  # a thread-first group's root
         thread_id = anchor if in_thread else (msg_id if topic_root else "")
         sender = _id(d.get("from_id"))
-        placement = self._placement(d, msg_id, in_thread, topic_root, bool(me_id) and sender == me_id)
+        placement = self._placement(d, chat_id, msg_id, in_thread, topic_root, bool(me_id) and sender == me_id, client)
+        marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else {}
+        same_as = marks.get("sync_related", "") if marks.get("sync_type") == SYNC_TARGET else ""
         if sender and sender != me_id and _int(d.get("chat_type")) == CHAT_P2P:
             self._learn_peer(chat_id, sender)
         mentions = self._mentions(data)
@@ -1345,19 +1347,26 @@ class LarkXBackend(Backend):
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),
             text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
-            media=self._media_of(mt, data, chat_id, msg_id), placement=placement)
+            media=self._media_of(mt, data, chat_id, msg_id), placement=placement, same_as=same_as)
 
-    def _placement(self, d: dict, msg_id: str, in_thread: bool, topic_root: bool, mine: bool) -> str:
+    def _placement(self, d: dict, chat_id: str, msg_id: str, in_thread: bool, topic_root: bool, mine: bool,
+                   client) -> str:
         """Where a message shows (Message.placement): a group's reply in a thread is "thread", or "thread_chat" when
         its marks (pushed_threads: live pushes only) say it also went to the main stream; anything else in a group
-        is "chat"; a direct chat and a thread-first group's root, "" (replies there keep their own way). How it also
-        went is remembered for a reply to copy (send). The account's own say what they carried in the log (ids and
-        the marks, never content)."""
+        is "chat"; a direct chat and a thread-first group's root, "" (replies there keep their own way), and so is a
+        message its marks call a thread reply though it was not read as one. How it also went is remembered for a
+        reply to copy (send). The account's own say what they carried in the log (ids and the marks, never
+        content)."""
         if _int(d.get("chat_type")) == CHAT_P2P or topic_root:
             return ""
         marks = d.get("_placement") if isinstance(d.get("_placement"), dict) else None
         mark = synced_mark(marks)
-        placement = ("thread_chat" if mark else "thread") if in_thread else "chat"
+        if in_thread:
+            placement = "thread_chat" if mark else "thread"
+        elif (marks or {}).get("thread_type") == THREAD_REPLY or self._topic_group(client, chat_id, mine):
+            placement = ""  # not as it was read: replies keep the old way
+        else:
+            placement = "chat"
         if mark:
             with self._lock:
                 self._synced[msg_id] = mark
@@ -1366,8 +1375,23 @@ class LarkXBackend(Backend):
         if mine and marks is not None and (in_thread or mark or marks.get("thread_type")):
             log.info("own message %s: threadMessageType=%d sendToChat=%s syncToChatMessageType=%d related=%s "
                      "syncRoot=%s; read as %s", msg_id, marks.get("thread_type", 0), marks.get("send_to_chat", False),
-                     marks.get("sync_type", 0), marks.get("sync_related") or "-", marks.get("sync_root") or "-", placement)
+                     marks.get("sync_type", 0), marks.get("sync_related") or "-", marks.get("sync_root") or "-",
+                     placement or "unknown")
         return placement
+
+    def _topic_group(self, client, chat_id: str, ask: bool) -> bool:
+        """Whether the chat is a thread-first group: from the chats read (no request), or, with ask, LarkAgentX's
+        own check (it keeps the answer); False when it cannot tell."""
+        with self._lock:
+            hit = self._chats.get(chat_id)
+        if hit is not None:
+            return bool(hit[1].topic)
+        if not ask or client is None:
+            return False
+        try:
+            return bool(client.is_thread_chat(chat_id))
+        except Exception:
+            return False
 
     def _learn_peer(self, chat_id: str, user_id: str) -> None:
         """The other person of a direct chat, from their message in it (the chat's own record may have no name)."""
@@ -1819,9 +1843,12 @@ class LarkXBackend(Backend):
         except Exception as e:
             raise BackendError("没能组成这次编辑（%s）" % type(e).__name__, "rejected")
         try:
-            client.api("messages.EditMessageRequest", data)
+            resp = client.api("messages.EditMessageRequest", data)
         except Exception as e:
             raise BackendError("%s没有接受这次编辑（%s）" % (self.region.label, e.__class__.__name__), "unavailable")
+        status = resp.get("status") if isinstance(resp, dict) else None
+        if status is not None and _int(status) not in (0, 200):  # only a status came back: it was refused
+            raise BackendError("%s没有接受这次编辑（状态 %d）" % (self.region.label, _int(status)), "unavailable")
 
     def people_kinds(self, user_ids: List[str]) -> Dict[str, str]:
         ids = [i for i in (_id(u) for u in user_ids) if i]
