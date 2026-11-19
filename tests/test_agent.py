@@ -480,6 +480,22 @@ class StopTest(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(replies(h), [])
 
+    def test_a_second_stop_of_a_stopped_request_leaves_the_resumed_one_alone(self):
+        """Stopped, then asked again in the thread: a /stop quoting the old request again reaches nothing at the hub
+        (it was stopped already), so it stops nothing here either."""
+        h = agent(self)
+        first = ask(h, "/agent 第一个")
+        run1 = running(h, first)
+        sid = run1["session_id"]
+        ask(h, "/stop", root_id=first.id, parent_id=first.id)
+        wait_until(lambda: h.app.store.run_get(run1["id"])["state"] == "stopped", what="stopped")
+        second = ask(h, "/agent 接着来", root_id=first.id)
+        run2 = running(h, second)
+        ask(h, "/stop", root_id=first.id, parent_id=first.id)
+        wait_until(lambda: [s for s in h.sent() if "已经结束了" in s["text"]], what="the answer to the second stop")
+        self.assertEqual(h.app.store.run_get(run2["id"])["state"], "running")
+        self.assertEqual(len(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid)), 1)
+
     def test_only_my_stop_counts(self):
         h = self.h
         h.world.push("chat_example_team", "user_example_a", "/stop", root_id=self.m.id)
