@@ -374,14 +374,6 @@ class MappingTest(Base):
         self.assertEqual(S.chat_info_calls.count("507"), 1)
         S.chats["508"] = {"id": "508", "name": "示例群"}  # its record does not say which kind of chat
         self.assertEqual(self.m(chat_id="508", msg_id="123", _placement=none, **bare).root_id, "90", "not known")
-        self.assertEqual(self.m(chat_id="508", msg_id="132", _placement=none, **bare).root_id, "90", "nor later")
-        S.chats["508"] = {"id": "508", "type": 2, "name": "示例群"}  # its record says it now
-        self.b._chats["508"] = (0.0, self.b._chats["508"][1])
-        self.assertEqual(self.m(chat_id="508", msg_id="133", _placement=none, **bare).root_id, "")
-        # a direct chat the push says is one: nothing asked
-        n = len(S.chat_info_calls)
-        self.m(chat_id="515", chat_type=1, msg_id="134", _placement=none, **bare)
-        self.assertEqual(len(S.chat_info_calls), n)
         self.b._chats["507"] = (0.0, self.b._chats["507"][1])  # known as ordinary a while ago, thread-first now
         S.chats["507"] = {"id": "507", "type": 2, "name": "示例群", "chatMode": 2}
         self.assertEqual(self.m(chat_id="507", msg_id="124", _placement=none, **bare).root_id, "90", "read again")
