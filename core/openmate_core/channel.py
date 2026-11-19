@@ -78,6 +78,8 @@ class _Later(Exception):
 def may_answer(text: str) -> bool:
     """Whether Persona may read the line as the answer to a waiting question (not a command it takes whole)."""
     t = (text or "").strip()
+    if not t:
+        return False  # only a quote, or only a picture: nothing Persona could read as an answer
     if not t.startswith("/"):
         return True
     name, _, rest = t.partition(" ")
@@ -95,10 +97,14 @@ class ChannelBridge:
         self.item: Optional[dict] = next((c for c in items if isinstance(c, dict) and c.get("id") == self.id), None)
         self.setting = str(app.config.get("channel_chat") or "").strip()
         self._mu = threading.Lock()
-        self._submit = threading.Lock()  # a line's last check and its hand-over; a sign-out waits for them
+        # A line's last check and its hand-over, and a question's sending and writing down: one at a time, so a question
+        # is either before a line's check (and the line waits) or after its hand-over. A sign-out waits for them too.
+        self._submit = threading.RLock()
+        self._intake = threading.Lock()  # taking a line in (signed in?) and a sign-out's letting the lines go
+        self._history: Dict[tuple, dict] = {}  # a session's question history read so far (kept across rounds)
         self._epochs: Dict[Tuple[str, str], int] = {}  # a line taken → the account generation it was heard in
         self._refs: Dict[str, Tuple[float, threading.Lock]] = {}  # a ref being sent → its lock
-        self._outs: Dict[Tuple[str, str], float] = {}  # (chat, text) of a send whose id is not known yet
+        self._outs: Dict[Tuple[str, str], List[float]] = {}  # (chat, text) → when each send of it began, id not known yet
         self._wake = threading.Event()  # the question follower
         self._queued = threading.Event()  # the hand-over worker
         self._stop = threading.Event()
@@ -149,7 +155,7 @@ class ChannelBridge:
         """Signed out: the lines not handed over yet go nowhere (after one being handed over now)."""
         if not self.declared or self.app.store is None:
             return
-        with self._submit:
+        with self._intake, self._submit:
             n = self.app.store.channel_forget_pending()
         if n:
             log.info("signed out: %d line(s) not handed to Persona were let go", n)
@@ -188,16 +194,19 @@ class ChannelBridge:
         # between is a switch, and nothing is sent)
         epoch = app.account_epoch()
         owner = getattr(app, "_owner", "")
-        if app.account_epoch() != epoch:
-            raise RPCError("正在换%s账号，这条不再发出" % app.platform.name, "cannot_send")
+        moved = app.account_epoch() != epoch
         key = "channel:%s:%s" % (self.id, ref)
-        with self._ref_lock(key):  # one call per ref at a time: a second one waits for the first's answer
+        with self._ref_lock(key), (self._submit if kind == "ask" else _NO_LOCK):
+            # one call per ref at a time (a second one waits for the first's answer); a question is sent and written
+            # down while no line is being checked and handed over
             done = app.store.send_get(key)
             if done is not None and done["state"] == "done":
                 self._track(epoch, done["result"], ref, kind)  # what a cut-off first time did not write down
                 return _answer(done["result"])  # the same ref: the same message, sent once
             if done is not None:  # an outcome nobody knows (it may be in the chat): the journal says so, never again
                 return app.send_once(key, "channel", _never)
+            if moved:
+                raise RPCError("正在换%s账号，这条不再发出" % app.platform.name, "cannot_send")
             if app.store.channel_ref_bind(key, owner) != owner:
                 raise RPCError("换了%s账号，这条是之前那个账号的，不再发出" % app.platform.name, "cannot_send")
             chat = self.chat()
@@ -229,14 +238,14 @@ class ChannelBridge:
         def go() -> dict:
             if not app.owns(epoch, owner=owner):  # another account signed in meanwhile: not said in its name
                 raise RPCError("换了%s账号，这条不再以你的身份发出" % app.platform.name, "cannot_send")
-            if not app.agent._remember_post(body):  # its echo is never a request
-                raise RPCError("没有发出")
+            # its echo is known by its id (send_as_user tells outgoing), only in this chat: not /agent's text cache,
+            # which would take the user's own same words for an echo for ten minutes
             mid = app.send_as_user(chat, body, where["reply_to"] or None, where["root"] or None,
                                    to_chat=where["to_chat"])
             app.record_sent(chat, body, str(mid or ""), reply_to=where["reply_to"], root=where["root"],
                             setting="channel",
                             summary=summary + views.where(app.platform.name, app.store.get_chat(chat), chat))
-            return {"text": "已发送", "message_ref": mid, "chat": chat, "owner": owner}
+            return {"text": "已发送", "message_ref": mid, "chat": chat, "owner": owner, "at": time.time()}
 
         return app.send_once(key, "channel", go)
 
@@ -254,8 +263,8 @@ class ChannelBridge:
                 return  # another account's store by now
             if mid:
                 app.store.channel_msg_put(chat, mid, "out", owner=owner, ref=ref)
-            if kind == "ask" and m:
-                new = app.store.channel_ask_put(m.group(1), ref, chat, mid)
+            if kind == "ask" and m:  # when it was sent, even when written down only now
+                new = app.store.channel_ask_put(m.group(1), ref, chat, mid, now=float(res.get("at") or 0) or None)
         if new:
             self._wake.set()  # read the waiting list now: one answered at once elsewhere is still seen waiting
 
@@ -266,16 +275,22 @@ class ChannelBridge:
         its echo in the channel chat is never a line of the user's. Called before the send with its text; after it
         with its id (known by that from then on; without one the text stands for it a while), or failed (surely not
         sent: the text stands for nothing)."""
-        if not self.declared:
-            return
-        key = (chat_id, (text or "").strip())
-        with self._mu:
-            if message_id is None and not failed:
-                self._outs[key] = time.monotonic()
-            elif failed or message_id:
-                self._outs.pop(key, None)
-        if message_id and self.app.store is not None:
+        if not self.declared or chat_id != self.chat():
+            return  # only the channel chat's lines are read as the user's
+        if message_id and self.app.store is not None:  # known by its id first, then the text stands for it no more
             self.app.store.channel_msg_put(chat_id, message_id, "echo", owner=getattr(self.app, "_owner", ""))
+        key = (chat_id, (text or "").strip())
+        now = time.monotonic()
+        with self._mu:
+            for k in [k for k, v in self._outs.items() if all(now - at > ECHO_WINDOW for at in v)]:
+                del self._outs[k]
+            sends = self._outs.setdefault(key, [])
+            if message_id is None and not failed:
+                sends.append(now)  # one more send of it under way
+            elif (failed or message_id) and sends:
+                sends.pop(0)  # that send is done: known by its id, or surely not sent
+            if not sends:
+                self._outs.pop(key, None)
 
     def _ours(self, chat: str, row: dict) -> bool:
         m = self.app.store.channel_msg(chat, row["id"])
@@ -283,8 +298,7 @@ class ChannelBridge:
             return True
         now = time.monotonic()
         with self._mu:
-            at = self._outs.get((chat, (row.get("text") or "").strip()))
-            return at is not None and now - at < ECHO_WINDOW
+            return any(now - at < ECHO_WINDOW for at in self._outs.get((chat, (row.get("text") or "").strip()), ()))
 
     # ---------------------------------------------------------------- the user's lines
 
@@ -304,19 +318,26 @@ class ChannelBridge:
         if req is None:
             req = match_prefix(body or "", agent.prefix)  # after the @s it starts with: "@x /agent …"
         text = said if req is None else req
+        unsupported = ""
+        if row.get("media") and (row.get("type") or "TEXT").upper() not in ("TEXT", "POST"):
+            # a picture, a file, a voice message: the channel takes none yet (images_in, files_in: false), and the
+            # words standing for it ("[图片]") are not the user's
+            text, unsupported = "", "%s（这个渠道还转交不了，请在 App 里发）" % _KIND_WORDS.get(
+                (row.get("type") or "").upper(), "附件")
         if text.lower() in STOP_WORDS:
             if self._stops_old(chat, row, epoch):
                 return True
             text = "/stop"
         quote = self._quote(chat, row)
-        if not text and not quote:
+        if not text and not quote and not unsupported:
             return True  # a bare /agent: nothing to hand over (and no /agent of its own here)
-        with app.owned(epoch) as ok:
-            if not ok:
-                return True
+        came = float(row.get("received") or 0) or time.time()  # when it came here (this computer's clock)
+        with self._intake, app.owned(epoch) as ok:
+            if not ok or not app.signed_in:
+                return True  # signed out meanwhile: nothing said before goes after it
             if not store.channel_msg_put(chat, row["id"], "in", owner=getattr(app, "_owner", ""),
                                          placement=row.get("placement") or "", root_id=row.get("root_id") or "",
-                                         text=text, quote=quote, state="pending"):
+                                         text=text, quote=quote, unsupported=unsupported, state="pending", now=came):
                 return True  # taken already (delivered again)
             if epoch is not None:
                 with self._mu:
@@ -413,6 +434,8 @@ class ChannelBridge:
             msg["text"] = r["text"]
         if r["quote"]:
             msg["quote"] = r["quote"]
+        if r["unsupported"]:
+            msg["unsupported"] = [r["unsupported"]]
         waits = list(app.timing.channel_retry)
         while True:
             with self._submit:  # its last check and the hand-over: a sign-out comes before or after both
@@ -427,6 +450,7 @@ class ChannelBridge:
                         store.channel_mark_here(chat, mid, float(r["at"]))
                     try:
                         app.hub_call("channel.receive", {"contribution": self.id, "message": msg})
+                        store.channel_in_set(chat, mid, "handed")  # before a sign-out can let it go
                         why = "handed"
                     except RPCError as e:
                         final = e.code in FINAL_CODES
@@ -438,7 +462,8 @@ class ChannelBridge:
             if self._stop.wait(waits.pop(0)) or app.closing.is_set():
                 return  # left pending: handed over after the restart
         if why == "handed":
-            self._settle(r, "handed")
+            with self._mu:
+                self._epochs.pop((chat, mid), None)
         elif why == "new_ask":
             self._settle(r, "dropped", NEW_ASK_NOTE, epoch)
         elif why == "stale":
@@ -500,7 +525,12 @@ class ChannelBridge:
         if waiting is None:
             return
         chat = self.chat()
-        history: Dict[tuple, dict] = {}
+        history = self._history
+        wanted = {(b["machine_id"], b["session_id"]) for b in before}
+        for k in [k for k in history if (k[0], k[1]) not in wanted]:
+            del history[k]  # no question of that session followed any more
+        for h in history.values():
+            h["failed"] = False  # read again (from where it stopped) this round
         for b in before:
             a = store.channel_ask(b["ix"], b["ref"])  # as it is now: one answered here meanwhile is marked by now
             if a is None or a["state"] != "open":
@@ -551,7 +581,7 @@ class ChannelBridge:
             return False
         since = a["raised"] or rfc3339(float(a["at"]) - 86400)
         h = history.setdefault((mid, sid, since), {"statuses": {}, "cursor": ("", ""), "done": False, "failed": False})
-        pages = 0
+        pages = 0  # this round's: the next round goes on from where this one stopped
         while a["ix"] not in h["statuses"] and not h["done"] and not h["failed"] and pages < HISTORY_PAGES:
             pages += 1
             try:
@@ -560,11 +590,15 @@ class ChannelBridge:
                 log.info("the question history could not be read (%s)", e.code or e.status)
                 h["failed"] = True
                 break
-            for r in recs:
-                h["statuses"].setdefault(str(r["interaction"].get("id")), str(r.get("status") or ""))
+            for r in recs:  # only how one ended for good is kept: one still waiting is read again later
+                if str(r.get("status") or "") in FINAL:
+                    h["statuses"].setdefault(str(r["interaction"].get("id")), str(r["status"]))
             h["cursor"] = cursor
             h["done"] = not cursor[0]
-        return h["statuses"].get(a["ix"]) in FINAL
+        status = h["statuses"].get(a["ix"])
+        if status is None and h["done"]:
+            h.update(cursor=("", ""), done=False)  # read to the end without it: from the newest again next round
+        return status in FINAL
 
     def _take_back(self, chat: str, mid: str, epoch: int) -> str:
         backend = self.app.backend
@@ -582,6 +616,21 @@ class ChannelBridge:
         except BackendError as e:
             log.info("a channel question could not be marked ended either (%s)", e.kind)
             return "failed"
+
+
+_KIND_WORDS = {"IMAGE": "图片", "FILE": "文件", "AUDIO": "语音", "VOICE": "语音", "VIDEO": "视频", "MEDIA": "视频",
+               "STICKER": "表情"}
+
+
+class _NoLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+_NO_LOCK = _NoLock()
 
 
 def _never() -> dict:

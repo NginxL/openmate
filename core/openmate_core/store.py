@@ -113,6 +113,7 @@ _SCHEMA = [
         ref TEXT NOT NULL DEFAULT '',
         text TEXT NOT NULL DEFAULT '',
         quote TEXT NOT NULL DEFAULT '',
+        unsupported TEXT NOT NULL DEFAULT '',
         state TEXT NOT NULL DEFAULT '',
         at REAL NOT NULL,
         UNIQUE (chat_id, id))""",
@@ -847,17 +848,17 @@ class Store:
     # ---- Persona's 渠道 ----
 
     def channel_msg_put(self, chat_id: str, msg_id: str, direction: str, owner: str = "", placement: str = "",
-                        root_id: str = "", ref: str = "", text: str = "", quote: str = "", state: str = "",
-                        now: Optional[float] = None) -> bool:
+                        root_id: str = "", ref: str = "", text: str = "", quote: str = "", unsupported: str = "",
+                        state: str = "", now: Optional[float] = None) -> bool:
         """Keep one of the channel's messages (once: False when it was kept already, so it is also the claim). What the
         channel sent ("out") is the channel's even when the send was kept as an echo first."""
         tail = " ON CONFLICT (chat_id, id) DO UPDATE SET dir = 'out', ref = excluded.ref WHERE dir = 'echo'" \
             if direction == "out" else ""
         return self._tx(lambda db: db.execute(
-            "INSERT INTO channel_msgs (chat_id, id, dir, owner, placement, root_id, ref, text, quote, state, at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" + (tail or " ON CONFLICT (chat_id, id) DO NOTHING"),
+            "INSERT INTO channel_msgs (chat_id, id, dir, owner, placement, root_id, ref, text, quote, unsupported, state, "
+            "at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" + (tail or " ON CONFLICT (chat_id, id) DO NOTHING"),
             (chat_id, msg_id, direction, owner or "", placement or "", root_id or "", ref or "", text or "",
-             quote or "", state or "", now or time.time())).rowcount == 1)
+             quote or "", unsupported or "", state or "", now or time.time())).rowcount == 1)
 
     def channel_msg(self, chat_id: str, msg_id: str) -> Optional[dict]:
         r = self._one("SELECT * FROM channel_msgs WHERE chat_id = ? AND id = ?", (chat_id, msg_id))

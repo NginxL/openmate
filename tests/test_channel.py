@@ -318,6 +318,20 @@ class ReceiveTest(unittest.TestCase):
         self.assertEqual(h.hub.received, [])
         self.assertEqual(h.http.starts(), [], "no new /agent request for it")
 
+    def test_a_picture_goes_as_unsupported_and_a_bare_quote_answers_nothing(self):
+        h = channel(self)
+        from openmate_core.backend import Media
+        pic = say(h, "[图片]", type="IMAGE", media=[Media("image", ref="img:example-9", mime="image/png")])
+        self.assertEqual(received(h)["message"], {"id": pic.id, "unsupported": ["图片（这个渠道还转交不了，请在 App 里发）"]})
+
+    def test_a_channel_push_does_not_swallow_the_users_same_words(self):
+        h = channel(self, agent_reply_header=" ")  # no AI mark: only the id tells the echo
+        send(h, ref="push1", text="收到", kind="push")
+        time.sleep(0.2)
+        self.assertEqual(h.hub.received, [], "its echo")
+        m = say(h, "收到")
+        self.assertEqual(received(h)["message"]["id"], m.id)
+
     def test_signing_out_lets_the_lines_not_handed_over_go(self):
         h = channel(self, timing=fast(channel_poll=0.05, channel_retry=(30.0,), channel_unseen=0.3))
         h.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("", "the assistant is away"))
@@ -484,6 +498,30 @@ class AskTest(unittest.TestCase):
         self.assertEqual(ended(h, "ix_example_1"), "answered_here")
         self.assertEqual(h.world.recalls, [])
 
+    def test_a_question_waits_for_a_line_being_handed_over(self):
+        import threading
+        h = channel(self)
+        started = threading.Event()
+
+        def slow(p):
+            started.set()
+            time.sleep(0.6)
+        h.hub.receive_answer = slow
+        say(h, "/agent 你好")
+        self.assertTrue(started.wait(5))
+        t0 = time.monotonic()
+        h.http.interactions = [waiting("ix_example_1")]
+        send(h, ref="ask:ix_example_1", text="Agent 想运行 make test。回复「允许」或「拒绝」。", kind="ask")
+        self.assertGreater(time.monotonic() - t0, 0.3, "sent after the hand-over, not between its check and it")
+
+    def test_a_quote_alone_answers_nothing(self):
+        h = channel(self)
+        self.ask(h)
+        quoted = h.app.store.messages_before(SOLO, None, 5)[0]
+        line = say(h, "/agent", parent_id=quoted["id"])
+        self.assertEqual(line_state(h, line.id), "handed")
+        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["here"], "")
+
     def test_a_refused_answer_answers_nothing(self):
         h = channel(self)
         self.ask(h)
@@ -558,9 +596,12 @@ class AskTest(unittest.TestCase):
         mid = self.ask(h)
         with h.app.store._lock:
             h.app.store._tx(lambda db: db.execute("DELETE FROM channel_asks"))  # cut off before it was written down
+        before = time.time()
         again = send(h, ref="ask:ix_example_1", text="Agent 想运行 make test。回复「允许」或「拒绝」。", kind="ask")
         self.assertEqual(again["message_id"], mid)
-        self.assertEqual(h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")["message_id"], mid)
+        row = h.app.store.channel_ask("ix_example_1", "ask:ix_example_1")
+        self.assertEqual(row["message_id"], mid)
+        self.assertLess(row["at"], before, "when it was sent, not when it was written down again")
         self.assertEqual(len([s for s in h.sent() if s["id"] == mid]), 1)
 
     def test_a_question_sent_without_a_message_id_still_takes_its_answer(self):
