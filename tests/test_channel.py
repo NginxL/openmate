@@ -203,6 +203,15 @@ class ReceiveTest(unittest.TestCase):
         self.assertNotEqual(e.exception.code, "cannot_send")
         self.assertIn("不确定", e.exception.message)
 
+    def test_every_piece_of_a_question_is_one_accounts(self):
+        h = channel(self)
+        h.http.interactions = [waiting("ix_example_long")]
+        send(h, ref="ask:ix_example_long#0", text="很长的问题，第一段。", kind="ask")
+        h.app._owner = "user_example_other"  # another account by now
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="ask:ix_example_long#1", text="第二段。", kind="ask")
+        self.assertEqual(e.exception.code, "cannot_send")
+
     def test_a_ref_is_bound_to_its_account_for_good(self):
         h = channel(self)
         h.world.send_fail = "rejected"

@@ -64,7 +64,8 @@ NEW_ASK_NOTE = "这条没有交给 Persona：它交出去之前 Agent 又提了�
 FINAL = ("resolved", "dismissed", "expired", "cancelled")  # how a question ends for good (its history's status)
 FINAL_CODES = ("invalid_params", "no_contribution", "unknown_method", "permission_denied")
 HISTORY_PAGES = 100  # pages of a session's question history a round reads at most
-ECHO_WINDOW = 60.0  # a send's text stands for its echo till its id is known, at most this long
+ECHO_WINDOW = 600.0  # a send's text stands for its echo till its id is known, at most this long (agent_fresh: a line
+# older than that is never taken anyway)
 ASK_STALE = 3 * 86400.0  # a question still followed after this long is let go (Persona's wait is a day at most)
 TAKE_BACK_TRIES = 5  # a question not taken back (nor marked ended) is tried again so many rounds, then let be
 TEXT_TYPES = ("TEXT", "POST")  # a line of words; anything else (a picture, a sticker, a file …) is no answer
@@ -214,7 +215,8 @@ class ChannelBridge:
                 return app.send_once(key, "channel", _never)
             if moved:
                 raise RPCError("正在换%s账号，这条不再发出" % app.platform.name, "cannot_send")
-            if app.store.channel_ref_bind(key, owner) != owner:
+            bind = key.split("#", 1)[0] if _ASK_REF.match(ref) else key  # every piece of a question: one account
+            if app.store.channel_ref_bind(bind, owner) != owner:
                 raise RPCError("换了%s账号，这条是之前那个账号的，不再发出" % app.platform.name, "cannot_send")
             chat = self.chat()
             if not chat:

@@ -1515,6 +1515,8 @@ class ConnectorApp:
             self._link_up.clear()
         with self._login_lock:
             self._login = None
+        if self.channel is not None:
+            self.channel.forget_pending()  # signing out: nothing said before goes to Persona's 渠道 after it
         if self.backend is not None:
             try:
                 self.backend.logout()
@@ -1529,8 +1531,6 @@ class ConnectorApp:
                 self.backend.saved_credentials = None  # gone for good now (a failed delete keeps it, for the checks)
         self.creds = "none"
         self.account = None
-        if self.channel is not None:
-            self.channel.forget_pending()  # signed out: nothing said before goes to Persona's 渠道 after it
         self.mark_changed("inbox")
         return {}
 
