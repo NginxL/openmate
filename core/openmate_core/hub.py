@@ -205,19 +205,20 @@ class HubAPI:
         res = self.request("GET", "/api/v1/todos", timeout=30) or {}
         return [t for t in (res.get("todos") or []) if isinstance(t, dict)] if isinstance(res, dict) else []
 
-    def reporter_stopped(self, session_id: str) -> bool:
-        """Whether the hub keeps the reporting conversation stopped (its task notices dropped until it is asked again);
-        False from a hub without the list (404) or one that does not list it."""
+    def reporter_state(self, session_id: str) -> str:
+        """Whether the hub tells the conversation about the tasks it opened: "reporting"; "stopped" (its task notices
+        are dropped until it is asked again); "absent" (not, or no more, a reporting conversation: they go to the main
+        conversation); "unknown" from a hub without the list (404)."""
         try:
             res = self.request("GET", "/api/v1/assistant/reporters", timeout=15) or {}
         except HubError as e:
             if e.status == 404:
-                return False
+                return "unknown"
             raise
         for r in (res.get("reporters") or []) if isinstance(res, dict) else []:
             if isinstance(r, dict) and r.get("session_id") == session_id:
-                return bool(r.get("stopped_at"))
-        return False
+                return "stopped" if r.get("stopped_at") else "reporting"
+        return "absent"
 
     def stop_conversation(self, session_id: str) -> dict:
         return self.request("POST", "/api/v1/assistant/conversations/%s/stop" % _seg(session_id), {})

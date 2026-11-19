@@ -84,6 +84,7 @@ PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
 FORWARDED_NOTE = "已转给正在做这件事的 Agent"
 NOTE_RETRY = 60.0  # seconds between tries of a note that surely did not go out
+FORWARD_CHECK = "请先在 Persona 里打开这个待办的 Agent 会话，看看有没有收到这条追问；没有的话再重新发送。"
 ASK_ASSISTANT = re.compile(r"问\s*(?:persona|助手)", re.IGNORECASE)  # a follow-up the conversation is asked, not the task
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # what agents.control refuses in a message (newline, tab kept)
 ACTIVE = ("starting", "running")
@@ -270,6 +271,13 @@ class AgentRunner:
                 threading.Thread(target=self._resume_forward, args=(run,), name="openmate-agent-forward",
                                  daemon=True).start()
                 continue
+            if run.get("forwarding") and self.enabled and self.hub.available \
+                    and time.time() - float(run.get("created") or 0) < self.app.timing.agent_fresh:
+                # cut off while the task's Agent was looked up: nothing went out anywhere, so it starts again
+                log.info("an /agent follow-up cut off while its Agent was looked up starts again")
+                threading.Thread(target=self._resume_start, args=(run,), name="openmate-agent-start",
+                                 daemon=True).start()
+                continue
             if run.get("start_op") and self.enabled and self.hub.available and fresh:
                 # a new conversation under an operation id: the same request again gets the hub's first answer
                 # (the conversation it started, if it did), never a second start
@@ -314,8 +322,10 @@ class AgentRunner:
         self._last_prune = now
         t = self.app.timing
         # the request a follow-up handed to the task's Agent waits on: the conversation answers it by that request's id
-        waiting = [r.get("asked") for r in self.store.runs_in_state(["forwarded", "starting"])
-                   if now - float(r.get("created") or 0) <= t.agent_keep]
+        waiting = []
+        for r in self.store.runs_in_state(["forwarded", "starting"]):
+            if now - float(r.get("created") or 0) <= t.agent_keep and not r.get("replies"):
+                waiting += [r.get("asked"), r["id"]]  # and the follow-up itself, till its answer
         self.store.runs_prune(now - t.agent_keep, t.agent_keep_most, protect=[w for w in waiting if w])
         self.store.seen_prune(now - t.agent_keep)
 
@@ -774,8 +784,12 @@ class AgentRunner:
         baseline: Optional[int] = None
         op = ""
         if prev is not None:
-            # the run that waits for the conversation's turn (a follow-up handed to the task's Agent waits for none)
-            if not self._supersede(self._asked_last(prev)["id"], run["id"], epoch):
+            # the runs that wait for the conversation's turn (a follow-up handed to the task's Agent waits for none):
+            # prev's, and any other of the thread's waiting on it (one asked while a follow-up was looked up)
+            waiting = [self._asked_last(prev)["id"]] + [
+                r["id"] for r in self.store.runs_in_thread(run["chat_id"], run["thread_key"])
+                if r["id"] != run["id"] and r["state"] == "running" and r.get("session_id") == prev.get("session_id")]
+            if not all([self._supersede(w, run["id"], epoch) for w in dict.fromkeys(waiting)]):
                 return  # another account's sign-in took the store: prev may be that account's, never gone on in
         else:
             # a new conversation is started once: one operation id and the very same request on every try, and after
@@ -938,6 +952,14 @@ class AgentRunner:
         since it was last asked."""
         return self._stopped_since(run, float(self._asked_last(run).get("created") or 0))
 
+    def _same_conversation(self, run: dict) -> List[dict]:
+        """The thread's other runs in run's conversation."""
+        sid = run.get("session_id") or ""
+        if not sid:
+            return []
+        return [r for r in self.store.runs_in_thread(run["chat_id"], run["thread_key"])
+                if r["id"] != run["id"] and r.get("session_id") == sid]
+
     def _stopped_since(self, run: dict, since: float) -> bool:
         for r in self.store.runs_in_thread(run["chat_id"], run["thread_key"]):
             if r.get("session_id") == run.get("session_id") and r["state"] == "stopped" \
@@ -949,18 +971,21 @@ class AgentRunner:
         """The Agent at work on what prev's conversation handed out: the one open to-do it opened (`origin`), its
         latest Agent still on it (not released, removed or failed to start), whose session is on that very to-do and
         not offline; and the conversation not stopped at the hub (its task notices are dropped until it is asked
-        again). None (the conversation is asked) when there is no such Agent, or the hub cannot tell."""
+        again, and listed as one whose task notices it is told: they come back here). None (the conversation is asked)
+        when there is no such Agent, or the hub cannot tell."""
         conv = prev.get("session_id") or ""
         if not conv or not self.hub.available:
             return None
         try:
             todos = self.hub.todos()
-            stopped = self.hub.reporter_stopped(conv)
+            reporting = self.hub.reporter_state(conv)
         except HubError as e:
             log.info("/agent follow-up: the to-dos could not be read (HTTP %s %s): the conversation is asked", e.status, e.code)
             return None
-        if stopped:
-            log.info("/agent follow-up: the conversation was stopped in Persona: the conversation is asked")
+        if reporting != "reporting":
+            # stopped (its task notices dropped until it is asked again), or no more a reporting conversation (they
+            # go to the main conversation): a result would never come back here
+            log.info("/agent follow-up: the conversation's task notices do not come back here (%s): it is asked", reporting)
             return None
         open_ = [t for t in todos if t.get("origin") == conv and not t.get("done_at")
                  and (t.get("kind") or "") in ("", "todo")]
@@ -1046,17 +1071,17 @@ class AgentRunner:
         row = self.store.message(run["chat_id"], run["request_id"])
         try:
             if not self._forward_send(run["id"], row, run["forward_pending"], None, resumed=True):
-                self._fail(run["id"], "没能确认这条追问有没有转给正在做这件事的 Agent。" + CHECK)
+                self._fail(run["id"], "没能确认这条追问有没有转给正在做这件事的 Agent。" + FORWARD_CHECK)
         except Exception:
             log.exception("/agent follow-up could not be handed on after a restart")
-            self._fail(run["id"], "没能确认这条追问有没有转给正在做这件事的 Agent：扩展内部错误。" + CHECK)
+            self._fail(run["id"], "没能确认这条追问有没有转给正在做这件事的 Agent：扩展内部错误。" + FORWARD_CHECK)
 
     def _forward_send(self, run_id: str, row: Optional[dict], target: dict, epoch: Optional[int] = None,
                       resumed: bool = False) -> bool:
         """Send the follow-up to the task's Agent (agents.control) under one client_msg_id, which the hub sends once:
         a try whose answer was lost, or one cut off by a restart (resumed), is sent again as it is, never twice. The
-        target is kept with the run first, so a restart sends it to the same Agent, and looked at again before any try
-        after the first (a session moved to another to-do never gets it). False (the conversation is asked) only when
+        target is kept with the run first, so a restart sends it to the same Agent, and looked at again right before
+        every try (a session moved to another to-do never gets it). False (the conversation is asked) only when
         nothing can have gone out: the hub surely refused it, or the Agent moved before any try."""
         t = self.app.timing
         deadline = time.time() + t.agent_hub_wait
@@ -1072,18 +1097,18 @@ class AgentRunner:
         cmid = "openmate-" + run_id
         text = self._forward_text(run, row, target)
         maybe = resumed  # sent before the restart, perhaps
-        tries = 0
 
         def unsure(why: str) -> None:
             if maybe:
-                self._fail(run_id, "没能确认这条追问有没有转给正在做这件事的 Agent：%s。%s" % (why, CHECK))
+                self._fail(run_id, "没能确认这条追问有没有转给正在做这件事的 Agent：%s。%s" % (why, FORWARD_CHECK))
             else:
                 self._fail(run_id, "没能把这条追问转给正在做这件事的 Agent：%s。请稍后重新发送。" % why)
 
         def gone() -> bool:
             """The run is no more the user's to go on with (stopped, or wiped by another account's sign-in): what may
-            have reached the Agent is stopped with the conversation, as a stop after it would."""
-            if maybe and conv:
+            have reached the Agent is stopped with the conversation, as a stop after it would (unless the user asked
+            the conversation again since: that stop is not undone by an older send)."""
+            if maybe and conv and not self._asked_since(run):
                 self._stop_conversation(conv)
             return True
 
@@ -1098,6 +1123,11 @@ class AgentRunner:
                     return gone()
                 unsure("这台电脑和 Persona 之间的网络断了，等了 %s 还没恢复" % _span(t.agent_hub_wait))
                 return True
+            if not self._still_on(target):  # looked at right before every try: the wait may have been long
+                if not maybe:
+                    return False  # moved before anything went out: the conversation is asked
+                unsure("这件事的 Agent 已经换了任务或者不在了")
+                return True
             if not self._may_submit(run, epoch):
                 return gone()
             if self._stopped_since(run, float(run["created"])):
@@ -1110,12 +1140,6 @@ class AgentRunner:
                         self.store.run_put(cur)
                 self._end_reaction(run_id, "stopped")
                 return gone()
-            if (tries or resumed) and not self._still_on(target):
-                if not maybe:
-                    return False  # moved before anything went out: the conversation is asked
-                unsure("这件事的 Agent 已经换了任务或者不在了")
-                return True
-            tries += 1
             try:
                 self.hub.send_message(target["machine_id"], target["session_id"], text, cmid)
                 break
@@ -1123,8 +1147,8 @@ class AgentRunner:
                 log.warning("/agent follow-up could not reach the task's Agent: HTTP %s %s", e.status, e.code)
                 if e.code == "peer_held":
                     break  # in the Agent's session, held for approval at its computer: handed on
-                refused = (not e.unsent and 400 <= e.status < 500 and e.status not in (408, 429)
-                           and e.delivered in ("", "none"))
+                refused = (not e.unsent and not e.unreachable and 400 <= e.status < 500  # an answer read whole
+                           and e.status not in (408, 429) and e.delivered in ("", "none"))
                 if refused and not maybe:
                     return False  # nothing went out: the conversation is asked
                 if refused:
@@ -1152,14 +1176,20 @@ class AgentRunner:
         if stopped:
             # a /stop (or another account's sign-in) came while it went out: the Agent got it all the same, so what
             # the /stop stops is stopped again after it (the conversation and the tasks it handed out)
-            log.info("/agent follow-up handed on while it was stopped: the conversation is stopped again")
             self._end_reaction(run_id, "stopped")
-            if conv:
+            if conv and not self._asked_since(run):
+                log.info("/agent follow-up handed on while it was stopped: the conversation is stopped again")
                 self._stop_conversation(conv)
             return True
         log.info("/agent follow-up handed to the task's Agent (to-do %s)", target["todo_id"])
         self._forward_noted(run_id)
         return True
+
+    def _asked_since(self, run: dict) -> bool:
+        """The conversation was asked a newer request in the thread than run (one not handed to a task's Agent)."""
+        return any(float(r["created"]) > float(run["created"]) and not (r.get("forward") or r.get("forward_pending")
+                                                                        or r.get("forwarding"))
+                   for r in self._same_conversation(run))
 
     def _stop_conversation(self, conv: str) -> None:
         try:
@@ -1778,7 +1808,7 @@ class AgentRunner:
         if run["state"] in ("stopped", "failed"):
             raise RPCError("这个 /agent 请求已经停止了，不再回复")
         named = run["id"]  # a reply's key is the request it names: asked again, it is the same reply wherever it went
-        if run.get("kind") != "doc" and run["state"] not in ACTIVE and self._stopped_since_asked(run):
+        if run.get("kind") not in GUEST_KINDS and run.get("session_id") and self._stopped_since_asked(run):
             raise RPCError("这个 /agent 请求已经停止了，不再回复")  # its conversation was stopped since it was asked
         named_key = "agent:%s:%s" % (named, hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
         if self.store.send_get(named_key) is None:  # asked again: where it went the first time, never a second place
@@ -2060,6 +2090,15 @@ class AgentRunner:
                 return
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
+        for other in self._same_conversation(cur):  # what the stop stops at the hub is theirs too
+            with self._lock(other["id"]):
+                o = self.store.run_get(other["id"])
+                if o is None or o["state"] not in ACTIVE:
+                    continue
+                o["state"], o["stopped_at"] = "stopped", time.time()
+                if not self.store.run_put(o):
+                    continue
+            self._end_reaction(other["id"], "stopped")
         tasks: List[str] = []
         failed = ""
         if before == "stopped":
