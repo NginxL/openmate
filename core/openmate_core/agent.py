@@ -323,9 +323,6 @@ class AgentRunner:
         switch (a sign-in being taken in is waited for first), or the extension closes."""
         return not self._settle() or self.store.run_wiped(run_id)
 
-    def _changing(self) -> bool:
-        """Right before a call to the adapter: a sign-in being taken in now (no wait) means none is made."""
-        return bool(getattr(self.app, "handing_off", lambda: False)())
 
     def forget(self) -> None:
         """Another account signed in: what /agent posted for the one before is no echo of the next one's lines."""
@@ -644,7 +641,7 @@ class AgentRunner:
         with self.app.owned(epoch) as ok:
             if not ok or not self.store.seen_add("ack:%s" % run["id"]):
                 return
-        if self._gone(run["id"]) or self._changing():
+        if self._gone(run["id"]):
             return
         try:
             mid = backend.react(run["chat_id"], run["request_id"], self.ack)
@@ -673,14 +670,14 @@ class AgentRunner:
             cur["ack_end"] = outcome
             self.store.run_put(cur)
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run_id) or self._changing():
+        if backend is None or self._gone(run_id):
             return
         try:
             backend.unreact(cur["chat_id"], cur["request_id"], cur["acked"])
         except Exception as e:
             log.info("the /agent request's reaction was not taken back (%s)", getattr(e, "kind", "") or e.__class__.__name__)
         new = {"done": self.done_reaction, "failed": self.fail_reaction}.get(outcome, "")
-        if new and not self._gone(run_id) and not self._changing():  # another account's sign-in meanwhile: not put
+        if new and not self._gone(run_id):  # another account's sign-in while it was taken back: not put
             try:
                 backend.react(cur["chat_id"], cur["request_id"], new)
             except Exception as e:
@@ -1645,7 +1642,7 @@ class AgentRunner:
         """Edit a message /agent sent, as the user; told to the sent-as-user ledger like a send. False when the
         service has no editing or refused it."""
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run["id"]) or not self._remember_post(body, run) or self._changing():
+        if backend is None or self._gone(run["id"]) or not self._remember_post(body, run):
             return False
         try:
             backend.edit(run["chat_id"], mid, body)

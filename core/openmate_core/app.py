@@ -821,14 +821,11 @@ class ConnectorApp:
         bound to it (local store work under the switch's locks only): what an account's work does next is decided
         then, by its generation. False when the extension closes meanwhile (nothing goes on). Never under _wipe_mu or
         a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
-        if self._handoff and self._handoff_by is not threading.current_thread():
-            self._handed.wait()  # set when it is bound, or at shutdown
-            return not self.closing.is_set()
-        return True
-
-    def handing_off(self) -> bool:
-        """A sign-in is being taken in right now (no wait): a call to the adapter for an account's work is not made."""
-        return self._handoff and self._handoff_by is not threading.current_thread()
+        while self._handoff and self._handoff_by is not threading.current_thread():
+            self._handed.wait()  # set when it is bound, or at shutdown (another hand-over may begin meanwhile)
+            if self.closing.is_set():
+                return False
+        return not self.closing.is_set()
 
     def owns(self, epoch: Optional[int], account: str = "", owner: str = "", settle: bool = True) -> bool:
         """The store is still that of the account of epoch (None: whichever is signed in now), of account (the one

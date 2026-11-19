@@ -494,7 +494,8 @@ class ChatsToday:
         self.needs(only={chat_id})
         t = next((t for t in self.done if t["_chat"]["id"] == chat_id), None)
         if t is None:
-            return account_epoch(app) == epoch  # nothing to bring back: so for this account (not another's empty store)
+            with owned(app, epoch) as ok:
+                return ok  # nothing to bring back: so for this account (not in another's emptied store)
         with owned(app, epoch) as ok:
             if not ok:
                 return False  # another account signed in meanwhile (its marks are its own), or one is on its way

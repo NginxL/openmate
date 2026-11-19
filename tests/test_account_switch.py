@@ -264,7 +264,7 @@ class AgentAcrossSwitchTest(unittest.TestCase):
         app = h.app
         h.world.people["user_example_f"] = "示例同事己"
         app.store.autoreply_set("chat_example_team", True)
-        app.people._ask = lambda ids: None  # no draw asks behind: 自动代答 itself asks the service (and is held there)
+        app.people._ask = lambda ids, epoch=None: None  # no draw asks behind: 自动代答 itself asks the service (and is held there)
         self.addCleanup(lambda: app.people.__dict__.pop("_ask", None))
         # 自动代答 asks the service who the sender is; the switch comes while it answers
         held = hold(self, app.backend, "people_kinds",

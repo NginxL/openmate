@@ -556,6 +556,12 @@ def do(app, params: dict) -> dict:
     _require_store(app)
     key = "action:" + request_id
     p = app.platform.name
+    epoch = app.account_epoch()  # the account the user agreed to send as: nothing goes out as another
+
+    def as_asked() -> None:
+        if not app.owns(epoch):  # (a sign-in being taken in is waited for first)
+            raise RPCError("刚换了%s账号，没有发出：请在新账号下重新操作" % p)
+
     if name == c + "_send":
         chat_id, text, reply_to, visible, _ = _send_card(app, a)
         root = None
@@ -565,6 +571,7 @@ def do(app, params: dict) -> dict:
                 root = quoted["root_id"]
 
         def send():
+            as_asked()
             mid = app.send_as_user(chat_id, text, reply_to or None, root)
             return {"text": "已发送到%s" % visible, "message_ref": mid}
 
@@ -576,6 +583,7 @@ def do(app, params: dict) -> dict:
             # The chat first, before the request id is taken: a failure here leaves the id free for a retry.
             if not app.signed_in:
                 raise RPCError("还没有登录%s" % p)
+            as_asked()
             try:
                 chat_id = app.backend.create_chat(user)
             except BackendError as e:
@@ -584,6 +592,7 @@ def do(app, params: dict) -> dict:
             chat_id = ""
 
         def send():
+            as_asked()  # again: opening the chat asked the service, and the account may have changed meanwhile
             mid = app.send_as_user(chat_id, text)
             return {"text": "已私聊 %s" % who, "message_ref": mid}
 
