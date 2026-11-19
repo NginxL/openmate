@@ -295,6 +295,11 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message="")
         self.assertIn("缺少消息 id", e.exception.message)
+        store, h.app.store, h.app.setup_error = h.app.store, None, "本地数据库打不开"
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message="1")
+        self.assertIn("飞书扩展有问题：本地数据库打不开", e.exception.message)
+        h.app.store, h.app.setup_error = store, ""
         blocked = h.world.push(TEAM, "user_example_a", "", type="IMAGE", blocked=True,
                                media=[Media("image", ref="img:blocked")])
         stored(h, TEAM, blocked)
@@ -333,9 +338,15 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=m.id)
         self.assertIn("回答的是一个网页", e.exception.message)
-        page = h.world.push(TEAM, "user_example_a", "", type="FILE", media=[Media("file", ref="file:page", name="a.html")])
+        page = h.world.push(TEAM, "user_example_a", "", type="FILE",
+                            media=[Media("file", ref="file:page", name="a.html", mime="text/html")])
         stored(h, TEAM, page)
         self.assertIn(page.id + ".html", h.tool("media", message=page.id), "an HTML file sent as one is kept")
+        tpl = h.world.push(TEAM, "user_example_a", "", type="FILE",
+                           media=[Media("file", ref="file:tpl", name="page.html.j2", mime="text/plain")])
+        stored(h, TEAM, tpl)
+        h.app.backend.media = lambda ref, most: ("text/plain", b"<!DOCTYPE html><html>{{ x }}</html>")
+        self.assertIn(tpl.id + ".j2", h.tool("media", message=tpl.id), "what a file holds is not guessed at")
 
     def test_why_it_cannot_fetch_now(self):
         h = signed(self)
@@ -353,6 +364,12 @@ class MediaToolTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])
         self.assertIn("正在恢复登录", e.exception.message)
+        h.app.link, h.app.link_reason = "error", "连不上代理：请检查代理设置"
+        h.app.creds = "present"
+        with self.assertRaises(HubSideError) as e:
+            h.tool("media", message=row["id"])
+        self.assertIn("飞书连不上：连不上代理", e.exception.message)
+        h.app.link, h.app.creds = "connecting", "loading"
         h.app.setup_error = "LarkAgentX 的 Python 不对"
         with self.assertRaises(HubSideError) as e:
             h.tool("media", message=row["id"])

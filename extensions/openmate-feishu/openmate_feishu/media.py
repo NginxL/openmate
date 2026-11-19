@@ -85,7 +85,8 @@ def media_tools(app) -> Dict:
 def fetch(app, mid: str, chat_id: str = "") -> str:
     store = app.store
     if store is None:
-        raise MediaError("扩展还在启动，请稍后再试")
+        error = getattr(app, "setup_error", "")
+        raise MediaError("飞书扩展有问题：%s" % error if error else "扩展还在启动，请稍后再试")
     try:
         folder = _folder(app, store.meta_get("account_id"))
     except OSError as e:  # no temporary directory this user can write to
@@ -131,7 +132,10 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
         try:
             path, mime, size = _fetch_one(folder, stem, m, backend)
         except BackendError as e:
-            if e.kind == "expired" and getattr(app, "link", "") in ("idle", "connecting", "down"):
+            link = getattr(app, "link", "")
+            if e.kind == "expired" and link == "error" and getattr(app, "link_reason", ""):
+                lines.append("%s下载不了：飞书连不上：%s。" % (word, app.link_reason))  # a proxy, a setting
+            elif e.kind == "expired" and link in ("idle", "connecting", "down"):
                 lines.append("%s下载不了：飞书正在恢复登录（扩展刚启动或刚重连），稍后再试一次。" % word)
             else:
                 lines.append("%s下载不了：%s%s。" % (word, e.message, _REASONS.get(e.kind, "")))
@@ -167,11 +171,6 @@ def _not_ready(app, account_known: bool) -> str:
     return "飞书正在恢复登录（扩展刚启动或刚重连），稍后再试一次。"
 
 
-def _looks_like_a_page(mime: str, data: bytes) -> bool:
-    head = data[:1024].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
-    return mime in ("text/html", "application/xhtml+xml") or head.startswith((b"<!doctype html", b"<html"))
-
-
 def _folder(app, account: str) -> str:
     """<temporary directory>/openmate-feishu-media-<uid>-<this extension's>/<the account's>; "" for no account."""
     if not account:
@@ -191,9 +190,10 @@ def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]
         raise BackendError("飞书给回来的是空的", "unknown")
     mime = (mime or "").split(";", 1)[0].strip().lower()
     declared = str(m.get("mime") or "").split(";", 1)[0].strip().lower()
-    named = os.path.splitext(str(m.get("name") or ""))[1].lower()
-    if _looks_like_a_page(mime, data) and declared not in ("text/html", "application/xhtml+xml") \
-            and named not in (".html", ".htm", ".xhtml"):
+    # Feishu said this attachment is not text, and answered with a web page: an answer (a sign-in page), not the file.
+    # By the answer's own type only: what a file holds is not guessed at (an HTML template sent as text is a file)
+    if mime in ("text/html", "application/xhtml+xml") and declared and not declared.startswith("text/") \
+            and declared not in ("application/xhtml+xml", "application/octet-stream"):
         raise BackendError("下载时飞书回答的是一个网页，不是这个附件（可能登录失效了）", "unknown")
     if mime in ("", "application/octet-stream", "binary/octet-stream") and m.get("mime"):
         mime = str(m["mime"]).split(";", 1)[0].strip().lower()  # what the message itself said it is
