@@ -18,6 +18,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXTENSION_ID = "openmate-feishu"
 CONNECTOR_ID = "matefeishu"
 DOC_HOSTS = ("feishu.cn", "larksuite.com", "larkoffice.com", "feishu.net", "larksuite.cn")
+#: a message Feishu's data-loss policy keeps from this client (dlpReviewState BLOCK) reads as this (Message.blocked)
+DLP_BLOCKED_TEXT = "[飞书的安全策略拦下了这条消息，内容看不到]"
 
 
 def make_backend(config: Dict, data_dir: str) -> Backend:
@@ -47,6 +49,7 @@ def platform(manifest_path: str = "") -> Platform:
         login_hint_scanned="已扫码，请在飞书手机 App 上点“确认登录”",
         login_hint_expired="二维码过期了，已换一张新的，请重新扫码",
         ui_pages=_agenda_pages,
+        legacy_blocked_texts=(DLP_BLOCKED_TEXT,),  # what told a blocked message before 0.11.29 stored the mark
     )
 
 

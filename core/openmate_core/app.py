@@ -247,7 +247,8 @@ class ConnectorApp:
 
     def _startup(self) -> None:
         try:
-            self.store = Store(os.path.join(self.data_dir, "openmate.db"))
+            self.store = Store(os.path.join(self.data_dir, "openmate.db"),
+                               legacy_blocked_texts=getattr(self.platform, "legacy_blocked_texts", ()) or ())
             cut = self.store.sends_interrupted()
             if cut:
                 log.warning("%d send(s) were cut off by a restart: marked uncertain", cut)
@@ -1500,7 +1501,6 @@ class ConnectorApp:
     # ------------------------------------------------------------------ archive
 
     def m_archive_changes(self, params: dict) -> dict:
-        skip = set(getattr(self.backend, "unarchived_texts", ()) or ())
         cursor = str(params.get("cursor") or "")
         if cursor and not cursor.isdigit():
             raise RPCError("cursor 不是这个连接器给出的")
@@ -1556,8 +1556,8 @@ class ConnectorApp:
                     scanned = r["seq"]
                     continue
             scanned = r["seq"]
-            if views.is_system(r) or not views.has_content(r) or (r.get("text") or "") in skip:
-                continue  # a text the service kept from this client (blocked) is never the knowledge base's
+            if views.is_system(r) or not views.has_content(r) or r.get("blocked"):
+                continue  # a message the service kept from this client (blocked) is never the knowledge base's
             batches.setdefault(r["chat_id"], []).append(r)
         me = self.me_name()
         out = []
@@ -1610,7 +1610,6 @@ class ConnectorApp:
         store picks by a slightly wider rule (other Unicode blanks), so a line it let through is passed over here.
         The store is read HISTORY_STEP lines at a time at least, so a long run of such lines costs few queries."""
         got: List[dict] = []  # newer_than: oldest first; else newest first (turned round at the end)
-        skip = set(getattr(self.backend, "unarchived_texts", ()) or ())  # as archive.changes
         while len(got) < want:
             step = max(want - len(got), HISTORY_STEP)
             rows = self.store.history_rows(chat_id, older_than=older_than, newer_than=newer_than, inclusive=inclusive,
@@ -1621,7 +1620,7 @@ class ConnectorApp:
                     newer_than = r["_key"]
                 else:
                     older_than = r["_key"]
-                if views.has_content(r) and (r.get("text") or "") not in skip:
+                if views.has_content(r) and not r.get("blocked"):  # as archive.changes
                     got.append(r)
                     if len(got) >= want:
                         break

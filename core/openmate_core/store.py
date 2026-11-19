@@ -16,7 +16,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from .backend import Chat, Message
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: messages.blocked
 
 _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -49,6 +49,7 @@ _SCHEMA = [
         media TEXT NOT NULL DEFAULT '[]',
         from_history INTEGER NOT NULL DEFAULT 0,
         received REAL NOT NULL DEFAULT 0,
+        blocked INTEGER NOT NULL DEFAULT 0,
         UNIQUE (chat_id, id))""",
     "CREATE INDEX IF NOT EXISTS messages_chat_position ON messages (chat_id, position)",
     "CREATE INDEX IF NOT EXISTS messages_chat_root ON messages (chat_id, root_id)",
@@ -102,7 +103,7 @@ _SCHEMA = [
 
 _MESSAGE_COLUMNS = (
     "seq, chat_id, id, position, sender_id, sender_name, mine, type, text, at, root_id, thread_id, parent_id, "
-    "at_me, at_all, media, from_history, received"
+    "at_me, at_all, media, from_history, received, blocked"
 )
 
 # What archive.changes hands over (views.is_system / views.has_content) as SQL: not a system line, and some text that
@@ -133,12 +134,12 @@ def history_sql(chat_id: str, older_than: Optional[tuple], newer_than: Optional[
 
 
 _INSERT_COLUMNS = ("chat_id, id, position, sender_id, sender_name, mine, type, text, at, root_id, thread_id, parent_id, "
-                   "at_me, at_all, media, from_history, received")
+                   "at_me, at_all, media, from_history, received, blocked")
 
 
 def _message_row(r: sqlite3.Row) -> dict:
     d = dict(r)
-    for k in ("mine", "at_me", "at_all", "from_history"):
+    for k in ("mine", "at_me", "at_all", "from_history", "blocked"):
         d[k] = bool(d[k])
     try:
         d["media"] = json.loads(d["media"] or "[]")
@@ -158,7 +159,8 @@ class Store:
     """Thread-safe: one connection behind one lock."""
 
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, legacy_blocked_texts: Iterable[str] = ()):
+        """legacy_blocked_texts: see Platform.legacy_blocked_texts (a store made before messages.blocked)."""
         self.path = path
         directory = os.path.dirname(path)
         if directory:
@@ -173,9 +175,25 @@ class Store:
         with self._lock:
             self._db.execute("PRAGMA synchronous=FULL")
             self._db.execute("PRAGMA foreign_keys=ON")
+            self._migrate([str(t) for t in legacy_blocked_texts if t])
             for stmt in _SCHEMA:
                 self._db.execute(stmt)
             self._db.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+
+    def _migrate(self, legacy_blocked_texts: List[str]) -> None:
+        """An older store's messages table gains the columns of this version, in one transaction."""
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(messages)").fetchall()}
+        if not cols or "blocked" in cols:
+            return  # a new store (made with every column below), or one migrated already
+
+        def run(db):
+            db.execute("ALTER TABLE messages ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
+            if legacy_blocked_texts:
+                # what told a blocked message then: its text was the backend's note (once: later rows say themselves)
+                db.execute("UPDATE messages SET blocked = 1 WHERE text IN (%s)" % ",".join("?" * len(legacy_blocked_texts)),
+                           legacy_blocked_texts)
+
+        self._tx(run)
 
     def close(self) -> None:
         with self._lock:
@@ -431,26 +449,30 @@ class Store:
                     m.text = ""  # spaces alone are no text: it stays one to read again
                 cur = db.execute(
                     "INSERT OR IGNORE INTO messages (" + _MESSAGE_COLUMNS.replace("seq, ", "") + ") "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         m.chat_id, m.id, int(m.position), m.sender_id or "", m.sender_name or "", int(bool(m.mine)),
                         (m.type or "TEXT").upper(), m.text or "", float(m.at or 0), m.root_id or "", m.thread_id or "",
                         m.parent_id or "", int(bool(m.at_me)), int(bool(m.at_all)),
                         json.dumps([x.to_dict() for x in (m.media or [])], ensure_ascii=False), int(bool(from_history)), now,
+                        int(bool(m.blocked)),
                     ),
                 )
                 if cur.rowcount != 1:
                     blank = db.execute("SELECT " + _INSERT_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ? "
-                                       "AND text = ''", (m.chat_id, m.id)).fetchone() if (m.text or "").strip() else None
+                                       "AND (text = '' OR blocked = 1)", (m.chat_id, m.id)).fetchone() \
+                        if (m.text or "").strip() and not m.blocked else None
                     if blank is not None:
-                        # stored with no text by an older reading: moved to the end (a new seq), so the archive's
-                        # cursor, already past it, hands it over with its text now
+                        # stored with no text by an older reading, or blocked then: moved to the end (a new seq), so
+                        # the archive's cursor, already past it, hands it over with its text now
                         db.execute("DELETE FROM messages WHERE chat_id = ? AND id = ?", (m.chat_id, m.id))
                         db.execute("INSERT INTO messages (" + _INSERT_COLUMNS + ") VALUES (%s)"
                                    % ",".join("?" * len(tuple(blank))), tuple(blank))
-                    if m.text:
-                        db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ?",
-                                   (m.text, (m.type or "TEXT").upper(), m.chat_id, m.id, m.text))
+                    if m.text:  # the blocked mark goes with the text it came with
+                        db.execute("UPDATE messages SET text = ?, type = ?, blocked = ? WHERE chat_id = ? AND id = ? "
+                                   "AND (text != ? OR blocked != ?)",
+                                   (m.text, (m.type or "TEXT").upper(), int(bool(m.blocked)), m.chat_id, m.id, m.text,
+                                    int(bool(m.blocked))))
                     if (m.type or "").upper() == "SYSTEM" and not m.media:
                         # turned into a notice (a recall): what it carried is not offered any more
                         db.execute("UPDATE messages SET media = '[]' WHERE chat_id = ? AND id = ? AND media != '[]'",

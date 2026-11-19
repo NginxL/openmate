@@ -327,11 +327,11 @@ class CatchUpTest(unittest.TestCase):
         wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
         store, backend = h.app.store, h.app.backend
         backend.rerender_empty = ("TEXT",)
-        backend.unarchived_texts = ("[拦下了]",)
         backend.render_version = store.meta_get("render_version") or "1"
         store.meta_set("render_version", backend.render_version)
         held = h.world.make("chat_example_team", "user_example_a", "", ago=600)  # held for review: no text yet
         blocked = h.world.make("chat_example_team", "user_example_b", "[拦下了]", ago=500)
+        blocked.blocked = True  # the service keeps it from this client: its text is only the note
         store.add_messages([held, blocked], True)
         cursor = ""
         for _ in range(50):  # what the knowledge base reads meanwhile: neither of them

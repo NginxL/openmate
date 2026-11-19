@@ -61,6 +61,7 @@ class Message:
     at_me: bool = False
     at_all: bool = False
     media: List[Media] = field(default_factory=list)
+    blocked: bool = False
 
 
 @dataclass
@@ -223,9 +224,6 @@ class Backend(abc.ABC):
     #: Types a message of which an older reading may have stored with no text at all (Feishu: a text that is only a
     #: link). When render_version changes, the core reads those messages again where they are (not only the newest).
     rerender_empty: Tuple[str, ...] = ()
-    #: Texts a backend gives a message whose content the service keeps from this client (Feishu: blocked by its
-    #: data-loss policy): shown in the chat, never handed to the knowledge base (it keeps a message's first text).
-    unarchived_texts: Tuple[str, ...] = ()
     #: A reply in a group's thread quotes the thread's first message, whichever message of it was picked (Feishu: the
     #: send carries only the root). The confirm card says so, so it shows what the message will really quote.
     thread_reply_quotes_root: bool = False

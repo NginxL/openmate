@@ -38,7 +38,7 @@ from urllib.parse import quote, unquote, urlsplit
 from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, DocMention, LoginDone, LoginQR,
                                    Media, Message, Person, SendRejected)
 
-from . import launch, pin
+from . import DLP_BLOCKED_TEXT, launch, pin  # DLP_BLOCKED_TEXT: a blocked message's note (Message.blocked)
 
 log = logging.getLogger("openmate.larkx")
 
@@ -57,7 +57,6 @@ MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
 RENDER_VERSION = "8"  # 7: a text whose content is empty takes the links of its preview hang points; 8: DLP marks
 DLP_IN_PROGRESS, DLP_BLOCK = (1, "IN_PROGRESS"), (3, "BLOCK")  # Message.ContentState.dlpReviewState
-DLP_BLOCKED_TEXT = "[飞书的安全策略拦下了这条消息，内容看不到]"
 RERENDER_EMPTY = ("TEXT", "POST")  # 6: a text that is only a link (an A element) was read as nothing
 RERENDER_TYPES = ("CARD", "CALENDAR", "SHARE_CALENDAR_EVENT", "GENERAL_CALENDAR", "MERGE_FORWARD")
 CARD_TEXT_MOST = 4000
@@ -440,7 +439,6 @@ class LarkXBackend(Backend):
     render_version = RENDER_VERSION
     rerender_types = RERENDER_TYPES
     rerender_empty = RERENDER_EMPTY
-    unarchived_texts = (DLP_BLOCKED_TEXT,)  # shown in the chat, never handed to the knowledge base
     done_marks = True  # a chat's 完成
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
@@ -1518,6 +1516,7 @@ class LarkXBackend(Backend):
             dlp = dlp_state(ent)  # first: a text Feishu holds is never shown through its preview links either
             if dlp in DLP_BLOCK:
                 m.text = DLP_BLOCKED_TEXT  # Feishu's data-loss policy keeps it from this client: said, never worked around
+                m.blocked = True  # shown in the chat, never handed to the knowledge base
                 note_flags(m.type, entity_flags(ent))
                 continue
             if dlp in DLP_IN_PROGRESS:

@@ -57,6 +57,9 @@ class Platform:
     #: the archive cursor stops before that message (a later read goes on from there), and one left undecided for
     #: ARCHIVE_UNDECIDED_HOURS is left out.
     archive_chat: Optional[Callable[[str, Optional[dict], Dict], Optional[bool]]] = None
+    #: the texts this platform's backend gave a blocked message (Message.blocked) before stores kept that mark: when a
+    #: store gains the mark, its rows with one of these texts are marked blocked, once (later rows carry their own)
+    legacy_blocked_texts: Tuple[str, ...] = ()
     #: the extensions (X-Persona-Device "extension:<id>") that may read this one's chats for their 今天 through its own
     #: HTTP (todayapi; the manifest needs runtime.http). Empty: no HTTP at all
     today_api_callers: Tuple[str, ...] = ()

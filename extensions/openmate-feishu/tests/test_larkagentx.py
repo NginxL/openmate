@@ -645,7 +645,7 @@ class ReadTest(Base):
             msgs = self.b.history("660", None, 10)
         self.assertEqual(msgs[0].text, larkagentx.DLP_BLOCKED_TEXT, "blocked: said so, never worked around")
         self.assertEqual(msgs[1].text, "", "under review: left empty (never archived), read again by the core")
-        self.assertEqual(self.b.unarchived_texts, (larkagentx.DLP_BLOCKED_TEXT,))
+        self.assertEqual([m.blocked for m in msgs], [True, False], "the mark, not the text, keeps it from the archive")
         self.assertTrue(any('"dlpReviewState": 3' in line for line in logs.output), logs.output)
 
     def test_a_held_text_is_not_shown_through_its_preview(self):
