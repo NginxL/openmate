@@ -44,7 +44,6 @@ ARCHIVE_ROWS_MOST = 2000
 ARCHIVE_UNDECIDED_HOURS = 6  # a message of a chat the archive rule cannot decide on waits this long at most
 ARCHIVE_ASK_MOST = 3  # undecided chats the backend is asked about per archive read
 STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, backend, saved sign-in) waits this long
-HANDOFF_WAIT = 30.0  # what an account's work does next waits this long at most while a sign-in's account is bound
 SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
 # History (capability "history": history.chats, archive.history), read from the store: what the program has stored of
 # a chat since it signed in (live messages, catch-ups, history reads). Pages are hints of HISTORY_PAGE messages, at most
@@ -819,13 +818,17 @@ class ConnectorApp:
 
     def settle(self) -> bool:
         """While a sign-in's account is being taken in (the adapter may answer as it already), wait until the store is
-        bound to it (a little at most): what an account's work does next is decided then, by its generation. False
-        when it is still being taken in after the wait (nothing of an account's goes on then). Never under _wipe_mu
-        or a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
+        bound to it (local store work under the switch's locks only): what an account's work does next is decided
+        then, by its generation. False when the extension closes meanwhile (nothing goes on). Never under _wipe_mu or
+        a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
         if self._handoff and self._handoff_by is not threading.current_thread():
-            self._handed.wait(HANDOFF_WAIT)
-            return not self._handoff and not self.closing.is_set()
+            self._handed.wait()  # set when it is bound, or at shutdown
+            return not self.closing.is_set()
         return True
+
+    def handing_off(self) -> bool:
+        """A sign-in is being taken in right now (no wait): a call to the adapter for an account's work is not made."""
+        return self._handoff and self._handoff_by is not threading.current_thread()
 
     def owns(self, epoch: Optional[int], account: str = "", owner: str = "", settle: bool = True) -> bool:
         """The store is still that of the account of epoch (None: whichever is signed in now), of account (the one
@@ -844,7 +847,7 @@ class ConnectorApp:
         one account brought: yields owns(epoch, account, owner). Only store work under it, nothing that waits on the
         network. A sign-in's hand-over is waited for first (settle)."""
         if not self.settle():
-            yield False  # still being taken in (or closing): no write, and no wait for the lock either
+            yield False  # closing: no write, and no wait for the lock either
             return
         with self._wipe_mu:
             yield self.owns(epoch, account, owner, settle=False)
@@ -1149,10 +1152,6 @@ class ConnectorApp:
             epoch = self.account_epoch()
 
         def stale() -> List[dict]:
-            if self._handoff and not self.closing.is_set():
-                # a sign-in still being taken in after the wait: not dropped as another account's; not taken now
-                # (a live line is handed over again, a read is not counted as read)
-                raise BackendError("正在换%s账号，稍后再收" % self.platform.name, "unreachable")
             log.info("%d message(s) read for an account signed out meanwhile (or while closing): not stored", len(msgs))
             return []
         if not self.owns(epoch):
@@ -1447,7 +1446,10 @@ class ConnectorApp:
         self._login = None
         acct = done.account
         self.creds = "present"
-        self._remember_account(acct)
+        try:
+            self._remember_account(acct)  # the name a start shows: it is sealed now
+        except Exception:
+            log.exception("the account's name could not be kept (the sign-in goes on)")
         self._catchup_done.clear()
         if not self.connector_on:
             # signed in, but the user turned the connector off in Persona: nothing is received or sent

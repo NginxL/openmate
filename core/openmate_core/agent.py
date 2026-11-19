@@ -320,8 +320,12 @@ class AgentRunner:
 
     def _gone(self, run_id: str) -> bool:
         """Nothing goes out in the user's name for the run: it was the account's signed in before, wiped by the
-        switch, or a sign-in is still being taken in after the wait (a sign-in being taken in is waited for first)."""
+        switch (a sign-in being taken in is waited for first), or the extension closes."""
         return not self._settle() or self.store.run_wiped(run_id)
+
+    def _changing(self) -> bool:
+        """Right before a call to the adapter: a sign-in being taken in now (no wait) means none is made."""
+        return bool(getattr(self.app, "handing_off", lambda: False)())
 
     def forget(self) -> None:
         """Another account signed in: what /agent posted for the one before is no echo of the next one's lines."""
@@ -640,7 +644,7 @@ class AgentRunner:
         with self.app.owned(epoch) as ok:
             if not ok or not self.store.seen_add("ack:%s" % run["id"]):
                 return
-        if self._gone(run["id"]):
+        if self._gone(run["id"]) or self._changing():
             return
         try:
             mid = backend.react(run["chat_id"], run["request_id"], self.ack)
@@ -669,14 +673,14 @@ class AgentRunner:
             cur["ack_end"] = outcome
             self.store.run_put(cur)
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run_id):
+        if backend is None or self._gone(run_id) or self._changing():
             return
         try:
             backend.unreact(cur["chat_id"], cur["request_id"], cur["acked"])
         except Exception as e:
             log.info("the /agent request's reaction was not taken back (%s)", getattr(e, "kind", "") or e.__class__.__name__)
         new = {"done": self.done_reaction, "failed": self.fail_reaction}.get(outcome, "")
-        if new and not self._gone(run_id):  # another account's sign-in while it was taken back: not put
+        if new and not self._gone(run_id) and not self._changing():  # another account's sign-in meanwhile: not put
             try:
                 backend.react(cur["chat_id"], cur["request_id"], new)
             except Exception as e:
@@ -695,7 +699,6 @@ class AgentRunner:
         if not self.app.owns(epoch):
             # claimed for the account signed in before; the switch wiped its run: nothing is said or started
             log.info("an /agent request of an account signed out meanwhile: not started")
-            self._not_started(run)
             return
         if run.get("kind") not in GUEST_KINDS:
             self._ack_request(run, epoch)
@@ -716,7 +719,6 @@ class AgentRunner:
         """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
         is touched, once another account's sign-in took the store."""
         if not self.app.owns(epoch):
-            self._not_started(run)
             return
         if not self.hub.available:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
@@ -760,7 +762,7 @@ class AgentRunner:
                     if baseline is None:
                         baseline = self._latest_seq(mid, sid)
                     if not self._may_submit(run, epoch):
-                        return self._not_started(run)
+                        return
                     self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
                               "ours_seen": False, "continued": prev["id"]}
@@ -770,14 +772,14 @@ class AgentRunner:
                         self._fail(run["id"], "hub 不支持访客会话")
                         return
                     if not self._may_submit(run, epoch):
-                        return self._not_started(run)
+                        return
                     sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
                                                        guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True, "guest": True}
                 else:
                     if not self._may_submit(run, epoch):
-                        return self._not_started(run)
+                        return
                     sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True}
@@ -837,12 +839,6 @@ class AgentRunner:
         log.info("/agent request started (%s%s)", "continued" if prev is not None else "new conversation",
                  ", try %d" % tries if tries > 1 else "")
         self._wake.set()
-
-    def _not_started(self, run: dict) -> None:
-        """A start that may not go on: one still in the store (the same account, held off by a hand-over that did not
-        end) fails plainly instead of staying "starting"; one wiped or stopped is left as it is."""
-        if self._state(run["id"]) == "starting":
-            self._fail(run["id"], "正在换%s账号，这个 /agent 请求没有开始处理，请重新发送" % self.app.platform.name)
 
     def _may_submit(self, run: dict, epoch: Optional[int]) -> bool:
         """Right before the request goes to the hub: not stopped, and still the account's it was claimed for (another
@@ -1649,7 +1645,7 @@ class AgentRunner:
         """Edit a message /agent sent, as the user; told to the sent-as-user ledger like a send. False when the
         service has no editing or refused it."""
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run["id"]) or not self._remember_post(body, run):
+        if backend is None or self._gone(run["id"]) or not self._remember_post(body, run) or self._changing():
             return False
         try:
             backend.edit(run["chat_id"], mid, body)
