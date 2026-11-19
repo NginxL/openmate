@@ -84,6 +84,7 @@ PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
 FORWARDED_NOTE = "已转给正在做这件事的 Agent"
 NOTE_RETRY = 60.0  # seconds between tries of a note that surely did not go out
+HELD_NOTE = "；它那台电脑上有个确认还没处理，处理后它才会看到这条"
 FORWARD_CHECK = "请先在 Persona 里打开这个待办的 Agent 会话，看看有没有收到这条追问；没有的话再重新发送。"
 ASK_ASSISTANT = re.compile(r"问\s*(?:persona|助手)", re.IGNORECASE)  # a follow-up the conversation is asked, not the task
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # what agents.control refuses in a message (newline, tab kept)
@@ -762,23 +763,28 @@ class AgentRunner:
             if self._handing.pop(run_id, None) is not None:
                 self._handed.notify_all()
 
-    def _wait_handed(self, run: dict) -> None:
+    def _wait_handed(self, run: dict) -> bool:
         """Wait while a request asked before run in its thread is being handed to the task's Agent (looked up, sent),
         so a later one never reaches the conversation first; at most agent_hub_wait (one held by the network). Any
-        other start goes on at once, as it always did."""
+        other start goes on at once, as it always did; someone else's (a guest run) never waits. True when it waited."""
+        if run.get("kind") in GUEST_KINDS:
+            return False
         key = (run["chat_id"], run["thread_key"])
         at = float(run.get("created") or 0)
         deadline = time.time() + self.app.timing.agent_hub_wait
+        waited = False
         with self._handed:
             while not self._stop.is_set():
                 if not any(rid != run["id"] and (c, t) == key and created < at
                            for rid, (c, t, created) in self._handing.items()):
-                    return
+                    return waited
                 left = deadline - time.time()
                 if left <= 0:
                     log.info("/agent: a follow-up before this one is still being handed on: this one goes on")
-                    return
+                    return waited
+                waited = True
                 self._handed.wait(min(left, 1.0))
+        return waited
 
     def _start_run_now(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
         if not self.app.owns(epoch):
@@ -808,11 +814,11 @@ class AgentRunner:
         if not self.hub.available:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
-        self._wait_handed(run)  # a follow-up before it being handed on first
-        if self._state(run["id"]) not in ("starting", "running") and not run.get("start_op"):
+        waited = self._wait_handed(run)  # a follow-up before it being handed on first
+        if waited and self._state(run["id"]) != "starting":
             return  # stopped (or wiped) while it waited
         prev = None if run.get("start_op") else self._previous(run)  # one with an operation: a new conversation
-        if prev is not None and prev.get("session_id") and \
+        if waited and prev is not None and prev.get("session_id") and \
                 self._stopped_since(dict(run, session_id=prev["session_id"]), float(run["created"])):
             # its conversation was stopped after it was asked (it waited its turn meanwhile): stopped with it
             with self._lock(run["id"]):
@@ -1046,14 +1052,8 @@ class AgentRunner:
             return None
         try:
             todos = self.hub.todos()
-            reporting = self.hub.reporter_state(conv)
         except HubError as e:
             log.info("/agent follow-up: the to-dos could not be read (HTTP %s %s): the conversation is asked", e.status, e.code)
-            return None
-        if reporting != "reporting":
-            # stopped (its task notices dropped until it is asked again), or no more a reporting conversation (they
-            # go to the main conversation): a result would never come back here
-            log.info("/agent follow-up: the conversation's task notices do not come back here (%s): it is asked", reporting)
             return None
         open_ = [t for t in todos if t.get("origin") == conv and not t.get("done_at")
                  and (t.get("kind") or "") in ("", "todo")]
@@ -1067,6 +1067,16 @@ class AgentRunner:
         if not agents:
             return None
         a = agents[0]  # the hub lists the active ones first, the latest linked first
+        try:
+            reporting = self.hub.reporter_state(conv)
+        except HubError as e:
+            log.info("/agent follow-up: the reporting conversations could not be read (HTTP %s)", e.status)
+            return None
+        if reporting != "reporting":
+            # stopped (its task notices dropped until it is asked again), or no more a reporting conversation (they
+            # go to the main conversation): a result would never come back here
+            log.info("/agent follow-up: the conversation's task notices do not come back here (%s): it is asked", reporting)
+            return None
         target = {"todo_id": str(todo.get("id") or ""), "machine_id": a["machine_id"], "session_id": a["session_id"]}
         return target if self._still_on(target) else None
 
@@ -1129,6 +1139,8 @@ class AgentRunner:
             cur.pop("forwarding", None)
             cur.pop("forward_pending", None)
             stopped = self._stopped_since(cur, float(cur["created"]))
+            for k in ("machine_id", "session_id", "continued", "asked"):  # its own once it is sent, as before
+                cur.pop(k, None)
             if stopped:
                 cur["state"], cur["stopped_at"] = "stopped", time.time()
             self.store.run_put(cur)
@@ -1166,6 +1178,7 @@ class AgentRunner:
         text = self._forward_text(run, row, target)
         maybe = resumed  # sent before the restart, perhaps
         tries = 0
+        held = False  # in, but held at the Agent's computer till something there is answered
 
         def unsure(why: str) -> None:
             if maybe:
@@ -1221,11 +1234,13 @@ class AgentRunner:
                         return gone()
             tries += 1
             try:
-                self.hub.send_message(target["machine_id"], target["session_id"], text, cmid)
+                res = self.hub.send_message(target["machine_id"], target["session_id"], text, cmid) or {}
+                held = bool(isinstance(res, dict) and res.get("waits_on_computer"))
                 break
             except HubError as e:
                 log.warning("/agent follow-up could not reach the task's Agent: HTTP %s %s", e.status, e.code)
                 if e.code == "peer_held":
+                    held = True
                     break  # in the Agent's session, held for approval at its computer: handed on
                 refused = (not e.unsent and not e.unreachable and 400 <= e.status < 500  # an answer read whole
                            and e.status not in (408, 429) and e.delivered in ("", "none"))
@@ -1247,6 +1262,8 @@ class AgentRunner:
                 cur.pop("forward_pending", None)
                 cur.pop("forwarding", None)
                 cur.update({"forward": dict(target), "ours_seen": True})
+                if held:
+                    cur["forward_held"] = True  # it reads it once what holds it is answered at its computer
                 if stopped and cur["state"] != "stopped":
                     cur["state"], cur["stopped_at"] = "stopped", time.time()
                 elif not stopped:
@@ -1289,7 +1306,8 @@ class AgentRunner:
             return
         self._end_reaction(run_id, "done")  # taken: the note says where it went
         key = "agent:%s:forwarded" % run_id
-        mid = self._post_once(cur, key, FORWARDED_NOTE, **self._where(cur))
+        note = FORWARDED_NOTE + (HELD_NOTE if cur.get("forward_held") else "")
+        mid = self._post_once(cur, key, note, **self._where(cur))
         sent = self.store.send_get(key)
         with self._lock(run_id):
             cur = self.store.run_get(run_id)
@@ -1566,6 +1584,7 @@ class AgentRunner:
             if not page or not res.get("more_after"):
                 break
         ended = interrupted = False
+        interrupted_at = 0.0
         if items:
             with self._lock(run["id"]):
                 cur = self.store.run_get(run["id"])
@@ -1589,6 +1608,7 @@ class AgentRunner:
                         ended = True
                     elif kind == "notice" and _interrupted(it.get("text") or ""):
                         interrupted = True
+                        interrupted_at = _item_time(it)
                 cur["ours_seen"] = ours
                 cur["last_text"] = last_text
                 cur["answered"] = answered
@@ -1604,7 +1624,8 @@ class AgentRunner:
                 cur = self.store.run_get(run["id"])
                 if cur is None or cur["state"] != "running":
                     return
-                cur["state"], cur["stopped_at"] = "stopped", time.time()
+                # when it was stopped in the app (the item's own time; long ago when unknown), not when it was seen
+                cur["state"], cur["stopped_at"] = "stopped", interrupted_at or 1.0
                 self.store.run_put(cur)
             self._post_once(cur, "agent:%s:app-stop" % run["id"], "已在 Persona 里停止", **self._where(cur))
         elif ended:
@@ -2185,6 +2206,9 @@ class AgentRunner:
                 return
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
+        if before == "starting" and cur.get("forwarding") and not cur.get("forward_pending"):
+            # being looked up: nothing of it went anywhere, so the stop is its alone (as of any request not sent yet)
+            cur = dict(cur, machine_id="", session_id="")
         for other in (self._same_conversation(cur) if before != "stopped" else []):
             # what this stop stops at the hub is theirs too: a turn still running, a follow-up handed to the task's
             # Agent and waiting for its result (an earlier stop that reached nothing here stops nothing more)
@@ -2263,6 +2287,18 @@ def _hub_words(e: HubError) -> str:
     if e.unreachable:  # the relay's own words are English and say nothing more
         return "这台电脑和 Persona 之间的网络断了"
     return (e.message or "hub 没有回答").rstrip("。.")
+
+
+def _item_time(it: dict) -> float:
+    """A transcript item's time (its ts, RFC 3339) as a timestamp; 0 when it has none that reads."""
+    from datetime import datetime
+    ts = str(it.get("ts") or "").strip()
+    if not ts:
+        return 0.0
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _interrupted(text: str) -> bool:

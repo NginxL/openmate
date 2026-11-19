@@ -180,6 +180,28 @@ class ForwardTest(unittest.TestCase):
         h.http.send_refused["agent-1"] = (409, "peer_held", "unknown")
         msg, run = forwarded(self, h, first, sid)
         self.assertEqual(len([it for it in h.http.sessions["agent-1"]["items"] if it.get("client_msg_id")]), 1)
+        note = [x for x in h.sent() if FORWARDED in x["text"]][-1]["text"]
+        self.assertIn("电脑上有个确认还没处理", note, "the user is told it waits at the Agent's computer")
+
+    def test_taken_while_its_computer_holds_a_dialog_says_so(self):
+        h, first, run1, sid = dispatched(self)
+        h.http.send_hook["agent-1"] = lambda: (200, {"ok": True, "waits_on_computer": True})
+        forwarded(self, h, first, sid)
+        self.assertIn("电脑上有个确认还没处理", [x for x in h.sent() if FORWARDED in x["text"]][-1]["text"])
+
+    def test_a_stop_quoting_a_follow_up_being_looked_up_stops_it_alone(self):
+        """Nothing of it went anywhere yet: the stop is its own, as for any request not sent; the conversation and
+        its task go on."""
+        h, first, run1, sid = dispatched(self)
+        h.http.todos_delay = 1.0
+        b = follow_up(h, first, "/agent 顺便把 README 也改一下")
+        wait_until(lambda: [r for r in h.http.requests if r["path"] == "/api/v1/todos"], what="the lookup")
+        h.world.push(TEAM, "me", "/stop", root_id=first.id, thread_id=first.id, parent_id=b.id, placement="thread")
+        wait_until(lambda: run_of(h, b)["state"] == "stopped", what="b stopped")
+        time.sleep(1.5)
+        self.assertFalse(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), "the conversation goes on")
+        self.assertFalse(h.http.messages_to("mac-agent", "agent-1"))
+        self.assertFalse(h.http.messages_to("mac-example", sid))
 
     def test_an_agent_moved_before_anything_went_out_asks_the_conversation(self):
         h, first, run1, sid = dispatched(self)
@@ -460,7 +482,10 @@ class ForwardTest(unittest.TestCase):
         forwarded(self, h, first, sid)
         with h.http.lock:
             h.http.todos[0]["done_at"] = "2026-11-19T12:00:00Z"
+        n = len([r for r in h.http.requests if r["path"] == "/api/v1/assistant/reporters"])
         went_to_the_assistant(self, h, first, sid, "/agent 做完了吗")
+        self.assertEqual(len([r for r in h.http.requests if r["path"] == "/api/v1/assistant/reporters"]), n,
+                         "no to-do to hand on to: nothing more is asked")
 
     def test_an_agent_released_from_the_todo_goes_to_the_assistant(self):
         h, first, run1, sid = dispatched(self)
