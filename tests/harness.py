@@ -217,7 +217,8 @@ class FakeHubHTTP:
         self.todos: List[dict] = []  # GET /api/v1/todos (todos.read): the to-dos, as the hub lists them
         self.todos_status: Optional[int] = None  # an HTTP status GET /api/v1/todos answers instead (403: no todos.read)
         self.todos_delay = 0.0  # seconds GET /api/v1/todos takes
-        self.send_refused: Dict[str, int] = {}  # session id → HTTP status its messages are refused with (nothing sent)
+        self.send_refused: Dict[str, Any] = {}  # session id → status, or (status, code, delivered), its messages get
+        self.send_hook: Dict[str, Any] = {}  # session id → fn() run (once) as a message to it arrives; may answer for it
         self.lost_send_status = (502, "hub_unreachable")  # what a lost send (lost_sends) answers
         self._n = itertools.count(1)
         hub = self
@@ -396,6 +397,11 @@ class FakeHubHTTP:
                 s["stopped"], s["working"] = True, False
                 tasks = s.get("tasks") or []
                 return 200, {"conversation": was, "tasks": tasks, "already": not was and not tasks}
+            if method == "GET" and p == "/api/v1/assistant/reporters":
+                return 200, {"reporters": [dict({"session_id": sid, "machine_id": s["machine"], "at": "2026-11-19T00:00:00Z"},
+                                                **({"stopped_at": "2026-11-19T00:00:01Z", "stopped_by": "lark"}
+                                                   if s.get("stopped") else {}))
+                                           for sid, s in self.sessions.items() if s.get("reporter")]}
             if method == "GET" and p == "/api/v1/todos":
                 if self.todos_delay:
                     self.lock.release()
@@ -432,8 +438,18 @@ class FakeHubHTTP:
                     return 404, {"error": "no such session"}
                 rest = parts[5:]
                 if method == "POST" and rest == ["messages"]:
+                    hook = self.send_hook.pop(sid, None)
+                    if hook is not None:
+                        answer = hook()
+                        if answer is not None:
+                            return answer
                     if sid in self.send_refused:
-                        return self.send_refused[sid], {"error": "refused", "code": "refused"}
+                        r = self.send_refused[sid]
+                        status, code, delivered = r if isinstance(r, tuple) else (r, "refused", "")
+                        if code == "peer_held":  # written, held for approval at its computer
+                            self.add(sid, "user", "text", (body or {}).get("text") or "",
+                                     client_msg_id=(body or {}).get("client_msg_id") or "")
+                        return status, dict({"error": "refused", "code": code}, **({"delivered": delivered} if delivered else {}))
                     kw = {}
                     cmid = (body or {}).get("client_msg_id")
                     if cmid:
@@ -441,6 +457,7 @@ class FakeHubHTTP:
                         if any(it.get("client_msg_id") == cmid for it in s["items"]):
                             return 200, {"ok": True}  # the hub sends each client_msg_id once
                     s["working"] = True
+                    s["stopped"] = False  # asked again: its task notices are told again (the hub's reporter book)
                     self.add(sid, "user", "text", (body or {}).get("text") or "", **kw)
                     if self.lost_sends > 0:
                         self.lost_sends -= 1

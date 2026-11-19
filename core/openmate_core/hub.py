@@ -2,7 +2,8 @@
 environment's PERSONA_HUB_URL / PERSONA_HUB_TOKEN). Only the routes /agent needs, each under the scope the manifest
 asks for (docs/extensions/extensions.md "Hub API: scopes"):
 
-    assistant.ask   POST /api/v1/assistant/conversations, POST …/conversations/{id}/stop
+    assistant.ask   POST /api/v1/assistant/conversations, POST …/conversations/{id}/stop,
+                    GET  /api/v1/assistant/reporters (a reporting conversation stopped at the hub)
     agents.control  POST /api/v1/sessions/{mid}/{sid}/messages (a conversation's, or a task's Agent's), …/interrupt
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
                     GET  /api/v1/sessions?machine_id=&session_id= (the session's status)
@@ -203,6 +204,20 @@ class HubAPI:
         """Every to-do, as the hub lists them (`origin`: the conversation that handed it out; `done_at`; `agents`)."""
         res = self.request("GET", "/api/v1/todos", timeout=30) or {}
         return [t for t in (res.get("todos") or []) if isinstance(t, dict)] if isinstance(res, dict) else []
+
+    def reporter_stopped(self, session_id: str) -> bool:
+        """Whether the hub keeps the reporting conversation stopped (its task notices dropped until it is asked again);
+        False from a hub without the list (404) or one that does not list it."""
+        try:
+            res = self.request("GET", "/api/v1/assistant/reporters", timeout=15) or {}
+        except HubError as e:
+            if e.status == 404:
+                return False
+            raise
+        for r in (res.get("reporters") or []) if isinstance(res, dict) else []:
+            if isinstance(r, dict) and r.get("session_id") == session_id:
+                return bool(r.get("stopped_at"))
+        return False
 
     def stop_conversation(self, session_id: str) -> dict:
         return self.request("POST", "/api/v1/assistant/conversations/%s/stop" % _seg(session_id), {})

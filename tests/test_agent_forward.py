@@ -7,7 +7,7 @@ assistant gets it instead when the Agent is gone, the to-do closed, nothing can 
 import time
 import unittest
 
-from harness import wait_until
+from harness import HubSideError, wait_until
 from test_agent import agent, ask, running, replies
 
 FORWARDED = "已转给正在做这件事的 Agent"
@@ -42,6 +42,7 @@ def run_of(h, msg):
 def forwarded(test, h, first, sid, text="/agent 顺便把 README 也改一下"):
     """The follow-up goes to the Agent, never to the conversation, and the thread is told so."""
     before = len(h.http.messages_to("mac-agent", "agent-1"))
+    asked = len(h.http.messages_to("mac-example", sid))
     msg = follow_up(h, first, text)
     sends = wait_until(lambda: h.http.messages_to("mac-agent", "agent-1")[before:], what="the follow-up at the Agent")
     run = wait_until(lambda: (lambda r: r if r and r["state"] == "forwarded" else None)(run_of(h, msg)), what="forwarded")
@@ -56,7 +57,7 @@ def forwarded(test, h, first, sid, text="/agent 顺便把 README 也改一下"):
     test.assertIn(first.id, body["text"], "the thread it is in")
     test.assertEqual(run["forward"], {"todo_id": "todo_1", "machine_id": "mac-agent", "session_id": "agent-1"})
     test.assertEqual((run["machine_id"], run["session_id"]), ("mac-example", sid), "still the conversation's thread")
-    test.assertFalse(h.http.messages_to("mac-example", sid), "the conversation is not asked")
+    test.assertEqual(len(h.http.messages_to("mac-example", sid)), asked, "the conversation is not asked")
     wait_until(lambda: h.app.store.run_get(run["id"]).get("noted"), what="the note kept with the run")
     return msg, run
 
@@ -135,9 +136,104 @@ class ForwardTest(unittest.TestCase):
         wait_until(lambda: [r for r in h.http.requests if r["path"] == "/api/v1/todos"][1:], what="the lookup")
         follow_up(h, first, "/stop")
         wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), what="the stop")
-        time.sleep(1.5)
+        wait_until(lambda: h.app.store.run_get(run_of(h, msg)["id"])["state"] == "stopped", what="stopped")
+        time.sleep(0.5)
         self.assertEqual(len(h.http.messages_to("mac-agent", "agent-1")), 1, "the stopped follow-up never went")
-        self.assertEqual(h.app.store.run_get(run_of(h, msg)["id"])["state"], "stopped")
+        self.assertFalse(h.http.messages_to("mac-example", sid), "nor did it wake the stopped conversation")
+
+    def test_a_reply_after_the_conversation_was_stopped_is_refused(self):
+        h, first, run1, sid = dispatched(self)
+        msg, run = forwarded(self, h, first, sid)
+        follow_up(h, first, "/stop")
+        wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), what="the stop")
+        wait_until(lambda: [r for r in h.app.store.runs_in_chat(TEAM) if r["state"] == "stopped"], what="stopped")
+        with self.assertRaises(HubSideError) as e:
+            h.tool("agent_reply", request=run1["id"], text="README 也改好了")
+        self.assertIn("已经停止", e.exception.message)
+
+    def test_a_stop_in_persona_asks_the_conversation(self):
+        """Stopped in the app (the hub keeps it stopped, nothing here knows): the conversation is asked, which is what
+        lets its task notices through again; the next follow-up goes to the Agent again."""
+        h, first, run1, sid = dispatched(self)
+        with h.http.lock:
+            h.http.sessions[sid]["stopped"] = True
+        went_to_the_assistant(self, h, first, sid, "/agent 继续做吧")
+        h.http.end_turn(sid)
+        wait_until(lambda: [r for r in h.app.store.runs_in_chat(TEAM) if r["state"] == "running"] == [], what="turn over")
+        forwarded(self, h, first, sid, "/agent 再顺便改个错别字")
+
+    def test_a_request_while_one_is_looked_up_takes_neither_away(self):
+        h, first, run1, sid = dispatched(self)
+        h.http.todos_delay = 1.0
+        b = follow_up(h, first, "/agent 顺便把 README 也改一下")
+        wait_until(lambda: [r for r in h.http.requests if r["path"] == "/api/v1/todos"], what="the lookup")
+        c = follow_up(h, first, "/agent 问助手 进度如何")
+        wait_until(lambda: h.http.messages_to("mac-example", sid), what="the question in the conversation")
+        wait_until(lambda: h.http.messages_to("mac-agent", "agent-1"), what="the follow-up at the Agent")
+        wait_until(lambda: run_of(h, b).get("noted"), what="the follow-up handed on, the thread told")
+        self.assertEqual(run_of(h, b)["state"], "forwarded")
+        self.assertEqual(run_of(h, c)["state"], "running")
+
+    def test_held_for_approval_is_handed_on(self):
+        h, first, run1, sid = dispatched(self)
+        h.http.send_refused["agent-1"] = (409, "peer_held", "unknown")
+        msg, run = forwarded(self, h, first, sid)
+        self.assertEqual(len([it for it in h.http.sessions["agent-1"]["items"] if it.get("client_msg_id")]), 1)
+
+    def test_an_agent_moved_before_anything_went_out_asks_the_conversation(self):
+        h, first, run1, sid = dispatched(self)
+
+        def moved():  # the manager is offline (nothing sent); meanwhile the Agent goes to another to-do
+            h.http.todos[0]["agents"][0]["released_at"] = "2026-11-19T12:00:00Z"
+            h.http.todos.insert(0, {"id": "todo_x", "title": "别的", "origin": "elsewhere", "done_at": None,
+                                    "agents": [{"machine_id": "mac-agent", "session_id": "agent-1"}]})
+            return 503, {"error": "offline", "code": "manager_offline"}
+
+        h.http.send_hook["agent-1"] = moved
+        msg = follow_up(h, first, "/agent 顺便把 README 也改一下")
+        wait_until(lambda: h.http.messages_to("mac-example", sid), what="the follow-up in the conversation")
+        self.assertEqual(len(h.http.messages_to("mac-agent", "agent-1")), 1, "never tried again at the moved Agent")
+        self.assertFalse(h.http.sessions["agent-1"]["items"])
+        self.assertNotIn("forward", run_of(h, msg))
+
+    def test_a_result_before_the_send_answered_goes_under_the_follow_up(self):
+        h, first, run1, sid = dispatched(self)
+        out = {}
+
+        def early():  # the Agent works fast: its result comes back through the conversation before our send returns
+            out["text"] = h.tool("agent_reply", request=run1["id"], text="README 也改好了")
+            return None
+
+        h.http.send_hook["agent-1"] = early
+        msg, run = forwarded(self, h, first, sid)
+        self.assertIn("已回复", out["text"])
+        s = [x for x in h.sent() if x["text"].startswith("README 也改好了")]
+        self.assertEqual([x["reply_to"] for x in s], [msg.id])
+
+    def test_a_reply_asked_again_never_answers_another_follow_up(self):
+        h, first, run1, sid = dispatched(self)
+        b, run_b = forwarded(self, h, first, sid, "/agent 改 README")
+        c, run_c = forwarded(self, h, first, sid, "/agent 改 CHANGELOG")
+        h.tool("agent_reply", request=run1["id"], text="CHANGELOG 改好了")
+        self.assertEqual(h.sent()[-1]["reply_to"], c.id)
+        h.tool("agent_reply", request=run1["id"], text="CHANGELOG 改好了")
+        self.assertEqual(h.app.store.run_get(run_b["id"]).get("replies") or 0, 0, "b is still waiting")
+        h.tool("agent_reply", request=run1["id"], text="README 改好了")
+        self.assertEqual(h.sent()[-1]["reply_to"], b.id)
+
+    def test_a_note_that_did_not_go_out_is_tried_again(self):
+        h, first, run1, sid = dispatched(self)
+        h.world.send_fail = "rejected"  # the chat refuses the next send (the note)
+        msg = follow_up(h, first, "/agent 顺便把 README 也改一下")
+        run = wait_until(lambda: (lambda r: r if r and r["state"] == "forwarded" and r.get("note_tried") else None)(
+            run_of(h, msg)), what="the note tried")
+        self.assertFalse(run.get("noted"))
+        self.assertFalse([s for s in h.sent() if FORWARDED in s["text"]])
+        old = h.app.store.run_get(run["id"])
+        old["note_tried"] = time.time() - 120
+        h.app.store.run_put(old)
+        wait_until(lambda: [s for s in h.sent() if FORWARDED in s["text"] and s["reply_to"] == msg.id], what="the note")
+        wait_until(lambda: h.app.store.run_get(run["id"]).get("noted"), what="kept as told")
 
     def test_a_stopped_conversation_is_asked_again(self):
         """Stopped, the hub drops the conversation's task notices until it is asked again: a result handed on now
@@ -191,9 +287,8 @@ class ForwardTest(unittest.TestCase):
     def test_the_request_the_conversation_knows_is_kept_while_a_follow_up_waits(self):
         h, first, run1, sid = dispatched(self)
         msg, run = forwarded(self, h, first, sid)
-        old = h.app.store.run_get(run1["id"])
-        old["created"] = time.time() - h.app.timing.agent_keep - 60  # older than what is kept
-        h.app.store.run_put(old)
+        h.app.store._tx(lambda db: db.execute("UPDATE runs SET created = ? WHERE id = ?",  # older than what is kept
+                                              (time.time() - h.app.timing.agent_keep - 60, run1["id"])))
         h.app.agent._prune(force=True)
         self.assertIsNotNone(h.app.store.run_get(run1["id"]), "a follow-up still waits on it")
         h.tool("agent_reply", request=run1["id"], text="README 也改好了")
