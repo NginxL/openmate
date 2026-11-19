@@ -362,6 +362,13 @@ class MappingTest(Base):
         self.assertEqual(self.m(chat_id="507", msg_id="118", _placement=none, **bare).root_id, "")
         self.m(chat_id="507", msg_id="119", _placement=none, **bare)
         self.assertEqual(S.chat_info_calls.count("507"), 1)
+        S.chats["508"] = {"id": "508", "name": "示例群"}  # its record does not say which kind of chat
+        self.assertEqual(self.m(chat_id="508", msg_id="123", _placement=none, **bare).root_id, "90", "not known")
+        self.b._kinds["507"] = (0.0, True)  # known as an ordinary group a while ago; now a thread-first one
+        S.chats["507"] = {"id": "507", "type": 2, "name": "示例群", "chatMode": 2}
+        self.assertEqual(self.m(chat_id="507", msg_id="124", _placement=none, **bare).root_id, "90", "read again")
+        self.m(chat_id="506", msg_id="125", _placement=none, **bare)
+        self.assertEqual(S.chat_info_calls.count("506"), 1, "a failure is not asked again per message")
         self.assertEqual(self.m(chat_id="504", chat_type=1, root_id="90", anchor="90", content_data=t).placement, "",
                          "a direct chat")
         self.b._peers["501"] = "7003"  # known as a direct chat, though the push did not say so
@@ -891,6 +898,7 @@ class ReadTest(Base):
         self.assertEqual(len(self.b.history("622", None, 10)), 5)
         S.chats["622"] = R.ConnectionError("down")
         self.b._chats.pop("622", None)
+        self.b._kinds.pop("622", None)
         S.api_calls.clear()
         n = len(S.chat_info_calls)
         msgs = self.b.history("622", 6, 10)

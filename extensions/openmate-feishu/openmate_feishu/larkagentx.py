@@ -101,6 +101,7 @@ DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage
 FIRST_POSITION = 1  # LarkAgentX reads history from position 1 up
 HISTORY_ROUNDS = 4  # gaps (recalled messages) are filled by asking for older positions at most this often
 CHAT_TTL = 600.0
+KIND_UNKNOWN_TTL = 60.0  # a group whose kind could not be read is asked again after this (not once per message)
 NAME_TTL = 6 * 3600.0
 NAME_MISS_TTL = 600.0
 QR_LIFE = 300.0
@@ -533,6 +534,7 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
+        self._kinds: Dict[str, Tuple[float, bool]] = {}  # chat id → (until, known as an ordinary group: _plain_group)
         self._synced: Dict[str, str] = {}  # message id → how it also went to the main stream (synced_mark), the newest
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
@@ -633,6 +635,7 @@ class LarkXBackend(Backend):
                 old = self._client
                 if self._me is not None and self._me.id != acct.id:
                     self._chats.clear()  # another account: what the one before was told is not this one's
+                    self._kinds.clear()
                     self._names.clear()
                     self._peers.clear()
                     self._doc_writer = None
@@ -776,6 +779,7 @@ class LarkXBackend(Backend):
             self._qr.clear()
             self._names.clear()
             self._chats.clear()
+            self._kinds.clear()
             self._peers.clear()
             self._doc_writer = None
         with self._groups_mu:
@@ -1456,22 +1460,32 @@ class LarkXBackend(Backend):
             return False
 
     def _plain_group(self, client, chat_id: str, chat_type=None) -> bool:
-        """Whether the chat is known as an ordinary group (not thread-first): from the push's chat type, the chats
-        read, or the chat's own record read now (and kept); False when it cannot tell."""
-        if chat_type in (3, "TOPIC_GROUP"):
+        """Whether the chat is known as an ordinary group (not thread-first): its own record, read now, says a group
+        (entities.Chat.Type GROUP) in no thread mode. Kept CHAT_TTL; not known (not read, no type, a failure, a
+        thread-first group, the push's chat type says one) is False, and a failure is asked again only after
+        KIND_UNKNOWN_TTL."""
+        if chat_type in (3, "TOPIC_GROUP") or client is None:
             return False
+        now = time.monotonic()
         with self._lock:
-            hit = self._chats.get(chat_id)
-        if hit is None:
-            if client is None:
-                return False
-            try:
-                _, chat = self._chat_read(client, chat_id)
-            except Exception:
-                return False
-        else:
-            chat = hit[1]
-        return chat.kind == "group" and not chat.topic
+            hit = self._kinds.get(chat_id)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        plain, ttl = False, KIND_UNKNOWN_TTL
+        try:
+            info, _ = self._chat_read(client, chat_id)
+            dec = self.lx.decoders
+            if "type" in info:
+                ttl = CHAT_TTL
+                plain = dec.enum_to_int(info.get("type")) == 2 and not dec.is_thread_chat(info)
+        except Exception:
+            pass
+        with self._lock:
+            if self._client is client:  # still the account it was asked for
+                self._kinds[chat_id] = (now + ttl, plain)
+                while len(self._kinds) > SYNCED_KEEP:
+                    del self._kinds[next(iter(self._kinds))]
+        return plain
 
     def _learn_peer(self, chat_id: str, user_id: str, me_id: str) -> None:
         """The other person of a direct chat, from their message in it (the chat's own record may have no name), for
