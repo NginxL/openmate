@@ -73,7 +73,7 @@
               "kind": "im",
               "connector": "matefeishu",
               "bind": "qr",
-              "description": "在你指定的一个飞书会话（扩展设置里的「Persona 渠道会话」）里和 Persona 对话：在那里发 /agent 交给 Persona，回答以你的身份回到提问处；Agent 要你回答或批准的问题也发到那里，在 App 里答了会自动撤回。没指定会话时不发任何消息。",
+              "description": "把你指定的一个飞书会话（扩展设置里的「Persona 渠道会话」）当成你和 Persona 的对话：你在那里说的话都交给 Persona，回答以你的身份回到提问处；Agent 要你回答或批准的问题也发到那里，直接回复就是作答，在 App 里答了会自动撤回。没指定会话时什么都不收也不发。",
               "capabilities": {
                 "images_in": false,
                 "files_in": false,
@@ -219,7 +219,7 @@
             "channel_chat": {
               "type": "string",
               "title": "Persona 渠道会话",
-              "description": "「设置 › 渠道」里的飞书（OpenMate）只在这个会话里收发：填会话名称（和飞书里显示的一样，只能有一个会话叫这个名字）或会话 id。在这里你发的 /agent 交给 Persona 的渠道流程（默认进主对话，可在「设置 › 渠道」改），回答以你的身份回到提问处；Agent 要你回答或批准的问题也以你的身份发到这里，直接回复就是作答，在 App 里答了会自动撤回。这个会话里别人能看到这些消息，建议用只有你自己的群。留空就不用（默认），渠道不发任何消息，/agent 照旧。",
+              "description": "「设置 › 渠道」里的飞书（OpenMate）只在这个会话里收发：填会话名称（和飞书里显示的一样，只能有一个会话或一个人叫这个名字）或这个扩展存过的会话 id。在这里你自己说的每一句都交给 Persona 的渠道流程（开头的 /agent 可写可不写；默认进主对话，可在「设置 › 渠道」改），回答以你的身份回到提问处；Agent 要你回答或批准的问题也以你的身份发到这里，直接回复就是作答，在 App 里答了会自动撤回。这个会话里别人能看到这些消息，请用只有你自己的群。留空就不用（默认），渠道什么都不收也不发，/agent 照旧。",
               "maxLength": 256
             },
             "agent_reply_header": {
@@ -405,8 +405,8 @@
       "packages": [
         {
           "url": "packages/openmate-feishu/0.11.39/openmate-feishu-0.11.39.tar.gz",
-          "sha256": "5ec2e3495568d885a624e2fc5cb884cfabb982c49d77fbf05649434b5f531719",
-          "size": 247293
+          "sha256": "8b9ecb0b13ea1ec7a238353d5a41578cea193c08f3043d346380d9f1f7ea3613",
+          "size": 248767
         }
       ]
     },
@@ -477,7 +477,7 @@
               "kind": "im",
               "connector": "matewechat",
               "bind": "qr",
-              "description": "在你指定的一个微信会话（扩展设置里的「Persona 渠道会话」）里和 Persona 对话：在那里发 /agent 交给 Persona，回答以你的身份回到这个会话；Agent 要你回答或批准的问题也发到那里，直接回复就是作答（微信撤回不了，在 App 里答了只是不再等这里的回复）。没指定会话时不发任何消息。",
+              "description": "把你指定的一个微信会话（扩展设置里的「Persona 渠道会话」）当成你和 Persona 的对话：你在那里说的话都交给 Persona，回答以你的身份回到这个会话；Agent 要你回答或批准的问题也发到那里，直接回复就是作答（微信撤回不了，在 App 里答了的问题会留在会话里）。没指定会话时什么都不收也不发。",
               "capabilities": {
                 "images_in": false,
                 "files_in": false,
@@ -540,7 +540,7 @@
             "channel_chat": {
               "type": "string",
               "title": "Persona 渠道会话",
-              "description": "「设置 › 渠道」里的微信（OpenMate）只在这个会话里收发：填会话名称（和微信里显示的一样，只能有一个会话叫这个名字）或会话 id。在这里你发的 /agent 交给 Persona 的渠道流程（默认进主对话，可在「设置 › 渠道」改），回答以你的身份回到这个会话；Agent 要你回答或批准的问题也以你的身份发到这里，直接回复就是作答（微信撤回不了，在 App 里答了只是不再等这里的回复）。这个会话里别人能看到这些消息，建议用只有你自己的会话。留空就不用（默认），渠道不发任何消息，/agent 照旧。",
+              "description": "「设置 › 渠道」里的微信（OpenMate）只在这个会话里收发：填会话名称（和微信里显示的一样，只能有一个会话或一个人叫这个名字）或这个扩展存过的会话 id。在这里你自己说的每一句都交给 Persona 的渠道流程（开头的 /agent 可写可不写；默认进主对话，可在「设置 › 渠道」改），回答以你的身份回到这个会话；Agent 要你回答或批准的问题也以你的身份发到这里，直接回复就是作答（微信撤回不了，在 App 里答了的问题会留在会话里）。这个会话里别人能看到这些消息，请用只有你自己的会话。留空就不用（默认），渠道什么都不收也不发，/agent 照旧。",
               "maxLength": 256
             },
             "agent_reply_header": {
@@ -694,8 +694,8 @@
       "packages": [
         {
           "url": "packages/openmate-wechat/0.1.37/openmate-wechat-0.1.37.tar.gz",
-          "sha256": "e6d8f00679926e1d1ddc114cc3906afb080d5eba0163c7e111b9b0a1b3580624",
-          "size": 223128
+          "sha256": "501ef5be5d8876dcf7474cea1e39648c6c763ed813d3d8c58163ab237326f1bf",
+          "size": 224613
         }
       ]
     }
