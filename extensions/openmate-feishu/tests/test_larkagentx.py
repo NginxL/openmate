@@ -353,6 +353,10 @@ class MappingTest(Base):
                  "sync_root": ""}
         q = self.m(msg_id="130", _placement=unset, **bare)
         self.assertEqual((q.placement, q.root_id, q.thread_id), ("chat", "", ""), "unset: a quote in the main stream")
+        with self.assertLogs("openmate.larkx", level="INFO") as logs:  # the account's own quote says what it carried
+            self.m(msg_id="135", from_id=ME, _placement=unset, **bare)
+        self.assertTrue(any("own message 135: threadMessageType=unset" in x and "read as chat" in x
+                            for x in logs.output), logs.output)
         # unset, with the marks of a thread reply also sent to the chat: what it was read as stays
         synced = dict(unset, sync_type=2, sync_root="90")
         kept = self.m(msg_id="116", _placement=synced, **bare)
@@ -370,6 +374,14 @@ class MappingTest(Base):
         self.assertEqual(S.chat_info_calls.count("507"), 1)
         S.chats["508"] = {"id": "508", "name": "示例群"}  # its record does not say which kind of chat
         self.assertEqual(self.m(chat_id="508", msg_id="123", _placement=none, **bare).root_id, "90", "not known")
+        self.assertEqual(self.m(chat_id="508", msg_id="132", _placement=none, **bare).root_id, "90", "nor later")
+        S.chats["508"] = {"id": "508", "type": 2, "name": "示例群"}  # its record says it now
+        self.b._chats["508"] = (0.0, self.b._chats["508"][1])
+        self.assertEqual(self.m(chat_id="508", msg_id="133", _placement=none, **bare).root_id, "")
+        # a direct chat the push says is one: nothing asked
+        n = len(S.chat_info_calls)
+        self.m(chat_id="515", chat_type=1, msg_id="134", _placement=none, **bare)
+        self.assertEqual(len(S.chat_info_calls), n)
         self.b._chats["507"] = (0.0, self.b._chats["507"][1])  # known as ordinary a while ago, thread-first now
         S.chats["507"] = {"id": "507", "type": 2, "name": "示例群", "chatMode": 2}
         self.assertEqual(self.m(chat_id="507", msg_id="124", _placement=none, **bare).root_id, "90", "read again")

@@ -539,6 +539,7 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
+        self._untyped: Set[str] = set()  # chats whose record, last read, said no type: not known as ordinary groups
         self._synced: Dict[str, str] = {}  # message id → how it also went to the main stream (synced_mark), the newest
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
@@ -639,6 +640,7 @@ class LarkXBackend(Backend):
                 old = self._client
                 if self._me is not None and self._me.id != acct.id:
                     self._chats.clear()  # another account: what the one before was told is not this one's
+                    self._untyped.clear()
                     self._names.clear()
                     self._peers.clear()
                     self._doc_writer = None
@@ -782,6 +784,7 @@ class LarkXBackend(Backend):
             self._qr.clear()
             self._names.clear()
             self._chats.clear()
+            self._untyped.clear()
             self._peers.clear()
             self._doc_writer = None
         with self._groups_mu:
@@ -1438,7 +1441,9 @@ class LarkXBackend(Backend):
                 self._synced[msg_id] = mark
                 while len(self._synced) > SYNCED_KEEP:
                     del self._synced[next(iter(self._synced))]
-        if mine and marks is not None and not marks.get("history") and (in_thread or mark or marks.get("thread_type")):
+        quote = bool(_id(d.get("root_id")))
+        if (mine and marks is not None and not marks.get("history")
+                and (in_thread or mark or marks.get("thread_type") or quote)):
             log.info("own message %s: threadMessageType=%s sendToChat=%s syncToChatMessageType=%d related=%s "
                      "syncRoot=%s; read as %s", msg_id,
                      marks.get("thread_type", 0) if marks.get("thread_known", True) else "unset",
@@ -1471,15 +1476,16 @@ class LarkXBackend(Backend):
         one signed in: the chats read (while still fresh), else its own record read now (and kept), which must say a
         group (entities.Chat.Type GROUP) in no thread mode. Not known (a failure, no type, the push's chat type says
         thread-first, another account or none signed in): False."""
-        if chat_type in (3, "TOPIC_GROUP") or client is None or not me_id:
+        if chat_type in (CHAT_P2P, 3, "P2P", "TOPIC_GROUP") or client is None or not me_id:
             return False
         with self._lock:
             me = self._me
             if me is None or me.id != me_id:
                 return False
             hit = self._chats.get(chat_id)
+            untyped = chat_id in self._untyped
         if hit is not None and hit[0] > time.monotonic():
-            return hit[1].kind == "group" and not hit[1].topic
+            return not untyped and hit[1].kind == "group" and not hit[1].topic
         try:
             info, chat = self._chat_read(client, chat_id, me)
         except Exception:
@@ -1777,6 +1783,10 @@ class LarkXBackend(Backend):
         with self._lock:
             if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
                 self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
+                if "type" in info:
+                    self._untyped.discard(chat_id)
+                elif len(self._untyped) < SYNCED_KEEP:
+                    self._untyped.add(chat_id)
                 last = _int(info.get("lastMessagePosition"))
                 if last > self._last_pos.get(chat_id, 0):
                     self._last_pos[chat_id] = last
