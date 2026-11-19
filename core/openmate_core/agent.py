@@ -263,43 +263,19 @@ class AgentRunner:
         except Exception:
             log.exception("the guest quota ledger could not be filled from the kept runs")
         self._prune(force=True)
-        # cut off while they waited their turn: nothing went out, so they start again, in the order asked
-        again = sorted((r for r in self.store.runs_in_state(["starting"]) if r.get("queued") and self.enabled
-                        and self.hub.available and time.time() - float(r.get("created") or 0) < self.app.timing.agent_fresh),
-                       key=lambda r: float(r.get("created") or 0))
+        # Starts cut off by the restart: those that can go on are queued per thread in the order asked (none overtakes
+        # one before it), then go on; the others are told
+        lost = []
+        again = []
+        for run in sorted(self.store.runs_in_state(["starting"]), key=lambda r: float(r.get("created") or 0)):
+            how = self._resume_how(run)
+            (again if how else lost).append((run, how))
         with self._mu:
-            for run in again:
+            for run, _ in again:
                 self._turns.setdefault((run["chat_id"], run["thread_key"]), []).append(run["id"])
-        for run in again:
-            log.info("an /agent request cut off while it waited its turn starts again")
-            row = self.store.message(run["chat_id"], run["request_id"]) or {"chat_id": run["chat_id"], "id": run["request_id"]}
-            threading.Thread(target=self._start_run, args=(run, row), name="openmate-agent-start", daemon=True).start()
-        for run in self.store.runs_in_state(["starting"]):
-            if any(r["id"] == run["id"] for r in again):
-                continue
-            fresh = time.time() - float(run.get("created") or 0) < START_REPLAY_MOST  # the hub keeps receipts 30 days
-            if run.get("forward_pending") and self.enabled and self.hub.available \
-                    and time.time() - float(run.get("created") or 0) < self.app.timing.agent_keep:
-                # a follow-up on its way to the task's Agent: sent again under its client_msg_id (the hub sends each
-                # once), so it is never handed on twice and never half handed on
-                log.info("an /agent follow-up cut off by a restart is sent again under its message id")
-                threading.Thread(target=self._resume_forward, args=(run,), name="openmate-agent-forward",
-                                 daemon=True).start()
-                continue
-            if run.get("forwarding") and self.enabled and self.hub.available \
-                    and time.time() - float(run.get("created") or 0) < self.app.timing.agent_fresh:
-                # cut off while the task's Agent was looked up: nothing went out anywhere, so it starts again
-                log.info("an /agent follow-up cut off while its Agent was looked up starts again")
-                threading.Thread(target=self._resume_start, args=(run,), name="openmate-agent-start",
-                                 daemon=True).start()
-                continue
-            if run.get("start_op") and self.enabled and self.hub.available and fresh:
-                # a new conversation under an operation id: the same request again gets the hub's first answer
-                # (the conversation it started, if it did), never a second start
-                log.info("an /agent start cut off by a restart is asked again under its operation id")
-                threading.Thread(target=self._resume_start, args=(run,), name="openmate-agent-start",
-                                 daemon=True).start()
-                continue
+        for run, how in again:
+            threading.Thread(target=self._resume, args=(run, how), name="openmate-agent-start", daemon=True).start()
+        for run, _ in lost:
             # Cut off by a restart before the conversation was surely started: starting it again could start two.
             with self._lock(run["id"]):
                 run["state"] = "failed"
@@ -321,6 +297,38 @@ class AgentRunner:
             log.info("resuming %d running /agent request(s)", resumed)
         self._thread = threading.Thread(target=self._loop, name="openmate-agent", daemon=True)
         self._thread.start()
+
+    def _resume_how(self, run: dict) -> str:
+        """How a start cut off by a restart goes on ("" when it cannot: it is told instead)."""
+        if not (self.enabled and self.hub.available):
+            return ""
+        age = time.time() - float(run.get("created") or 0)
+        if run.get("forward_pending") and age < self.app.timing.agent_keep:
+            # a follow-up on its way to the task's Agent: sent again under its client_msg_id (the hub sends each
+            # once), so it is never handed on twice and never half handed on
+            return "forward"
+        if (run.get("queued") or run.get("forwarding")) and age < self.app.timing.agent_fresh:
+            # cut off while it waited its turn, or while the task's Agent was looked up: nothing went out
+            return "again"
+        if run.get("start_op") and age < START_REPLAY_MOST:  # the hub keeps receipts 30 days
+            # a new conversation under an operation id: the same request again gets the hub's first answer (the
+            # conversation it started, if it did), never a second start
+            return "op"
+        return ""
+
+    def _resume(self, run: dict, how: str) -> None:
+        log.info("an /agent start cut off by a restart goes on (%s)", how)
+        try:
+            if how == "forward":
+                self._resume_forward(run)
+            elif how == "again":
+                row = self.store.message(run["chat_id"], run["request_id"]) or {"chat_id": run["chat_id"],
+                                                                                "id": run["request_id"]}
+                self._start_run_now(run, row)
+            else:
+                self._resume_start(run)
+        finally:
+            self._turn_done(run)
 
     def stop(self) -> None:
         """Stop polling; the store closes next, so wait (a little) for a poll under way."""
@@ -773,8 +781,7 @@ class AgentRunner:
                 q = self._turns.get(key) or []
                 if run["id"] not in q or q[0] == run["id"]:
                     return
-                head = self.store.run_get(q[0])
-                if head is None or head["state"] != "starting":  # gone (wiped, pruned) or past its start: not waited for
+                if self.store.run_get(q[0]) is None:  # gone (wiped, pruned): not waited for
                     q.pop(0)
                     self._turned.notify_all()
                     continue
@@ -823,6 +830,8 @@ class AgentRunner:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
         self._wait_turn(run)  # the thread's requests before it first
+        if self._stop.is_set():
+            return  # shutting down: still queued, a restart starts it again
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur is None or cur["state"] != "starting":
@@ -1608,7 +1617,7 @@ class AgentRunner:
                 cur = self.store.run_get(run["id"])
                 if cur is None or cur["state"] != "running":
                     return
-                cur["state"] = "stopped"
+                cur["state"], cur["stopped_at"] = "stopped", time.time()
                 self.store.run_put(cur)
             self._post_once(cur, "agent:%s:app-stop" % run["id"], "已在 Persona 里停止", **self._where(cur))
         elif ended:
@@ -2181,8 +2190,10 @@ class AgentRunner:
                 return  # gone meanwhile (pruned, or wiped by another account's sign-in): nothing here to stop
             before = cur["state"]
             cur["state"] = "stopped"
-            if before != "stopped" or not cur.get("stopped_at"):
-                cur["stopped_at"] = time.time()  # a second stop of it reaches nothing: the first one's time stays
+            if before != "stopped":
+                cur["stopped_at"] = time.time()
+            elif not cur.get("stopped_at"):  # a second stop of it reaches nothing: when it was stopped stays
+                cur["stopped_at"] = float(cur.get("updated") or time.time())
             if not self.store.run_put(cur):
                 return
         if before in ACTIVE:

@@ -497,6 +497,29 @@ class StopTest(unittest.TestCase):
         self.assertEqual(len(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid)), 1)
         self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"), "it still answers")
 
+    def test_after_a_restart_a_queued_request_goes_on_in_the_conversation_started_before_it(self):
+        """a's new conversation was on its way (an operation id, no session yet) and b waited behind it: after the
+        restart a is asked again under its operation first, and b goes on in the conversation it got, never a second."""
+        h = agent(self)
+        first = h.world.push("chat_example_team", "me", "第一个的原文")
+        second = h.world.push("chat_example_team", "me", "接着问的原文", root_id=first.id)
+        now = time.time()
+        a = {"id": "omr_" + "5" * 20, "chat_id": "chat_example_team", "request_id": first.id, "thread_key": first.id,
+             "root_id": "", "state": "starting", "created": now - 2, "request_text": "第一个的原文", "replies": 0,
+             "reply_inflight": 0, "reply_ids": [], "start_op": "op-example-1", "start_prompt": "第一个的原文"}
+        b = {"id": "omr_" + "6" * 20, "chat_id": "chat_example_team", "request_id": second.id, "thread_key": first.id,
+             "root_id": first.id, "state": "starting", "created": now - 1, "queued": True, "request_text": "接着问的原文",
+             "replies": 0, "reply_inflight": 0, "reply_ids": []}
+        h.app.store.run_put(a)
+        h.app.store.run_put(b)
+        h.http.start_pending = 3  # the hub takes a moment to settle a's start
+        h2 = h.restart()
+        h2.wait_ok()
+        wait_until(lambda: h2.app.store.run_get(b["id"])["state"] == "running", what="b going on")
+        self.assertEqual(len({s["session_id"] for s in [h2.app.store.run_get(a["id"]), h2.app.store.run_get(b["id"])]}), 1)
+        self.assertEqual(len([st for st in h2.http.starts() if st["op"] == "op-example-1"]) >= 1, True)
+        self.assertEqual(len({st["op"] for st in h2.http.starts()}), 1, "one conversation")
+
     def test_a_request_cut_off_while_it_waited_its_turn_starts_again(self):
         h = agent(self)
         first = ask(h, "/agent 第一个")
