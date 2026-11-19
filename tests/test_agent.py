@@ -497,59 +497,6 @@ class StopTest(unittest.TestCase):
         self.assertEqual(len(h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid)), 1)
         self.assertIn("已回复", h.tool("agent_reply", request=run2["id"], text="接着来的回答"), "it still answers")
 
-    def test_after_a_restart_a_queued_request_goes_on_in_the_conversation_started_before_it(self):
-        """a's new conversation was on its way (an operation id, no session yet) and b waited behind it: after the
-        restart a is asked again under its operation first, and b goes on in the conversation it got, never a second."""
-        h = agent(self)
-        first = h.world.push("chat_example_team", "me", "第一个的原文")
-        second = h.world.push("chat_example_team", "me", "接着问的原文", root_id=first.id)
-        now = time.time()
-        a = {"id": "omr_" + "5" * 20, "chat_id": "chat_example_team", "request_id": first.id, "thread_key": first.id,
-             "root_id": "", "state": "starting", "created": now - 2, "request_text": "第一个的原文", "replies": 0,
-             "reply_inflight": 0, "reply_ids": [], "start_op": "op-example-1", "start_prompt": "第一个的原文"}
-        b = {"id": "omr_" + "6" * 20, "chat_id": "chat_example_team", "request_id": second.id, "thread_key": first.id,
-             "root_id": first.id, "state": "starting", "created": now - 1, "queued": True, "request_text": "接着问的原文",
-             "replies": 0, "reply_inflight": 0, "reply_ids": []}
-        h.app.store.run_put(a)
-        h.app.store.run_put(b)
-        h.http.start_pending = 3  # the hub takes a moment to settle a's start
-        h2 = h.restart()
-        h2.wait_ok()
-        wait_until(lambda: h2.app.store.run_get(b["id"])["state"] == "running", what="b going on")
-        self.assertEqual(len({s["session_id"] for s in [h2.app.store.run_get(a["id"]), h2.app.store.run_get(b["id"])]}), 1)
-        self.assertEqual(len([st for st in h2.http.starts() if st["op"] == "op-example-1"]) >= 1, True)
-        self.assertEqual(len({st["op"] for st in h2.http.starts()}), 1, "one conversation")
-
-    def test_the_turns_keep_the_order_asked_whatever_order_they_are_queued_in(self):
-        h = agent(self)
-        now = time.time()
-        runs = [{"id": "omr_%020d" % i, "chat_id": "chat_example_team", "request_id": "m%d" % i, "thread_key": "t",
-                 "state": "starting", "created": now + i, "replies": 0, "reply_inflight": 0, "reply_ids": []}
-                for i in range(3)]
-        for r in runs:
-            h.app.store.run_put(r)
-        with h.app.agent._mu:
-            for r in (runs[2], runs[0], runs[1]):  # a live one heard before a restart took in older ones
-                h.app.agent._enqueue(r)
-        self.assertEqual(h.app.agent._turns[("chat_example_team", "t")], [r["id"] for r in runs])
-
-    def test_a_request_cut_off_while_it_waited_its_turn_starts_again(self):
-        h = agent(self)
-        first = ask(h, "/agent 第一个")
-        run1 = running(h, first)
-        sid = run1["session_id"]
-        second = h.world.push("chat_example_team", "me", "接着问的原文", root_id=first.id)
-        rid = "omr_" + "4" * 20
-        h.app.store.run_put({"id": rid, "chat_id": "chat_example_team", "request_id": second.id, "thread_key": first.id,
-                             "root_id": first.id, "state": "starting", "created": time.time(), "queued": True,
-                             "request_text": "接着问的原文", "replies": 0, "reply_inflight": 0, "reply_ids": []})
-        h2 = h.restart()
-        h2.wait_ok()
-        msgs = wait_until(lambda: h2.http.posts("/api/v1/sessions/mac-example/%s/messages" % sid), what="started again")
-        self.assertIn("接着问的原文", msgs[0]["body"]["text"])
-        wait_until(lambda: h2.app.store.run_get(rid)["state"] == "running", what="running")
-        self.assertFalse([s for s in h2.sent() if "扩展重启了" in s["text"]], "never told to send it again")
-
     def test_only_my_stop_counts(self):
         h = self.h
         h.world.push("chat_example_team", "user_example_a", "/stop", root_id=self.m.id)

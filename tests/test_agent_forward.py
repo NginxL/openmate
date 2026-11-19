@@ -260,7 +260,9 @@ class ForwardTest(unittest.TestCase):
         time.sleep(1.5)
         self.assertFalse(h.http.messages_to("mac-example", sid), "the stopped conversation is never asked again")
 
-    def test_a_stop_quoting_a_request_waiting_its_turn_stops_the_thread_s_conversation(self):
+    def test_a_stop_quoting_a_request_still_waiting_stops_that_request(self):
+        """c waits while b is handed on; a /stop quoting c stops c (nothing of it went anywhere), as a /stop of a
+        request not started yet always did; b goes on to the Agent."""
         h, first, run1, sid = dispatched(self)
         h.http.todos_delay = 1.0
         b = follow_up(h, first, "/agent 顺便把 README 也改一下")
@@ -268,11 +270,11 @@ class ForwardTest(unittest.TestCase):
         c = follow_up(h, first, "/agent 问助手 进度如何")
         run_of(h, c)
         h.world.push(TEAM, "me", "/stop", root_id=first.id, thread_id=first.id, parent_id=c.id, placement="thread")
-        wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), what="the stop at the hub")
-        wait_until(lambda: run_of(h, b)["state"] == "stopped" and run_of(h, c)["state"] == "stopped", what="both stopped")
-        time.sleep(1.5)
-        self.assertFalse(h.http.messages_to("mac-agent", "agent-1"), "b never handed on after the stop")
-        self.assertFalse(h.http.messages_to("mac-example", sid), "nor the conversation asked")
+        wait_until(lambda: run_of(h, c)["state"] == "stopped", what="c stopped")
+        wait_until(lambda: run_of(h, b).get("noted"), what="b handed on")
+        time.sleep(0.3)
+        self.assertEqual(run_of(h, b)["state"], "forwarded")
+        self.assertFalse(h.http.messages_to("mac-example", sid), "c never reached the conversation")
 
     def test_a_stop_of_the_first_request_stops_a_follow_up_waiting_for_its_result(self):
         h, first, run1, sid = dispatched(self)
