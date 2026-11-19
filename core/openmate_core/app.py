@@ -324,7 +324,8 @@ class ConnectorApp:
     def shutdown(self) -> None:
         self.closing.set()
         self._done_wake.set()
-        self._handed.set()  # nothing waits on a sign-in's hand-over any more (closing says no to all of it)
+        with self.lock:  # no hand-over begins after this (_take_in checks closing under this lock)
+            self._handed.set()  # nothing waits on a sign-in's hand-over any more (closing says no to all of it)
         held = self._done_mu.acquire(timeout=5.0)  # a round touching the store finishes first
         if self.today_api is not None:
             try:
@@ -822,10 +823,14 @@ class ConnectorApp:
         then, by its generation. False when the extension closes meanwhile (nothing goes on). Never under _wipe_mu or
         a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
         while self._handoff and self._handoff_by is not threading.current_thread():
-            self._handed.wait()  # set when it is bound, or at shutdown (another hand-over may begin meanwhile)
             if self.closing.is_set():
                 return False
+            self._handed.wait()  # set when it is bound, or at shutdown (another hand-over may begin meanwhile)
         return not self.closing.is_set()
+
+    def handing_off(self) -> bool:
+        """A sign-in is being taken in right now (no wait): a check made meanwhile is made again after it."""
+        return self._handoff and self._handoff_by is not threading.current_thread()
 
     def owns(self, epoch: Optional[int], account: str = "", owner: str = "", settle: bool = True) -> bool:
         """The store is still that of the account of epoch (None: whichever is signed in now), of account (the one
@@ -1390,9 +1395,12 @@ class ConnectorApp:
     def _take_in(self, done) -> tuple:
         """Bind the store to the account and seal its sign-in: (voided, unsaved)."""
         voided = unsaved = False
-        self._handed.clear()
-        self._handoff_by = threading.current_thread()
-        self._handoff = True
+        with self.lock:
+            if self.closing.is_set():
+                raise RPCError("扩展正在关闭，这次登录没有完成，请稍后重新扫码")
+            self._handed.clear()
+            self._handoff_by = threading.current_thread()
+            self._handoff = True
         try:
             self._bind_account(done.account)
             self.account = done.account  # the store is its: what is said of the account now is this one's (the name

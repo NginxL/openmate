@@ -320,8 +320,15 @@ class AgentRunner:
 
     def _gone(self, run_id: str) -> bool:
         """Nothing goes out in the user's name for the run: it was the account's signed in before, wiped by the
-        switch (a sign-in being taken in is waited for first), or the extension closes."""
-        return not self._settle() or self.store.run_wiped(run_id)
+        switch (a sign-in being taken in is waited for first, and one that began while the run was looked at is
+        waited for, and the run looked at again), or the extension closes."""
+        handing_off = getattr(self.app, "handing_off", lambda: False)
+        while True:
+            if not self._settle():
+                return True
+            wiped = self.store.run_wiped(run_id)
+            if not handing_off():
+                return wiped
 
 
     def forget(self) -> None:
