@@ -178,7 +178,9 @@ class Store:
             self._migrate([str(t) for t in legacy_blocked_texts if t])
             for stmt in _SCHEMA:
                 self._db.execute(stmt)
-            self._db.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 0:
+                # a new store; an older one's version is _migrate's to set (with what it marks), never set over here
+                self._db.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
 
     def _migrate(self, legacy_blocked_texts: List[str]) -> None:
         """An older store's messages table gains the columns of this version, in one transaction. A version before
