@@ -184,6 +184,10 @@ class Store:
         os.close(fd)
         os.chmod(path, 0o600)
         self._lock = threading.RLock()
+        # the /agent runs an account switch wiped (ids are never reused): a thread of the account before that still
+        # holds one never writes it back into the next account's store (run_put)
+        self._wiped_runs: set = set()
+        self._pruned_runs: Dict[str, float] = {}  # run id → when the prune took it out (the last day's)
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
         self._db.row_factory = sqlite3.Row
         with self._lock:
@@ -710,12 +714,16 @@ class Store:
 
     # ---- /agent runs ----
 
-    def run_put(self, run: dict, now: Optional[float] = None) -> None:
+    def run_put(self, run: dict, now: Optional[float] = None) -> bool:
+        """Write the run; False (nothing written) for one an account switch wiped."""
         now = now or time.time()
         run["updated"] = now
         data = {k: v for k, v in run.items() if k not in ("id", "chat_id", "request_id", "thread_key", "state", "created", "updated")}
-        self._tx(
-            lambda db: db.execute(
+
+        def put(db) -> bool:
+            if run["id"] in self._wiped_runs:
+                return False
+            db.execute(
                 """INSERT INTO runs (id, chat_id, request_id, thread_key, state, created, updated, data)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated = excluded.updated, data = excluded.data,
@@ -723,7 +731,14 @@ class Store:
                 (run["id"], run["chat_id"], run["request_id"], run["thread_key"], run["state"], run["created"], now,
                  json.dumps(data, ensure_ascii=False)),
             )
-        )
+            return True
+
+        return self._tx(put)
+
+    def run_wiped(self, run_id: str) -> bool:
+        """The run was the account's signed in before, wiped by the switch: nothing is said or sent for it."""
+        with self._lock:
+            return run_id in self._wiped_runs
 
     @staticmethod
     def _run_row(r: sqlite3.Row) -> dict:
@@ -797,14 +812,20 @@ class Store:
 
     def runs_prune(self, before: float, keep: int) -> None:
         def run(db):
-            db.execute("DELETE FROM runs WHERE created < ? AND state NOT IN ('starting', 'running')", (before,))
-            db.execute(
-                "DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY created DESC LIMIT ?) "
-                "AND state NOT IN ('starting', 'running')",
-                (keep,),
-            )
+            old = "created < ? AND state NOT IN ('starting', 'running')"
+            many = "id NOT IN (SELECT id FROM runs ORDER BY created DESC LIMIT ?) AND state NOT IN ('starting', 'running')"
+            ids = [r["id"] for r in db.execute("SELECT id FROM runs WHERE " + old, (before,)).fetchall()]
+            db.execute("DELETE FROM runs WHERE " + old, (before,))
+            ids += [r["id"] for r in db.execute("SELECT id FROM runs WHERE " + many, (keep,)).fetchall()]
+            db.execute("DELETE FROM runs WHERE " + many, (keep,))
+            return ids
 
-        self._tx(run)
+        with self._lock:  # remembered a day: an account switch meanwhile counts them wiped too (run_put, run_wiped)
+            now = time.time()
+            for rid in [r for r, at in self._pruned_runs.items() if now - at > 86400.0]:
+                del self._pruned_runs[rid]
+            for rid in self._tx(run):
+                self._pruned_runs[rid] = now
 
     def run_count(self) -> int:
         r = self._one("SELECT COUNT(*) AS n FROM runs")
@@ -852,15 +873,25 @@ class Store:
                       (chat_id, kind, since))
         return int(r["n"]) if r else 0
 
-    def wipe_account_data(self) -> None:
+    def wipe_account_data(self, owner: str = "") -> None:
         """Forget the chats of the account signed in before (another one signed in). Message seqs keep growing, so
-        the hub's archive cursor stays valid. The send journal stays: request ids are the hub's."""
+        the hub's archive cursor stays valid. The send journal stays: request ids are the hub's. owner: the account
+        the store is for from now on, written in the same transaction."""
 
         def run(db):
+            runs = [r["id"] for r in db.execute("SELECT id FROM runs").fetchall()]
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
             for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
-            db.execute("DELETE FROM meta WHERE key IN ('initial_history_done')")
+            # its history marks, and its name (the next one's is written next, when it has one)
+            db.execute("DELETE FROM meta WHERE key IN ('initial_history_done', 'caught_up_at', 'render_version', "
+                       "'account_name')")
+            if owner:
+                db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('account_id', ?)", (owner,))
+            return runs
 
-        self._tx(run)
+        with self._lock:  # no run_put between the wipe and the ids it took out
+            self._wiped_runs.update(self._tx(run))
+            self._wiped_runs.update(self._pruned_runs)  # pruned lately: a thread may still hold one of those too
+            self._pruned_runs.clear()

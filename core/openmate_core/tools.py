@@ -207,6 +207,14 @@ def _chats(app, a: dict) -> str:
 
 
 def _messages(app, a: dict) -> str:
+    epoch = app.account_epoch()  # one account's store: another's sign-in while it reads (or asks the service) ends it
+    out = _messages_read(app, a, epoch)
+    if epoch != app.account_epoch():
+        raise RPCError("刚换了%s账号，请重新读这个会话" % app.platform.name)
+    return out
+
+
+def _messages_read(app, a: dict, epoch: int) -> str:
     _require_store(app)
     chat_id = _need(a, "chat", "会话 id")
     limit = _limit(a, 20, 50)
@@ -220,11 +228,12 @@ def _messages(app, a: dict) -> str:
     chat = app.store.get_chat(chat_id)
     if chat is None and app.signed_in:
         try:
-            app.store.upsert_chat(app.backend.chat_info(chat_id))
-            chat = app.store.get_chat(chat_id)
+            chat = app.chat_from_service(chat_id, epoch)
         except BackendError:
             chat = None
     if chat is None:
+        if epoch != app.account_epoch():
+            raise RPCError("刚换了%s账号，请重新读这个会话" % app.platform.name)
         raise RPCError("没有这个%s会话：%s" % (app.platform.name, chat_id))
     thread = str(a.get("thread") or "").strip()
     since, until = _when(app, a.get("since"), False), _when(app, a.get("until"), True)
@@ -232,13 +241,13 @@ def _messages(app, a: dict) -> str:
     filtered = since is not None or until is not None or bool(words)
     more = ""
     if filtered:
-        rows, more, scanned = _scan(app, chat_id, thread, before_pos, since, until, words, limit)
+        rows, more, scanned = _scan(app, chat_id, thread, before_pos, since, until, words, limit, epoch)
     elif thread:
         rows = app.store.thread_messages(chat_id, thread, limit)
     else:
         rows = app.store.messages_before(chat_id, before_pos, limit)
         if len(rows) < limit:
-            app.fill_older(chat_id, rows[0]["position"] if rows else before_pos, limit - len(rows))
+            app.fill_older(chat_id, rows[0]["position"] if rows else before_pos, limit - len(rows), epoch)
             rows = app.store.messages_before(chat_id, before_pos, limit)
     me = app.me_name()
     head = "%s（%s，chat=%s）" % (views.chat_name(chat, chat_id), "私聊" if chat.get("kind") == "dm" else "群", chat_id)
@@ -311,7 +320,7 @@ def _filter_words(app, since: Optional[float], until: Optional[float], query: An
 
 
 def _scan(app, chat_id: str, thread: str, before_pos: Optional[int], since: Optional[float], until: Optional[float],
-          words: List[str], limit: int):
+          words: List[str], limit: int, epoch: Optional[int] = None):
     """The newest limit messages that fit, oldest first, looking back from before_pos (the store first, then older
     history from the service), at most SCAN_MOST of them. Returns (rows, how to go on or "", how many were looked at)."""
 
@@ -336,7 +345,7 @@ def _scan(app, chat_id: str, thread: str, before_pos: Optional[int], since: Opti
         page = app.store.messages_before(chat_id, pos, SCAN_PAGE)
         if len(page) < SCAN_PAGE and can_fill:
             had = len(page)
-            none_older = app.fill_older(chat_id, page[0]["position"] if page else pos, SCAN_PAGE - had)
+            none_older = app.fill_older(chat_id, page[0]["position"] if page else pos, SCAN_PAGE - had, epoch)
             page = app.store.messages_before(chat_id, pos, SCAN_PAGE)
             can_fill = not none_older and len(page) > had  # nothing came: not signed in, failed, or the start
         if not page:

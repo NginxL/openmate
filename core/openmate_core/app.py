@@ -9,6 +9,7 @@ connector.changed; the /agent runner has its own (agent.py). The store is the on
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -43,6 +44,7 @@ ARCHIVE_ROWS_MOST = 2000
 ARCHIVE_UNDECIDED_HOURS = 6  # a message of a chat the archive rule cannot decide on waits this long at most
 ARCHIVE_ASK_MOST = 3  # undecided chats the backend is asked about per archive read
 STARTUP_WAIT = 20.0  # a call that arrives while the program starts (store, backend, saved sign-in) waits this long
+HANDOFF_WAIT = 30.0  # what an account's work does next waits this long at most while a sign-in's account is bound
 SENT_TEXT_MOST = 4000  # sent.record keeps this many characters of what was said
 # History (capability "history": history.chats, archive.history), read from the store: what the program has stored of
 # a chat since it signed in (live messages, catch-ups, history reads). Pages are hints of HISTORY_PAGE messages, at most
@@ -136,8 +138,18 @@ class ConnectorApp:
         self._done_ask = False  # ask the service about every chat that needs the user (after a catch-up)
         self._done_wake = threading.Event()
         self._done_mu = threading.Lock()  # a round's store reads and writes; shutdown and an account switch wait for it
-        self._wipe_mu = threading.Lock()  # an account switch's wipe, and each write ingest makes after asking the service
-        self._account_epoch = 0  # bumped when another account's sign-in wiped the store
+        # An account switch's wipe (and the store's close), and every write of what an account's read or live link
+        # brought (owned): never one between the wipe and the next account. Taken after _done_mu and /agent's own
+        # locks, before self.lock and the store's lock; never held while waiting on the network.
+        self._wipe_mu = threading.Lock()
+        self._account_epoch = 0  # bumped when another account's sign-in wiped the store (account_epoch)
+        # A sign-in's account is being taken in (the adapter may answer as it already): an account's work waits for
+        # it (settle), then its generation decides. _owner: the account the store is bound to ("" before any).
+        self._handoff = False
+        self._handoff_by: Optional[threading.Thread] = None
+        self._handed = threading.Event()
+        self._handed.set()
+        self._owner = ""
         self.done_rounds = 0  # finished rounds (tests wait on it)
         self.ready = threading.Event()
         self.closing = threading.Event()
@@ -282,8 +294,9 @@ class ConnectorApp:
                 self.agent.enabled = False
                 log.info("/agent and 代答 are off here (%s)", "the connector is off" if not self.connector_on else "a member hub")
             self.people = People(self)
+            self._owner = self.store.meta_get("account_id") or ""  # whose this store is
             if self.backend is not None:
-                self.backend.core_account = self.store.meta_get("account_id") or ""  # whose this store is
+                self.backend.core_account = self._owner
             creds = self._load_credentials()
             if creds is not None:
                 self._credentials = creds
@@ -311,6 +324,7 @@ class ConnectorApp:
     def shutdown(self) -> None:
         self.closing.set()
         self._done_wake.set()
+        self._handed.set()  # nothing waits on a sign-in's hand-over any more (closing says no to all of it)
         held = self._done_mu.acquire(timeout=5.0)  # a round touching the store finishes first
         if self.today_api is not None:
             try:
@@ -495,10 +509,17 @@ class ConnectorApp:
         if scope == "inbox":
             self._ui().update_badge()
 
-    def _doc_mention(self, mention) -> None:
+    def _doc_mention(self, mention, account: str = "") -> None:
+        """account: the account whose live link heard it, when the adapter says: one heard for an account signed out
+        meanwhile is not taken."""
         if self.agent is not None:
+            self.settle()
+            with self.lock:
+                if account and account != self._owner:
+                    return
+                epoch = self._account_epoch  # that account's store: claimed for it only (AgentRunner)
             try:
-                self.agent.on_doc_mention(mention)
+                self.agent.on_doc_mention(mention, epoch)
             except Exception:
                 log.exception("a document mention was not taken")
 
@@ -534,12 +555,16 @@ class ConnectorApp:
             log.info("an account could not be looked up for the archive (%s)", e.__class__.__name__)
             return False
 
-    def _chat_gone(self, chat_id: str) -> None:
-        """The account left or deleted a chat in the service: out of the lists until a newer message."""
+    def _chat_gone(self, chat_id: str, account: str = "") -> None:
+        """The account left or deleted a chat in the service: out of the lists until a newer message. account: whose
+        link heard it, when the adapter says (one heard for an account signed out meanwhile is not kept)."""
         if self.store is None or self.closing.is_set() or not chat_id:
             return
         try:
-            self.store.chat_gone(str(chat_id))
+            with self.owned(None, owner=account) as ok:
+                if not ok:
+                    return
+                self.store.chat_gone(str(chat_id))
             self.mark_changed("inbox")
         except Exception:
             if not self.closing.is_set():
@@ -717,10 +742,13 @@ class ConnectorApp:
             if restore:
                 try:
                     acct = self.backend.restore(dict(self._credentials or {}))
-                    if stop.is_set() or gen != self._gen:
-                        return  # signed out or in again meanwhile: this restore is not the account's any more
-                    self._bind_account(acct)  # a sign-in stopped half-way may have left another account's store
-                    self._remember_account(acct)
+                    # checked and kept at once, never between a sign-in's (or a logout's) steps: one that came while
+                    # this restore asked the service starts its own link (gen), and this one leaves the store alone
+                    with self._login_lock:
+                        if stop.is_set() or gen != self._gen:
+                            return  # signed out or in again meanwhile: this restore is not the account's any more
+                        self._bind_account(acct)  # a sign-in stopped half-way may have left another account's store
+                        self._remember_account(acct)
                     restore = False
                 except CredentialsExpired as e:
                     self._set_link(gen, "expired", e.message)
@@ -739,6 +767,7 @@ class ConnectorApp:
                     continue
             self._set_link(gen, "connecting")
             up_at = [0.0]
+            epoch = self.account_epoch()  # whose this connection is: what it hears is kept for that account only
 
             def on_link(state: str, why: str = "") -> None:
                 if gen != self._gen:
@@ -753,7 +782,7 @@ class ConnectorApp:
                     self._set_link(gen, "down", why or "连接断开了")
 
             try:
-                self.backend.listen(lambda m: self._on_live(gen, m), on_link, stop)
+                self.backend.listen(lambda m, epoch=epoch: self._on_live(gen, m, epoch), on_link, stop)  # this one's
             except CredentialsExpired as e:
                 self._set_link(gen, "expired", e.message)
                 return
@@ -774,20 +803,70 @@ class ConnectorApp:
             stop.wait(backoff)
             backoff = min(backoff * 2, t.backoff_max)
 
+    # ------------------------------------------------------------------ whose the store is
+
+    def account_epoch(self) -> int:
+        """The account generation: it moves on when another account's sign-in wipes the store. Taken just before the
+        service is asked (a read) or listened to (the live link), it says whose the answer is: the adapter takes the
+        next account's session before the store is wiped for it, so what was asked under one generation is never the
+        next account's own."""
+        with self.lock:
+            return self._account_epoch
+
+    def settle(self) -> None:
+        """While a sign-in's account is being taken in (the adapter may answer as it already), wait until the store is
+        bound to it (a little at most): what an account's work does next is decided then, by its generation. Never
+        under _wipe_mu or a lock the binding takes (People's, /agent's _mu); the binding itself never waits."""
+        if self._handoff and self._handoff_by is not threading.current_thread():
+            self._handed.wait(HANDOFF_WAIT)
+
+    def owns(self, epoch: Optional[int], account: str = "", owner: str = "", settle: bool = True) -> bool:
+        """The store is still that of the account of epoch (None: whichever is signed in now), of account (the one
+        signed in, when the adapter says whose) and of owner (the one the store is bound to), and it is open. A
+        check alone, before work that would be wasted (after settle); a write takes owned."""
+        if settle:
+            self.settle()
+        with self.lock:
+            return (epoch is None or epoch == self._account_epoch) and not self.closing.is_set() and (
+                not account or (self.account is not None and self.account.id == account)) and (
+                not owner or owner == self._owner)
+
+    @contextlib.contextmanager
+    def owned(self, epoch: Optional[int], account: str = "", owner: str = ""):
+        """Hold off an account switch's wipe (and the store's close) while writing down what a read or a live line of
+        one account brought: yields owns(epoch, account, owner). Only store work under it, nothing that waits on the
+        network. A sign-in's hand-over is waited for first (settle)."""
+        self.settle()
+        with self._wipe_mu:
+            yield self.owns(epoch, account, owner, settle=False)
+
     def _bind_account(self, acct: Account) -> None:
-        """The store belongs to this account from now on: another account's chats and marks are forgotten first."""
-        prev = self.store.meta_get("account_id") if self.store is not None else None
-        if prev and acct.id and prev != acct.id:
-            with self._done_mu:  # a done round of the account before must not write into this one's
-                with self._wipe_mu:  # nor an ingest that asked the service before the switch
-                    self.store.wipe_account_data()  # another account: forget the previous one's chats
-                    self._names.clear()  # and the names it looked up
-                    with self.lock:
-                        self._account_epoch += 1
-                        self.account = None  # until this one is remembered: nothing said to be the other's is kept
+        """The store belongs to this account from now on: another account's chats and marks are forgotten first, in
+        one transaction with the store's new owner; a store nobody had yet is this account's at once."""
+        if self.store is None or not acct.id:
+            return
+        if self.store.meta_get("account_id") == acct.id:
+            return
+        # another account's, or nobody's yet (whatever a session not bound read into it is let go too: every store
+        # has been bound at its first sign-in or restore since the first version)
+        with self._done_mu:  # a done round of the account before must not write into this one's
+            with self._wipe_mu:  # nor an ingest that asked the service before the switch
+                self.store.wipe_account_data(acct.id)  # another account: the previous one's chats forgotten
+                self._names.clear()  # and the names it looked up
+                with self.lock:
+                    self._account_epoch += 1
+                    self._owner = acct.id
+                    self.account = None  # until this one is remembered: nothing said to be the other's is kept
+                # after the generation moved on (what was on its way checks it again under their own locks)
+                if self.people is not None:
+                    self.people.forget()  # whom the one before was to ask about
+                if self.agent is not None:
+                    self.agent.forget()  # and what /agent posted for it (its echoes)
 
     def _remember_account(self, acct: Account) -> None:
         self.account = acct
+        if acct.id:
+            self._owner = acct.id
         if self.backend is not None and acct.id:
             self.backend.core_account = acct.id
         if self.store is not None:
@@ -796,12 +875,12 @@ class ConnectorApp:
             if acct.name:
                 self.store.meta_set("account_name", acct.name)
 
-    def _on_live(self, gen: int, msg: Message) -> None:
+    def _on_live(self, gen: int, msg: Message, epoch: Optional[int] = None) -> None:
         if gen != self._gen:
             return
         self.last_event = time.time()
         try:
-            self.ingest([msg], live=True)
+            self.ingest([msg], live=True, epoch=epoch)
         except Exception:
             if not self.closing.is_set():
                 log.exception("a live message could not be stored")
@@ -833,6 +912,7 @@ class ConnectorApp:
         try:
             t = self.timing
             started = time.time()
+            mine = self.account_epoch()  # the account this catch-up is for: its marks are that account's only
             done_now = set()
             first = self.store.meta_get("initial_history_done") != "1"
             whole = True
@@ -840,12 +920,16 @@ class ConnectorApp:
             plan: List[str] = []
             if n > 0:
                 try:
+                    epoch = self.account_epoch()
                     listed = self.backend.recent_chats(n)[:n]
                     if gen != self._gen:
                         return
-                    for c in listed:
-                        self.store.upsert_chat(c)
-                        plan.append(c.id)
+                    with self.owned(epoch) as ok:
+                        if not ok:
+                            return  # another account's sign-in took the store while the list was read
+                        for c in listed:
+                            self.store.upsert_chat(c)
+                    plan.extend(c.id for c in listed)
                 except CredentialsExpired:
                     raise
                 except BackendError as e:
@@ -882,9 +966,12 @@ class ConnectorApp:
             if gen != self._gen:
                 return  # signed out or another account meanwhile: nothing marked for the store it found
             if whole:
-                if first:
-                    self.store.meta_set("initial_history_done", "1")
-                self.store.meta_set("caught_up_at", "%.3f" % started)
+                with self.owned(mine) as ok:
+                    if not ok:
+                        return  # the next account's first history is still to be read
+                    if first:
+                        self.store.meta_set("initial_history_done", "1")
+                    self.store.meta_set("caught_up_at", "%.3f" % started)
             # a newer backend reads some messages better: their recent chats once more, so the stored text is renewed
             version = str(getattr(self.backend, "render_version", "") or "")
             kinds = tuple(getattr(self.backend, "rerender_types", ()) or ())
@@ -894,10 +981,11 @@ class ConnectorApp:
                         if gen != self._gen or self.link != "up":
                             return
                         if chat_id not in done_now:
+                            epoch = self.account_epoch()
                             got = self.backend.history(chat_id, None, t.rerender_messages)
                             if gen != self._gen:
                                 return
-                            self.ingest(got, live=False)
+                            self.ingest(got, live=False, epoch=epoch)
                 empty = tuple(getattr(self.backend, "rerender_empty", ()) or ())
                 again = False
                 if empty:  # a new reading: every one of the window
@@ -911,10 +999,11 @@ class ConnectorApp:
                             for _ in range(EMPTY_PAGES):
                                 if gen != self._gen or self.link != "up":
                                     return
+                                epoch = self.account_epoch()
                                 got = self.backend.history(chat_id, before, t.rerender_messages)
                                 if gen != self._gen:
                                     return
-                                self.ingest(got, live=False)
+                                self.ingest(got, live=False, epoch=epoch)
                                 if not got:
                                     break
                                 before = min(m.position for m in got)
@@ -926,7 +1015,9 @@ class ConnectorApp:
                             log.info("re-reading messages stored empty: a chat could not be read (%s)", e.kind)
                             again = again or e.kind in ("unreachable", "unknown", "proxy")
                 if not again:
-                    self.store.meta_set("render_version", version)
+                    with self.owned(mine) as ok:
+                        if ok:
+                            self.store.meta_set("render_version", version)
             elif tuple(getattr(self.backend, "rerender_empty", ()) or ()):
                 # the same reading: the messages of the last day still empty (held for review, or read too soon)
                 self._read_blank_again(gen)
@@ -977,6 +1068,7 @@ class ConnectorApp:
                 break
             tried[(chat_id, pos)] = now
             try:
+                epoch = self.account_epoch()
                 got = self.backend.history(chat_id, pos + 1, 2)
             except CredentialsExpired:
                 raise
@@ -985,7 +1077,7 @@ class ConnectorApp:
                 continue
             if gen != self._gen:
                 break
-            self.ingest(got, live=False)
+            self.ingest(got, live=False, epoch=epoch)
             filled = filled or any((m.text or "").strip() for m in got)
         if filled:
             self.mark_changed("inbox", "chats")
@@ -1013,14 +1105,15 @@ class ConnectorApp:
             limit = min(want, budget[0])
             if limit <= 0:
                 return False
+            epoch = self.account_epoch()
             got = self.backend.history(chat_id, before, limit)
             budget[0] -= len(got)
             if gen and gen != self._gen:
                 return True  # read for an account signed out meanwhile: not into the store
             if known is None and not initial:
-                self.ingest([m for m in got if m.at >= since], live=False)
+                self.ingest([m for m in got if m.at >= since], live=False, epoch=epoch)
             else:
-                self.ingest(got, live=False)
+                self.ingest(got, live=False, epoch=epoch)
             if len(got) < limit:
                 return limit == want  # the chat's start (or the budget's end)
             oldest = min(got, key=lambda m: m.position)
@@ -1035,73 +1128,86 @@ class ConnectorApp:
 
     # ------------------------------------------------------------------ storing messages
 
-    def ingest(self, msgs: List[Message], live: bool, account: str = "") -> List[dict]:
-        """account: whose the messages are, when the adapter says (another account's are never kept)."""
+    def ingest(self, msgs: List[Message], live: bool, account: str = "", epoch: Optional[int] = None) -> List[dict]:
+        """account: whose the messages are, when the adapter says (another account's are never kept). epoch: the
+        account generation (account_epoch) when they were asked for or heard (None: now); none of them, nor anything
+        they bring (the chat, the names, a chat back from gone, an /agent request), is kept once another account's
+        sign-in took the store since. Every write is made under owned, never while the service is asked."""
         if not msgs or self.store is None:
             return []
-        with self.lock:
-            epoch = self._account_epoch  # the account these messages were read for
-            if account and (self.account is None or self.account.id != account):
-                return []
+        if epoch is None:
+            epoch = self.account_epoch()
 
-        def same() -> bool:  # under _wipe_mu: the store still that account's
-            with self.lock:
-                return epoch == self._account_epoch and (
-                    not account or (self.account is not None and self.account.id == account))
-        latest: Dict[str, float] = {}
-        for m in msgs:  # a chat gone comes back with a newer message of someone's (joined again)
-            if (m.type or "") != "SYSTEM" and (m.at or 0) > latest.get(m.chat_id, 0):
-                latest[m.chat_id] = float(m.at or 0)
-        if latest:
-            self.store.chats_back(latest)
+        def stale() -> List[dict]:
+            log.info("%d message(s) read for an account signed out meanwhile (or while closing): not stored", len(msgs))
+            return []
+        if not self.owns(epoch):
+            return stale()
+        if account and not self.owns(epoch, account):
+            return []  # another account's, as the adapter says
         for chat_id in {m.chat_id for m in msgs}:
             known = self.store.get_chat(chat_id)
             # no name, or only the id as a stand-in (kept by older versions): ask the backend again
             if known is None or not known.get("name") or known.get("name") == chat_id:
                 try:
                     info = self.backend.chat_info(chat_id)
-                    with self._wipe_mu:
-                        if not same():
-                            return []
+                    with self.owned(epoch, account) as ok:
+                        if not ok:
+                            return stale()
                         self.store.upsert_chat(info)
                 except BackendError:
                     pass
                 except Exception:
                     log.exception("chat_info failed")
         me = self.account
+
+        def learn(m: Message, looked_up: bool = False) -> bool:
+            """A name, as it is learnt (a newer one learnt meanwhile is not undone later). looked_up: asked of the
+            service because none was known; one learnt while it was asked is newer, and the message takes it."""
+            with self.owned(epoch, account) as ok:
+                if ok:
+                    newer = self._names.get(m.sender_id) if looked_up else None
+                    if newer:
+                        m.sender_name = newer
+                    else:
+                        self._names[m.sender_id] = m.sender_name
+                        self.store.put_name(m.sender_id, m.sender_name)
+                return ok
         for m in msgs:
             if m.mine:
                 if not m.sender_name and me is not None:
                     m.sender_name = me.name
                 continue
-            if m.sender_id:
-                if m.sender_name:
-                    if self._names.get(m.sender_id) != m.sender_name:
-                        self._names[m.sender_id] = m.sender_name
-                        self.store.put_name(m.sender_id, m.sender_name)
-                else:
-                    m.sender_name = self._names.get(m.sender_id) or self.store.name(m.sender_id, m.chat_id)
-                    if not m.sender_name and self.backend is not None:
-                        try:
-                            m.sender_name = self.backend.user_name(m.sender_id, m.chat_id) or ""
-                        except Exception:
-                            m.sender_name = ""
-                        if m.sender_name:
-                            self._names[m.sender_id] = m.sender_name
-                            with self._wipe_mu:
-                                if same():
-                                    self.store.put_name(m.sender_id, m.sender_name)
-        with self._wipe_mu:
-            if not same() or self.closing.is_set():
-                log.info("%d message(s) read for an account signed out meanwhile (or while closing): not stored", len(msgs))
-                return []
+            if not m.sender_id:
+                continue
+            if m.sender_name:
+                if self._names.get(m.sender_id) != m.sender_name and not learn(m):
+                    return stale()
+                continue
+            m.sender_name = self._names.get(m.sender_id) or self.store.name(m.sender_id, m.chat_id)
+            if not m.sender_name and self.backend is not None:
+                try:
+                    m.sender_name = self.backend.user_name(m.sender_id, m.chat_id) or ""
+                except Exception:
+                    m.sender_name = ""
+                if m.sender_name and not learn(m, looked_up=True):
+                    return stale()
+        latest: Dict[str, float] = {}
+        for m in msgs:  # a chat gone comes back with a newer message of someone's (joined again)
+            if (m.type or "") != "SYSTEM" and (m.at or 0) > latest.get(m.chat_id, 0):
+                latest[m.chat_id] = float(m.at or 0)
+        with self.owned(epoch, account) as ok:
+            if not ok:
+                return stale()
+            if latest:
+                self.store.chats_back(latest)
             new = self.store.add_messages(msgs, from_history=not live)
         if new:
             self.mark_changed("inbox", "chats")
             if live and self.agent is not None:
                 for row in new:
                     try:
-                        self.agent.on_message(row)
+                        self.agent.on_message(row, epoch)  # claimed under owned(epoch) there
                     except Exception:
                         log.exception("/agent could not look at a message")
         return new
@@ -1258,6 +1364,24 @@ class ConnectorApp:
         """A sign-in finished (a QR scanned, or one with nothing to scan): seal it and start the link. Under
         _login_lock."""
         voided = unsaved = False
+        # The adapter answers as the new account from now on: the store is that account's at once (another account's
+        # wiped, the generation moved on), before anything here waits (a rotation being sealed holds _creds_mu), so
+        # nothing read meanwhile is kept for the account before; an account's work waits until it is bound (settle)
+        # and goes on only if it is still its store. A sign-in voided or not sealed below leaves the store the new
+        # account's: it is signed out here then, and the next sign-in or restore binds again.
+        self._handed.clear()
+        self._handoff_by = threading.current_thread()
+        self._handoff = True
+        try:
+            self._bind_account(done.account)
+        except Exception:
+            log.exception("the store could not be taken over by the account signed in")
+            self._abandon_sign_in("登录没有完成，请重新扫码登录")
+            raise RPCError("登录没有完成：本地数据没能换到这个账号，请重新扫码")
+        finally:
+            self._handoff = False
+            self._handoff_by = None
+            self._handed.set()
         with self._creds_mu:
             if self._creds_out or self._login_gen != self._creds_gen:
                 voided = True  # a logout came while this QR was scanned: it stays signed out
@@ -1273,24 +1397,24 @@ class ConnectorApp:
                 except RPCError:
                     self._login = None
                     unsaved = True
+                    with self._creds_cv:  # a rotation of this sign-in's session handed over meanwhile is not written
+                        self._creds_gen += 1
         if unsaved:
             # the adapter took this sign-in, the core keeps the one before: the adapter lets it go (outside
             # _creds_mu, as for a voided one), so nothing is sent as an account the core does not know it has
-            try:
-                self.backend.logout()
-            except Exception:
-                log.exception("backend logout failed")
+            self._abandon_sign_in("登录成功了，但保存登录信息失败，请重新登录")
             raise RPCError("登录成功了，但保存登录信息失败，请重新登录")
         if voided:
+            # the logout stops the links itself (and says so); outside _creds_mu: the adapter may be sealing under its
+            # own lock and waiting for it
             self._login = None
-            try:  # outside _creds_mu: the adapter may be sealing under its own lock and waiting for it
+            try:
                 self.backend.logout()
             except Exception:
                 log.exception("backend logout failed")
             raise RPCError("登录过程中退出了登录，这次扫码作废，请重新扫码")
         self._login = None
         acct = done.account
-        self._bind_account(acct)
         self.creds = "present"
         self._remember_account(acct)
         self._catchup_done.clear()
@@ -1308,6 +1432,20 @@ class ConnectorApp:
             self._catchup_done.wait(max(0.0, deadline - time.monotonic()))
         self.mark_changed("inbox", "chats")
         return {"done": True, "account": acct.name or acct.id}
+
+    def _abandon_sign_in(self, why: str) -> None:
+        """A sign-in the adapter took and the core does not keep (voided, not sealed, not bound): every link stops (one
+        may have reconnected as the new account meanwhile), the status says why, and the adapter lets it go."""
+        self._login = None
+        with self.lock:
+            self._gen += 1
+            self._link_stop.set()
+            self.link, self.link_reason = "expired", why
+            self._link_up.clear()
+        try:
+            self.backend.logout()
+        except Exception:
+            log.exception("backend logout failed")
 
     def m_logout(self, params: dict) -> dict:
         with self._creds_mu:
@@ -1378,6 +1516,7 @@ class ConnectorApp:
                      to_chat: bool = False) -> str:
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
+        self.settle()  # a sign-in being taken in: sent once it is bound (the caller checks whose it was)
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
@@ -1388,6 +1527,7 @@ class ConnectorApp:
         """A picture (an /agent reply's, checked and copied by images.take) into the chat as the user."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
+        self.settle()
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if not getattr(self.backend, "can_send_images", False):
@@ -1416,6 +1556,7 @@ class ConnectorApp:
             raise RPCError("%s会话不支持修改状态，只能回复文字" % self.platform.name)
         chat_id = str(params.get("thread") or "")
         text = str(params.get("text") or "")
+        epoch = self.account_epoch()  # the inbox it was asked from is this account's
         if not text.strip():
             raise RPCError("回复内容是空的")
         if not chat_id or self.store is None:
@@ -1438,6 +1579,8 @@ class ConnectorApp:
             key = "inbox:" + hashlib.sha256("\x00".join([chat_id, last, text]).encode("utf-8")).hexdigest()
 
         def send():
+            if not self.owns(epoch):  # another account signed in since it was asked: not said as that one
+                raise RPCError("刚换了%s账号，这条回复没有发出" % self.platform.name)
             mid = self.send_as_user(chat_id, text, reply_to, root)
             return {"text": "已发送", "message_ref": mid}
 
@@ -1446,22 +1589,39 @@ class ConnectorApp:
 
     # ------------------------------------------------------------------ threads
 
-    def fill_older(self, chat_id: str, before: Optional[int], want: int) -> bool:
-        """Read older messages of chat from the service into the store; True when it has none older."""
+    def fill_older(self, chat_id: str, before: Optional[int], want: int, epoch: Optional[int] = None) -> bool:
+        """Read older messages of chat from the service into the store; True when it has none older. epoch: the
+        account generation the caller reads for (None: now): kept for that account only."""
         if not self.signed_in or self.link == "expired":
             return False
         try:
+            if epoch is None:
+                epoch = self.account_epoch()
             got = self.backend.history(chat_id, before, max(want, 1))
         except BackendError as e:
             log.info("history for a thread page failed: %s", e.kind)
             return False
-        self.ingest(got, live=False)
+        self.ingest(got, live=False, epoch=epoch)
         return len(got) < want
+
+    def chat_from_service(self, chat_id: str, epoch: Optional[int] = None) -> Optional[dict]:
+        """A chat the store does not have: asked of the service (BackendError when it cannot say) and kept. epoch: the
+        account generation the caller reads for (None: now); another account's sign-in since then is an RPCError
+        (switched), never the next account's store read as if it were the one asked about."""
+        if epoch is None:
+            epoch = self.account_epoch()
+        info = self.backend.chat_info(chat_id)
+        with self.owned(epoch) as ok:
+            if not ok:
+                raise RPCError("刚换了%s账号，请重新打开这个会话" % self.platform.name)
+            self.store.upsert_chat(info)
+        return self.store.get_chat(chat_id)
 
     def m_thread_page(self, params: dict) -> dict:
         chat_id = str(params.get("thread") or "")
         if not chat_id or self.store is None:
             raise RPCError("缺少会话")
+        epoch = self.account_epoch()  # the page is of one account's store: another's sign-in meanwhile ends it
         limit = _int(params.get("limit"), 20, 1, THREAD_MOST)
         before = params.get("before") or ""
         before_pos: Optional[int] = None
@@ -1473,17 +1633,18 @@ class ConnectorApp:
         chat = self.store.get_chat(chat_id)
         if chat is None and self.signed_in:
             try:
-                self.store.upsert_chat(self.backend.chat_info(chat_id))
-                chat = self.store.get_chat(chat_id)
+                chat = self.chat_from_service(chat_id, epoch)
             except BackendError:
                 chat = None
         if chat is None:
+            if epoch != self.account_epoch():
+                raise RPCError("刚换了%s账号，请重新打开这个会话" % self.platform.name)
             raise RPCError("本地没有这个%s会话" % self.platform.name)
         rows = [r for r in self.store.messages_before(chat_id, before_pos, limit) if views.has_content(r)]
         at_start = False
         if len(rows) < limit:
             oldest = rows[0]["position"] if rows else before_pos
-            at_start = self.fill_older(chat_id, oldest, limit - len(rows))
+            at_start = self.fill_older(chat_id, oldest, limit - len(rows), epoch)
             rows = [r for r in self.store.messages_before(chat_id, before_pos, limit) if views.has_content(r)]
         rows.sort(key=lambda r: (r.get("at") or 0, r["position"]))
         me = self.me_name()
@@ -1500,6 +1661,8 @@ class ConnectorApp:
             page["chat"]["members"] = int(chat["members"])
         if rows and not (len(rows) < limit and at_start):
             page["before"] = str(min(r["position"] for r in rows))
+        if epoch != self.account_epoch():
+            raise RPCError("刚换了%s账号，请重新打开这个会话" % self.platform.name)
         return page
 
     def _media(self, params: dict, most: int) -> dict:

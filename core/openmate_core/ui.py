@@ -598,13 +598,20 @@ class ChatsPage(Page):
                 _, how, chat_id = aid.split(":", 2)
                 changes[chat_id] = how == "on"
             missing = []
-            for chat_id, on in changes.items():
-                if on and self.app.store.get_chat(chat_id) is None:
-                    self._adopt_candidate(chat_id)  # a group from the backend's list, with no message here yet
-                if self.app.store.get_chat(chat_id) is not None:
-                    self.app.store.autoreply_set(chat_id, on)
-                elif on:
-                    missing.append(chat_id)
+            epoch = self.app.account_epoch()  # the switches are this account's: none kept once another signed in
+            listed = None
+            if any(on and self.app.store.get_chat(c) is None for c, on in changes.items()):
+                listed = self._listed()  # a group from the backend's list, with no message here yet (asked first)
+            with self.app.owned(epoch) as ok:
+                for chat_id, on in (changes.items() if ok else ()):
+                    if on and self.app.store.get_chat(chat_id) is None:
+                        self._adopt_candidate(chat_id, listed or [])
+                    if self.app.store.get_chat(chat_id) is not None:
+                        self.app.store.autoreply_set(chat_id, on)
+                    elif on:
+                        missing.append(chat_id)
+            if not ok:
+                return {"toast": "刚换了账号，请刷新页面再试", "view": here()}
             if not changes:
                 return {}
             if missing:
@@ -623,13 +630,15 @@ class ChatsPage(Page):
             log.exception("the backend's group list could not be read")
             return []
 
-    def _adopt_candidate(self, chat_id: str) -> None:
+    def _listed(self) -> list:
         backend = getattr(self.app, "backend", None)
         try:
-            listed = backend.group_candidates(GROUPS_ALL) if backend is not None else []  # as far as 找群 looks
+            return backend.group_candidates(GROUPS_ALL) if backend is not None else []  # as far as 找群 looks
         except Exception:
             log.exception("the backend's group list could not be read")
-            listed = []
+            return []
+
+    def _adopt_candidate(self, chat_id: str, listed: list) -> None:
         for g in listed:
             if g.id == chat_id and g.kind != "dm":
                 self.app.store.upsert_chat(g)

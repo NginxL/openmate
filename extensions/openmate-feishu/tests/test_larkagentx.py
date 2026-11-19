@@ -528,6 +528,84 @@ class RestoreTest(Base):
             b.send("500", "x")
 
 
+class SwitchTest(Base):
+    """A sign-out (and the next account's sign-in) while a request of the session before is still out: its answer is
+    never the next session's."""
+
+    def test_a_restore_begun_before_a_logout_does_not_take_the_session(self):
+        b = self.backend()
+        real = b._check_ticket
+
+        def ticket(auth):  # the restore asks the service; the user signs out meanwhile
+            real(auth)
+            b.logout()
+
+        b._check_ticket = ticket
+        with self.assertRaises(BackendError):
+            b.restore(dict(CREDS))
+        self.assertEqual(b._session(), (None, None), "the account before came back after the logout")
+        self.assertEqual(self.rotated, [])
+        b._check_ticket = real
+        self.assertEqual(b.restore(dict(CREDS)).id, ME, "a restore begun after it works")
+
+    def test_what_the_session_before_asked_is_not_kept_for_the_next(self):
+        S.chats["500"] = {"id": "500", "type": 2, "name": "示例项目群", "memberCount": 5, "lastMessagePosition": 10}
+        b = self.signed_in()
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {"7004": {"name": "示例同事丁"}}}
+        real_name = b._chatter_name
+
+        def name_then_out(client, uid):
+            out = real_name(client, uid)
+            b.logout()  # signed out while the name was on its way
+            return out
+
+        b._chatter_name = name_then_out
+        self.assertEqual(b.user_name("7004"), "示例同事丁")
+        self.assertEqual(b._names, {}, "a name the session before asked for, kept for the next")
+        b = self.signed_in()
+        real_chat = b._chat_of
+
+        def chat_then_out(chat_id, info):
+            out = real_chat(chat_id, info)
+            b.logout()
+            return out
+
+        b._chat_of = chat_then_out
+        self.assertEqual(b.chat_info("500").id, "500")
+        self.assertEqual(b._chats, {}, "a chat the session before asked about, kept for the next")
+
+    def test_a_logout_forgets_the_chats(self):
+        S.chats["500"] = {"id": "500", "type": 2, "name": "示例项目群", "memberCount": 5, "lastMessagePosition": 10}
+        b = self.signed_in()
+        b.chat_info("500")
+        b._learn_peer("600", "7003", ME)
+        self.assertIn("500", b._chats)
+        self.assertEqual(b._peers, {"600": "7003"})
+        b.logout()
+        self.assertEqual((b._chats, b._peers), ({}, {}), "the account before's chats and its direct chats' people")
+
+    def test_the_same_account_scanned_again_keeps_what_it_asked(self):
+        S.chats["500"] = {"id": "500", "type": 2, "name": "示例项目群", "memberCount": 5, "lastMessagePosition": 10}
+        b = self.signed_in()
+        real_chat = b._chat_of
+
+        def chat_then_again(chat_id, info):  # the same account signs in again (a new client) while it is asked
+            out = real_chat(chat_id, info)
+            b.restore(dict(CREDS))
+            return out
+
+        b._chat_of = chat_then_again
+        b.chat_info("500")
+        self.assertIn("500", b._chats, "the same account's answer is its own")
+
+    def test_a_restore_never_takes_the_place_of_another_accounts_session(self):
+        b = self.backend()
+        other = b.restore(dict(CREDS, user_id="7999", user_name="另一个示例用户"))  # signed in as another (a QR)
+        with self.assertRaises(BackendError):
+            b.restore(dict(CREDS))  # the saved sign-in of the one before, restored late
+        self.assertEqual(b._session()[1].id, other.id, "a late restore took the other account's place")
+
+
 # ---------------------------------------------------------------- sends
 
 
@@ -944,14 +1022,29 @@ class ReadTest(Base):
         self.b._apply_chats({"g8": {"id": "g8", "isDissolved": True}}, [], other)
         self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g8"], "another account's push changes nothing")
 
+    def test_a_push_for_another_account_is_not_put_on_this_ones_read(self):
+        client, me = self.b._signed_in()
+        self.set_groups(me, [("g1", "群一", 3, False)])
+        with self.b._groups_mu:
+            self.b._groups_busy = True  # a read of every group is out
+        other = larkagentx.Account("someone-else", "别人")
+        self.b._apply_chats({"g1": {"id": "g1", "isDissolved": True}}, [], other)  # heard on the link of another
+        real = self.b._read_groups
+        self.addCleanup(setattr, self.b, "_read_groups", real)
+        self.b._read_groups = lambda c: ([larkagentx.Chat(id="g1", kind="group", name="群一")], {"g1": 1}, True, {"g1"},
+                                         set())
+        self.b._groups_work(client, me)
+        self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g1"], "another account's push put on the read")
+
     def test_groups_left_or_dissolved_are_told_to_the_core(self):
         client, me = self.b._signed_in()
-        gone = []
-        self.b.on_chat_gone = gone.append
+        gone, whose = [], set()
+        self.b.on_chat_gone = lambda cid, account="": (gone.append(cid), whose.add(account))
         self.set_groups(me, [("g1", "群一", 3, False), ("g2", "群二", 3, False), ("g3", "群三", 3, False)])
         self.b._apply_chats({"g1": {"id": "g1", "isDissolved": True}, "g2": {"id": "g2", "type": 2, "name": "群二新名"}},
                             ["g9"], me)
         self.assertEqual(sorted(gone), ["g1", "g9"], "dissolved, and one the push says is no longer valid")
+        self.assertEqual(whose, {me.id}, "said for the account it was heard for (the core keeps it only for that one)")
         self.assertEqual([g.id for g in self.b.group_candidates(10)], ["g2", "g3"])
 
         def read_whole(ids, whole=True, listed=None, ended=None):
@@ -1022,7 +1115,7 @@ class ReadTest(Base):
         self.b._read_groups = read
         self.addCleanup(setattr, self.b, "_read_groups", real)
         gone = []
-        self.b.on_chat_gone = gone.append
+        self.b.on_chat_gone = lambda cid, account="": gone.append(cid)
         with self.b._groups_mu:
             self.b._groups_busy = True
         self.b._groups_work(client, me)
@@ -1047,7 +1140,7 @@ class ReadTest(Base):
     def test_details_without_a_type_are_not_the_end(self):
         client, me = self.b._signed_in()
         gone = []
-        self.b.on_chat_gone = gone.append
+        self.b.on_chat_gone = lambda cid, account="": gone.append(cid)
         self.set_groups(me, [("g1", "群一", 3, False)])
         self.b._groups_whole_ids, self.b._groups_at = {"g1"}, 1.0
 
@@ -1066,7 +1159,7 @@ class ReadTest(Base):
     def test_a_packet_without_the_list_is_no_read(self):
         client, me = self.b._signed_in()
         gone = []
-        self.b.on_chat_gone = gone.append
+        self.b.on_chat_gone = lambda cid, account="": gone.append(cid)
         self.set_groups(me, [("g1", "群一", 3, False)])
         self.b._groups_whole_ids = {"g1"}
         self.b._groups_at = 1.0
@@ -1080,7 +1173,7 @@ class ReadTest(Base):
     def test_a_push_told_once_even_when_the_read_also_lacks_it(self):
         client, me = self.b._signed_in()
         gone = []
-        self.b.on_chat_gone = gone.append
+        self.b.on_chat_gone = lambda cid, account="": gone.append(cid)
         self.set_groups(me, [("g1", "群一", 3, False), ("g2", "群二", 3, False)])
         self.b._groups_whole_ids = {"g1", "g2"}
         self.b._groups_at = 1.0

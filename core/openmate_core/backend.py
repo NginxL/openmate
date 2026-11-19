@@ -213,12 +213,14 @@ class Backend(abc.ABC):
     #: was told before for good, so this is how it changes (from any thread; it returns at once).
     on_people_kinds: Optional[Callable[[Dict[str, str]], None]] = None
     #: Set by the core: call it with a chat's id when the account left or deleted it (a group quit on the phone): the
-    #: core takes it out of its lists and unmarks it for 自动代答; a newer message brings it back (any thread).
-    on_chat_gone: Optional[Callable[[str], None]] = None
+    #: core takes it out of its lists and unmarks it for 自动代答; a newer message brings it back (any thread). An
+    #: adapter may add account=<the account id it heard it for>: dropped once another account is signed in.
+    on_chat_gone: Optional[Callable[..., None]] = None
 
     #: Set by the core: call it with a DocMention when the live link hears the user was @-mentioned in a document's
-    #: comment (from the listener's own thread; it returns at once).
-    on_doc_mention: Optional[Callable[["DocMention"], None]] = None
+    #: comment (from the listener's own thread; it returns at once). account=<the link's account id> as for
+    #: on_chat_gone.
+    on_doc_mention: Optional[Callable[..., None]] = None
 
     #: Set by the core: call it with {chat_id: when (unix seconds, 0 when unknown)} when the live link hears the user
     #: marked chats done in the service's own client (Feishu's 完成), from the listener's own thread (it returns at

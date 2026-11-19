@@ -304,9 +304,29 @@ class AgentRunner:
                 del self._posted[k]
             return self._digest(text) in self._posted
 
-    def _remember_post(self, body: str) -> None:
-        with self._mu:
+    def _remember_post(self, body: str, run: Optional[dict] = None) -> None:
+        if run is not None:
+            self._settle()
+        with self._mu:  # checked where forget empties it: an echo of a wiped run never outlives the switch
+            if run is not None and self.store.run_wiped(run["id"]):
+                return  # nothing goes out for it: no echo to look for (and none to hide the next account's lines)
             self._posted[self._digest(body)] = time.time()
+
+    def _settle(self) -> None:
+        settle = getattr(self.app, "settle", None)
+        if settle is not None:
+            settle()  # a sign-in being taken in: decided once it is bound
+
+    def _gone(self, run_id: str) -> bool:
+        """Nothing goes out in the user's name for the run: it was the account's signed in before, wiped by the
+        switch (a sign-in being taken in is waited for first)."""
+        self._settle()
+        return self.store.run_wiped(run_id)
+
+    def forget(self) -> None:
+        """Another account signed in: what /agent posted for the one before is no echo of the next one's lines."""
+        with self._mu:
+            self._posted.clear()
 
     def _header_marks(self) -> List[str]:
         marks = list(AI_MARKS[:2])
@@ -357,12 +377,14 @@ class AgentRunner:
         first, last = mark_lines(self._mark_view(t))
         return self._is_mark_line(first) or self._is_mark_line(last)
 
-    def on_message(self, row: dict) -> None:
-        """A newly stored live message."""
+    def on_message(self, row: dict, epoch: Optional[int] = None) -> None:
+        """A newly stored live message. epoch: the account generation it was heard in (ConnectorApp.account_epoch;
+        None: now). A request is claimed and its run written under ConnectorApp.owned, so another account's sign-in
+        never finds one of the account before half taken; once that sign-in came, nothing is claimed or started."""
         if row.get("from_history") or views.is_system(row) or row.get("same_as"):
             return  # a copy (Feishu: a thread reply's copy in the main stream): its original is the one taken
         if not row.get("mine"):
-            self._maybe_auto(row)
+            self._maybe_auto(row, epoch)
             return
         text = row.get("text") or ""
         if not text.strip():
@@ -379,19 +401,26 @@ class AgentRunner:
         if not self.enabled:
             return
         if body.lower() in STOP_WORDS:
-            if self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"])):
-                threading.Thread(target=self._on_stop, args=(row,), name="openmate-agent-stop", daemon=True).start()
+            with self.app.owned(epoch) as ok:
+                taken = ok and self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"]))
+            if taken:
+                threading.Thread(target=self._on_stop, args=(row, epoch), name="openmate-agent-stop", daemon=True).start()
             return
         req = match_prefix(body, self.prefix)
         if req is None:
             return
-        if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
-            return
-        run = self._new_run(row, req, now)
-        run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)
-        self.store.run_put(run)
+        with self.app.owned(epoch) as ok:
+            if not ok:
+                log.info("an /agent line of an account signed out meanwhile: not taken")
+                return
+            if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
+                return
+            run = self._new_run(row, req, now)
+            run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)
+            self.store.run_put(run)
         self._prune()
-        threading.Thread(target=self._start_run, args=(run, row), name="openmate-agent-start", daemon=True).start()
+        threading.Thread(target=self._start_run, args=(run, row, epoch), name="openmate-agent-start",
+                         daemon=True).start()
 
     # ---------------------------------------------------------------- 自动代答
 
@@ -425,7 +454,7 @@ class AgentRunner:
             self._guest_ok_until = time.time() + 600
         return ok
 
-    def _maybe_auto(self, row: dict) -> None:
+    def _maybe_auto(self, row: dict, epoch: Optional[int] = None) -> None:
         """Someone @-mentioned the user in a group they marked for 自动代答: the Agent answers it as the user, with no
         confirmation (the user's standing choice). Never a direct chat, a bot, @all alone, another AI's reply, or past
         the group's daily most."""
@@ -441,38 +470,48 @@ class AgentRunner:
         text = row.get("text") or ""
         if self.is_agent_text(text) or self._other_ai(text):
             return
-        if not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
-            return
-        threading.Thread(target=self._auto_start, args=(row, text, now), name="openmate-agent-auto", daemon=True).start()
+        with self.app.owned(epoch) as ok:
+            if not ok or not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
+                return
+        threading.Thread(target=self._auto_start, args=(row, text, now, epoch), name="openmate-agent-auto",
+                         daemon=True).start()
 
-    def _auto_start(self, row: dict, text: str, now: float) -> None:
+    def _auto_start(self, row: dict, text: str, now: float, epoch: Optional[int] = None) -> None:
         chat_id = row["chat_id"]
+        if not self.app.owns(epoch):
+            log.info("自动代答: not answered (the account signed out meanwhile)")
+            return
         # answering as the user never guesses who asked: a person, as the service says it now; a bot or "can't tell" is left
         people = getattr(self.app, "people", None)
         sender = row.get("sender_id") or ""
-        kind = people.kind_now(sender) if people is not None and sender else ""
+        kind = people.kind_now(sender, epoch) if people is not None and sender else ""
         if kind != "user":
             log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
             return
         with self._lock(GUEST_ROOM):  # the check and the reservation at once: two @s together never pass one place
-            why = self._guest_room(chat_id, "auto", now)
-            if why:
-                log.info("自动代答: not answered (%s); left for the user", why)
-                return
-            view = getattr(self.app.platform, "mark_view", None)
-            # the question as asked: WeChat drops only the real @s (a typed "@x" is part of it)
-            asked = view(text) if view is not None else strip_leading_mentions(text)
-            run = self._new_run(row, asked.strip(), now)
-            run["kind"] = "auto"
-            run["asker"] = row.get("sender_name") or ""
-            self.store.run_put(run)
-            self.store.quota_add(chat_id, "auto", now)
+            with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
+                if not ok:
+                    log.info("自动代答: not answered (the account signed out meanwhile)")
+                    return
+                why = self._guest_room(chat_id, "auto", now)
+                if why:
+                    log.info("自动代答: not answered (%s); left for the user", why)
+                    return
+                view = getattr(self.app.platform, "mark_view", None)
+                # the question as asked: WeChat drops only the real @s (a typed "@x" is part of it)
+                asked = view(text) if view is not None else strip_leading_mentions(text)
+                run = self._new_run(row, asked.strip(), now)
+                run["kind"] = "auto"
+                run["asker"] = row.get("sender_name") or ""
+                self.store.run_put(run)
+                self.store.quota_add(chat_id, "auto", now)
         self._prune()
-        self._start_run(run, row)
+        self._start_run(run, row, epoch)
 
-    def on_doc_mention(self, m) -> None:
+    def on_doc_mention(self, m, epoch: Optional[int] = None) -> None:
         """Someone @-mentioned the user in a document's comment (a doc or a wiki page): the Agent always answers it in
-        that comment as the user (the user's standing choice), unless it came from the user, a bot or another AI."""
+        that comment as the user (the user's standing choice), unless it came from the user, a bot or another AI.
+        epoch: the account generation it was heard in (as on_message)."""
         if not (self.enabled and self.auto_docs) or not m.id or not m.doc_url:
             return
         now = time.time()
@@ -480,13 +519,17 @@ class AgentRunner:
             return
         if ai_marked(m.text or "", AI_MARKS):
             return
-        if not self.store.seen_add("doc:%s" % m.id):
-            return
-        threading.Thread(target=self._doc_start, args=(m, now), name="openmate-agent-doc", daemon=True).start()
+        with self.app.owned(epoch) as ok:
+            if not ok or not self.store.seen_add("doc:%s" % m.id):
+                return
+        threading.Thread(target=self._doc_start, args=(m, now, epoch), name="openmate-agent-doc", daemon=True).start()
 
-    def _doc_start(self, m, now: float) -> None:
+    def _doc_start(self, m, now: float, epoch: Optional[int] = None) -> None:
+        if not self.app.owns(epoch):
+            log.info("文档代答: not answered (the account signed out meanwhile)")
+            return
         people = getattr(self.app, "people", None)
-        kind = people.kind_now(m.from_id) if people is not None and m.from_id else ""
+        kind = people.kind_now(m.from_id, epoch) if people is not None and m.from_id else ""
         if kind != "user":
             log.info("文档代答: not answered (the sender is %s)", kind or "unknown")
             return
@@ -509,15 +552,19 @@ class AgentRunner:
             except Exception:
                 asker = ""
         with self._lock(GUEST_ROOM):  # the check and the reservation at once
-            why = self._guest_room(doc_chat, "doc", now)
-            if why:
-                log.info("文档代答: not answered (%s)", why)
-                return
-            run = self._doc_run(m, doc_chat, asker, now)
-            self.store.run_put(run)
-            self.store.quota_add(doc_chat, "doc", now)
+            with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
+                if not ok:
+                    log.info("文档代答: not answered (the account signed out meanwhile)")
+                    return
+                why = self._guest_room(doc_chat, "doc", now)
+                if why:
+                    log.info("文档代答: not answered (%s)", why)
+                    return
+                run = self._doc_run(m, doc_chat, asker, now)
+                self.store.run_put(run)
+                self.store.quota_add(doc_chat, "doc", now)
         self._prune()
-        self._start_run(run, None)
+        self._start_run(run, None, epoch)
 
     def _doc_run(self, m, doc_chat: str, asker: str, now: float) -> dict:
         return {
@@ -585,11 +632,16 @@ class AgentRunner:
                 return r
         return None
 
-    def _ack_request(self, run: dict) -> None:
+    def _ack_request(self, run: dict, epoch: Optional[int] = None) -> None:
         """Say the request was taken: a reaction on it (agent_ack_reaction; none when empty). Never in the way."""
         backend = getattr(self.app, "backend", None)
-        if not self.ack or backend is None or run.get("kind") == "doc" or not self.store.seen_add("ack:%s" % run["id"]):
+        if not self.ack or backend is None or run.get("kind") == "doc":
             return  # a document's comment has no chat message to react on
+        with self.app.owned(epoch) as ok:
+            if not ok or not self.store.seen_add("ack:%s" % run["id"]):
+                return
+        if self._gone(run["id"]):
+            return
         try:
             mid = backend.react(run["chat_id"], run["request_id"], self.ack)
         except Exception as e:
@@ -617,14 +669,14 @@ class AgentRunner:
             cur["ack_end"] = outcome
             self.store.run_put(cur)
         backend = getattr(self.app, "backend", None)
-        if backend is None:
+        if backend is None or self._gone(run_id):
             return
         try:
             backend.unreact(cur["chat_id"], cur["request_id"], cur["acked"])
         except Exception as e:
             log.info("the /agent request's reaction was not taken back (%s)", getattr(e, "kind", "") or e.__class__.__name__)
         new = {"done": self.done_reaction, "failed": self.fail_reaction}.get(outcome, "")
-        if new:
+        if new and not self._gone(run_id):  # another account's sign-in while it was taken back: not put
             try:
                 backend.react(cur["chat_id"], cur["request_id"], new)
             except Exception as e:
@@ -639,13 +691,17 @@ class AgentRunner:
             log.exception("/agent start failed")
             self._fail(run["id"], "没能启动 Agent：扩展内部错误")
 
-    def _start_run(self, run: dict, row: dict) -> None:
+    def _start_run(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
+        if not self.app.owns(epoch):
+            # claimed for the account signed in before; the switch wiped its run: nothing is said or started
+            log.info("an /agent request of an account signed out meanwhile: not started")
+            return
         if run.get("kind") not in GUEST_KINDS:
-            self._ack_request(run)
+            self._ack_request(run, epoch)
         elif self._guest_supported() and (run.get("kind") != "auto" or self.app.platform.ack_auto):
-            self._ack_request(run)  # never "处理中" for what cannot start
+            self._ack_request(run, epoch)  # never "处理中" for what cannot start
         try:
-            self._start(run, row)
+            self._start(run, row, epoch)
         except Exception:
             log.exception("/agent start failed")
             self._fail(run["id"], "没能启动 Agent：扩展内部错误")
@@ -655,7 +711,11 @@ class AgentRunner:
         """The request id the Agent replies with: the run's id, then `<id>.<try>` for each start tried again."""
         return run.get("ref") or run["id"]
 
-    def _start(self, run: dict, row: dict) -> None:
+    def _start(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
+        """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
+        is touched, once another account's sign-in took the store."""
+        if not self.app.owns(epoch):
+            return
         if not self.hub.available:
             self._fail(run["id"], "没能处理 /agent：扩展拿不到 Persona hub 的地址或令牌")
             return
@@ -664,7 +724,7 @@ class AgentRunner:
             prompt = run["start_prompt"]  # the very request sent before
         else:
             try:
-                prompt = self._doc_prompt(run) if run.get("kind") == "doc" else self.build_prompt(run, row, prev)
+                prompt = self._doc_prompt(run) if run.get("kind") == "doc" else self.build_prompt(run, row, prev, epoch)
             except Exception:
                 log.exception("/agent context could not be gathered")
                 prompt = self._instructions(run) + "\n" + (run["request_text"] or self.prefix)
@@ -674,7 +734,8 @@ class AgentRunner:
         baseline: Optional[int] = None
         op = ""
         if prev is not None:
-            self._supersede(prev["id"], run["id"])
+            if not self._supersede(prev["id"], run["id"], epoch):
+                return  # another account's sign-in took the store: prev may be that account's, never gone on in
         else:
             # a new conversation is started once: one operation id and the very same request on every try, and after
             # a restart too (the hub answers a repeat with the first answer), never a second start under a new ref
@@ -684,7 +745,7 @@ class AgentRunner:
         while True:
             if self._stop.is_set():  # shutting down: the next start tells the user to send it again
                 return
-            if self._state(run["id"]) == "stopped":
+            if self._state(run["id"]) in ("stopped", ""):  # stopped, or wiped by another account's sign-in
                 return
             if not self._hub_up(run["id"], deadline):
                 if not self._stop.is_set() and self._state(run["id"]) != "stopped":
@@ -696,6 +757,8 @@ class AgentRunner:
                     mid, sid = prev["machine_id"], prev["session_id"]
                     if baseline is None:
                         baseline = self._latest_seq(mid, sid)
+                    if not self._may_submit(run, epoch):
+                        return
                     self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
                               "ours_seen": False, "continued": prev["id"]}
@@ -704,11 +767,15 @@ class AgentRunner:
                         log.warning("%s: the hub has no guest conversations; nothing started", run.get("kind"))
                         self._fail(run["id"], "hub 不支持访客会话")
                         return
+                    if not self._may_submit(run, epoch):
+                        return
                     sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
                                                        guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True, "guest": True}
                 else:
+                    if not self._may_submit(run, epoch):
+                        return
                     sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True}
@@ -749,13 +816,16 @@ class AgentRunner:
                 self._stop.wait(min(t.agent_hub_probe, max(0.0, deadline - time.time())))
         stopped = False
         with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"]) or run
-            cur.update(fields)
-            if cur["state"] == "stopped":
-                stopped = True
-            else:
-                cur["state"] = "running"
-            self.store.run_put(cur)
+            cur = self.store.run_get(run["id"])
+            if cur is not None:
+                cur.update(fields)
+                if cur["state"] == "stopped":
+                    stopped = True
+                else:
+                    cur["state"] = "running"
+            if cur is None or not self.store.run_put(cur):
+                stopped = True  # gone meanwhile (another account's sign-in wiped it): nothing here can answer it
+                log.info("an /agent request gone while it started (the account signed out): its conversation is stopped")
         if stopped:  # /stop arrived while it was starting
             try:
                 self.hub.stop_conversation(fields["session_id"])
@@ -766,11 +836,17 @@ class AgentRunner:
                  ", try %d" % tries if tries > 1 else "")
         self._wake.set()
 
+    def _may_submit(self, run: dict, epoch: Optional[int]) -> bool:
+        """Right before the request goes to the hub: not stopped, and still the account's it was claimed for (another
+        account's sign-in wiped it while the hub was waited for or asked)."""
+        return self.app.owns(epoch) and self._state(run["id"]) not in ("stopped", "")
+
     def _hub_up(self, run_id: str, deadline: float) -> bool:
-        """Wait until the hub answers; False when it did not by the deadline, or the request was stopped meanwhile."""
+        """Wait until the hub answers; False when it did not by the deadline, or the request was stopped (or wiped by
+        another account's sign-in) meanwhile."""
         t = self.app.timing
         while True:
-            if self._stop.is_set() or self._state(run_id) == "stopped":
+            if self._stop.is_set() or self._state(run_id) in ("stopped", ""):
                 return False
             try:
                 self.hub.health(timeout=max(1.0, min(10.0, deadline - time.time())))
@@ -787,7 +863,9 @@ class AgentRunner:
         """(run, op id, prompt) of a new conversation's start: made once and kept with the run, so every try (and a
         resume after a restart) sends the same operation and the same body."""
         with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"]) or run
+            cur = self.store.run_get(run["id"])
+            if cur is None:  # gone (another account's sign-in wiped it): the start loop ends at its first check
+                return run, "", prompt
             if not cur.get("start_op"):
                 cur["start_op"] = str(uuid.uuid4())
                 cur["start_prompt"] = prompt
@@ -803,15 +881,20 @@ class AgentRunner:
             self.store.run_put(cur)
             return cur
 
-    def _supersede(self, prev_id: str, run_id: str) -> None:
+    def _supersede(self, prev_id: str, run_id: str, epoch: Optional[int] = None) -> bool:
         """A newer request goes on in the same conversation: the turn's end is the newer one's to answer, so the older
-        run stops waiting (and can never post a fallback for the same turn). Its reply tool keeps working."""
+        run stops waiting (and can never post a fallback for the same turn). Its reply tool keeps working. False (and
+        nothing changed) once another account's sign-in took the store since epoch, or the newer run is gone."""
         with self._lock(prev_id):
-            cur = self.store.run_get(prev_id)
-            if cur is not None and cur["state"] in ACTIVE:
-                cur["state"] = "done"
-                cur["superseded_by"] = run_id
-                self.store.run_put(cur)
+            with self.app.owned(epoch) as ok:
+                if not ok or self.store.run_get(run_id) is None:
+                    return False
+                cur = self.store.run_get(prev_id)
+                if cur is not None and cur["state"] in ACTIVE:
+                    cur["state"] = "done"
+                    cur["superseded_by"] = run_id
+                    self.store.run_put(cur)
+        return True
 
     def _latest_seq(self, mid: str, sid: str) -> int:
         try:
@@ -865,7 +948,7 @@ class AgentRunner:
     def _media_tool(self) -> str:
         return str(getattr(self.app.platform, "media_tool", "") or "")
 
-    def build_prompt(self, run: dict, row: dict, prev: Optional[dict]) -> str:
+    def build_prompt(self, run: dict, row: dict, prev: Optional[dict], epoch: Optional[int] = None) -> str:
         app = self.app
         store = app.store
         chat_id = run["chat_id"]
@@ -887,7 +970,7 @@ class AgentRunner:
             upto = int(row["position"]) + 1
             rows = store.messages_before(chat_id, upto, CONTEXT_MESSAGES + 1)
             if len(rows) < CONTEXT_MESSAGES + 1:
-                app.fill_older(chat_id, rows[0]["position"] if rows else upto, CONTEXT_MESSAGES + 1 - len(rows))
+                app.fill_older(chat_id, rows[0]["position"] if rows else upto, CONTEXT_MESSAGES + 1 - len(rows), epoch)
                 rows = store.messages_before(chat_id, upto, CONTEXT_MESSAGES + 1)
             title = "最近 %d 条消息" % CONTEXT_MESSAGES
         if prev is not None:
@@ -1130,12 +1213,15 @@ class AgentRunner:
                 post = None
                 with self._lock(run_id):
                     cur = self.store.run_get(run_id)
-                    cur["fallback"] = "failed"  # nothing in the journal: a late answer may still go out
-                    self.store.run_put(cur)
+                    if cur is not None:  # gone: wiped by another account's sign-in meanwhile
+                        cur["fallback"] = "failed"  # nothing in the journal: a late answer may still go out
+                        self.store.run_put(cur)
         if post is not None:
             mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, model_effort=me, **self._where(cur))
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
+                if cur is None:
+                    return
                 cur["fallback"] = "sent" if mid else "failed"
                 if mid:
                     cur["reply_ids"] = (cur.get("reply_ids") or []) + [mid]
@@ -1160,10 +1246,11 @@ class AgentRunner:
                                   **self._where(cur))
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
-                cur["timeout_notice"] = "done"  # the send journal says whether it went out (or may have)
-                if mid:
-                    cur["notice_id"] = mid  # a /stop quoting it finds the run (in the main stream there is no thread)
-                self.store.run_put(cur)
+                if cur is not None:  # gone: wiped by another account's sign-in meanwhile
+                    cur["timeout_notice"] = "done"  # the send journal says whether it went out (or may have)
+                    if mid:
+                        cur["notice_id"] = mid  # a /stop quoting it finds the run (in the main stream there is no thread)
+                    self.store.run_put(cur)
 
     def _fail(self, run_id: str, message: str) -> None:
         with self._lock(run_id):
@@ -1172,7 +1259,8 @@ class AgentRunner:
                 return
             cur["state"] = "failed"
             cur["error"] = message
-            self.store.run_put(cur)
+            if not self.store.run_put(cur):
+                return  # wiped by another account's sign-in meanwhile: nothing is said for it
         self._end_reaction(run_id, "failed")
         self._post_once(cur, "agent:%s:failed" % run_id, message, **self._where(cur))
 
@@ -1265,6 +1353,7 @@ class AgentRunner:
         (sent.record, allowed by the manifest's sends_as_user); one answered from the journal is not told again."""
 
         def go() -> dict:
+            self._still_ours(run)
             mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None, to_chat=to_chat)
             chat = self.store.get_chat(run["chat_id"])
             self.app.record_sent(run["chat_id"], body, str(mid or ""), reply_to=reply_to, root=root,
@@ -1279,6 +1368,7 @@ class AgentRunner:
         """A reply in the document's comment as the user, once per key (the send journal)."""
 
         def go() -> dict:
+            self._still_ours(run)
             backend = self.app.backend
             if backend is None or not self.app.signed_in:
                 raise RPCError("飞书还没登录，回复不了这条评论")
@@ -1293,6 +1383,7 @@ class AgentRunner:
             me = (self.app.me_name() or "").strip()
             if not writer or writer != me:
                 raise RPCError("lark-cli 现在登录的不是这个飞书账号，这条评论不回复")
+            self._still_ours(run)  # again: who lark-cli writes as was asked meanwhile
             try:
                 rid = backend.reply_doc_comment(run["doc_url"], run["comment_id"], body)
             except BackendError as e:
@@ -1307,6 +1398,12 @@ class AgentRunner:
 
         return self.app.send_once(key, "agent", go)
 
+    def _still_ours(self, run: dict) -> None:
+        """Right before something goes out in the user's name for run: refused (RPCError, surely not sent) when the
+        run was the account's signed in before, wiped by the switch (the one signed in now must not say it)."""
+        if self._gone(run["id"]):
+            raise RPCError("换了%s账号，这个 /agent 请求是之前那个账号的，不再以你的身份发出" % self.app.platform.name)
+
     def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "", to_chat: bool = False,
                    model_effort: Optional[tuple] = None) -> str:
         """Send text (with the header / end mark) into the run's chat once per key; the new message's id, "" when it
@@ -1316,7 +1413,7 @@ class AgentRunner:
             log.info("%s %s: nothing posted for %s", run.get("kind"), run["id"], key.split(":", 1)[0])
             return ""
         body = self.with_suffix(text, run, model_effort)
-        self._remember_post(body)
+        self._remember_post(body, run)
         try:
             res = self._send(run, key, body, reply_to, root, to_chat)
             return str(res.get("message_ref") or "")
@@ -1370,6 +1467,8 @@ class AgentRunner:
             key = "agent:%s:%s" % (run["id"], hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
+            if cur is None:  # wiped by another account's sign-in meanwhile
+                raise RPCError("这个 /agent 请求已经不在了（换了%s账号），不再回复" % self.app.platform.name)
             if cur["state"] in ("stopped", "failed"):
                 raise RPCError("这个 /agent 请求已经停止了，不再回复")
             # what took the one reply: a reply, a fallback being sent, or a fallback / timeout notice in the send
@@ -1393,11 +1492,12 @@ class AgentRunner:
         if not self._clean_answer(text, cur, me).strip():
             with self._lock(run["id"]):
                 cur = self.store.run_get(run["id"])
-                cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
-                self.store.run_put(cur)
+                if cur is not None:
+                    cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
+                    self.store.run_put(cur)
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
         body = self.with_suffix(text, cur, me)
-        self._remember_post(body)
+        self._remember_post(body, cur)
         sent_id = ""
         try:
             if cur.get("kind") == "doc":
@@ -1411,13 +1511,16 @@ class AgentRunner:
             went = row is not None and row["state"] in ("uncertain", "done")  # it may have gone out: no fallback
             with self._lock(run["id"]):
                 cur = self.store.run_get(run["id"])
-                cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
-                if went:
-                    cur["replies"] = int(cur.get("replies") or 0) + 1
-                self.store.run_put(cur)
+                if cur is not None:  # gone: wiped by another account's sign-in meanwhile
+                    cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
+                    if went:
+                        cur["replies"] = int(cur.get("replies") or 0) + 1
+                    self.store.run_put(cur)
             raise
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
+            if cur is None:  # wiped by another account's sign-in while it went out: nothing more is done for it
+                return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
             cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
             cur["replies"] = int(cur.get("replies") or 0) + 1
             if sent_id:
@@ -1436,7 +1539,9 @@ class AgentRunner:
         path, sha, name = pic
         key = "agent:%s:image:%s" % (run["id"], sha[:32])
         with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"]) or run
+            cur = self.store.run_get(run["id"])
+            if cur is None:
+                return "；任务已经不在了，图片没有发"
             if cur["state"] in ("stopped", "failed"):
                 cur["image_note"] = "；任务已经停止，图片没有发"
                 self.store.run_put(cur)
@@ -1445,6 +1550,7 @@ class AgentRunner:
             self.store.run_put(cur)
 
         def go() -> dict:
+            self._still_ours(run)
             mid = self.app.send_image_as_user(run["chat_id"], path)
             chat = self.store.get_chat(run["chat_id"])
             self.app.record_sent(run["chat_id"], "[图片] %s" % name, str(mid or ""),
@@ -1467,11 +1573,12 @@ class AgentRunner:
                 log.warning("an /agent reply's picture was not sent: %s", e.code or "error")
                 note = "；但图片没发出去：%s（文字已经发了，这次请求不要再回复）" % e.message
         with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"]) or run
-            cur["image_note"] = note
-            if mid:  # a /stop quoting the picture finds this run too
-                cur["reply_ids"] = (cur.get("reply_ids") or []) + [mid]
-            self.store.run_put(cur)
+            cur = self.store.run_get(run["id"])
+            if cur is not None:
+                cur["image_note"] = note
+                if mid:  # a /stop quoting the picture finds this run too
+                    cur["reply_ids"] = (cur.get("reply_ids") or []) + [mid]
+                self.store.run_put(cur)
         return note
 
     def _other_ai(self, text: str) -> bool:
@@ -1496,8 +1603,10 @@ class AgentRunner:
         when the edit is refused). Never the answer: a turn that ends with only progress still posts its last words."""
         with self._lock("progress:" + run["id"]):  # two updates at once never make two progress messages
             cur = self.store.run_get(run["id"])
+            if cur is None:  # wiped by another account's sign-in meanwhile
+                raise RPCError("这个 /agent 请求已经不在了（换了%s账号），不再回复" % self.app.platform.name)
             body = self.with_suffix(PROGRESS_MARK + "\n" + text.strip(), cur)
-            self._remember_post(body)
+            self._remember_post(body, cur)
             pid = str(cur.get("progress_id") or "")
             if pid and self._edit(cur, pid, body, "/agent 更新了进度消息"):
                 self._keep_progress(cur["id"], pid, text)
@@ -1522,18 +1631,19 @@ class AgentRunner:
             if cur is None or not cur.get("progress_id") or cur.get("progress_closed"):
                 return
             body = self.with_suffix(PROGRESS_DONE_MARK + "\n" + (cur.get("progress_text") or ""), cur)
-            self._remember_post(body)
+            self._remember_post(body, cur)
             if self._edit(cur, cur["progress_id"], body, "/agent 把进度消息标成已完成"):
                 with self._lock(cur["id"]):
                     cur = self.store.run_get(cur["id"])
-                    cur["progress_closed"] = True
-                    self.store.run_put(cur)
+                    if cur is not None:  # gone: wiped by another account's sign-in meanwhile
+                        cur["progress_closed"] = True
+                        self.store.run_put(cur)
 
     def _edit(self, run: dict, mid: str, body: str, summary: str) -> bool:
         """Edit a message /agent sent, as the user; told to the sent-as-user ledger like a send. False when the
         service has no editing or refused it."""
         backend = getattr(self.app, "backend", None)
-        if backend is None:
+        if backend is None or self._gone(run["id"]):
             return False
         try:
             backend.edit(run["chat_id"], mid, body)
@@ -1580,22 +1690,29 @@ class AgentRunner:
             return runs[0]
         return None
 
-    def _on_stop(self, row: dict) -> None:
+    def _on_stop(self, row: dict, epoch: Optional[int] = None) -> None:
         try:
-            run = self._target(row)
+            with self.app.owned(epoch) as ok:  # chosen among that account's runs only
+                if not ok:
+                    return  # a /stop of an account signed out meanwhile: the runs here are another account's
+                run = self._target(row)
             if run is None:
                 return
             self._stop_run(run, row)
         except Exception:
-            log.exception("/stop failed")
+            if not self.app.closing.is_set():  # the store closing under it is no failure of the /stop
+                log.exception("/stop failed")
 
     def _stop_run(self, run: dict, row: dict) -> None:
         with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"]) or run
+            cur = self.store.run_get(run["id"])
+            if cur is None:
+                return  # gone meanwhile (pruned, or wiped by another account's sign-in): nothing here to stop
             before = cur["state"]
             cur["state"] = "stopped"
             cur["stopped_at"] = time.time()
-            self.store.run_put(cur)
+            if not self.store.run_put(cur):
+                return
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
         tasks: List[str] = []

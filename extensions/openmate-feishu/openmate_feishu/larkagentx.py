@@ -505,6 +505,7 @@ class LarkXBackend(Backend):
         self._lock = threading.RLock()
         self._auth = None
         self._client = None
+        self._session_no = 0  # moves on at every sign-in and logout: a restore begun before one never takes the place
         self._me: Optional[Account] = None
         self._creds: Optional[dict] = None
         self._qr: Dict[str, dict] = {}
@@ -603,16 +604,35 @@ class LarkXBackend(Backend):
             except Exception:
                 pass
 
-    def _set_session(self, auth, client, acct: Account, creds: dict) -> None:
+    def _set_session(self, auth, client, acct: Account, creds: dict, since: Optional[int] = None) -> None:
+        """The session from now on. since: the session number a restore began at; a sign-in or logout since then
+        wins, and so does another account's session already here (a sign-in the core is still taking in): this one
+        is let go (BackendError)."""
         with self._lock:
-            old = self._client
-            self._auth, self._client, self._me, self._creds = auth, client, acct, creds
+            stale = since is not None and (since != self._session_no or (self._me is not None and self._me.id != acct.id))
+            if not stale:
+                old = self._client
+                if self._me is not None and self._me.id != acct.id:
+                    self._chats.clear()  # another account: what the one before was told is not this one's
+                    self._names.clear()
+                    self._peers.clear()
+                    self._doc_writer = None
+                self._auth, self._client, self._me, self._creds = auth, client, acct, creds
+                self._session_no += 1
+        if stale:
+            self._close_client(client)
+            raise BackendError("恢复登录时已经退出或换了账号：这次恢复作废", "unknown")
         if old is not None and old is not client:
             self._close_client(old)
 
     def _session(self):
         with self._lock:
             return self._client, self._me
+
+    def _still(self, me: Optional[Account]) -> bool:
+        """Under _lock: the account a request was made for is still the one signed in (the same account scanned again
+        is the same one; a sign-out or another account is not)."""
+        return me is not None and self._me is not None and self._me.id == me.id
 
     def _signed_in(self):
         client, me = self._session()
@@ -707,6 +727,8 @@ class LarkXBackend(Backend):
         if region != self.region_name:
             raise CredentialsExpired("区域设置换成了%s，之前的登录属于%s，需要重新扫码登录"
                                      % (REGION_LABELS.get(self.region_name, self.region_name), REGION_LABELS.get(region, region)))
+        with self._lock:
+            since = self._session_no  # a sign-in or logout while this one asks the service wins over it
         auth = self._new_auth()
         auth.cookies = dict(c["cookies"])
         auth.saved_at = float(c.get("saved_at") or 0)
@@ -721,7 +743,7 @@ class LarkXBackend(Backend):
         name = str(c.get("user_name") or "") or self._chatter_name(client, uid)
         acct = Account(uid, name)
         creds = self._creds_of(auth, name)
-        self._set_session(auth, client, acct, creds)
+        self._set_session(auth, client, acct, creds, since=since)
         if creds != {k: c.get(k) for k in creds}:
             self._rotated(creds)  # LarkAgentX filled something in (the app key, the name): seal the new copy
         return acct
@@ -730,9 +752,13 @@ class LarkXBackend(Backend):
         with self._lock:
             old = self._client
             self._auth = self._client = self._me = self._creds = None
+            self._session_no += 1
             self._own = None
             self._qr.clear()
             self._names.clear()
+            self._chats.clear()
+            self._peers.clear()
+            self._doc_writer = None
         with self._groups_mu:
             self._groups, self._groups_join, self._groups_owner, self._groups_at = [], {}, "", 0.0
             self._groups_whole_ids = set()
@@ -975,12 +1001,13 @@ class LarkXBackend(Backend):
                 for g in keep:
                     joined.setdefault(g.id, self._groups_join.get(g.id, 0))
                 self._groups, self._groups_join, self._groups_owner = groups, joined, me.id
-                for infos, gone in self._groups_delta:
-                    # only onto this read's list: the core heard of these when they were pushed
-                    self._apply_chats_locked(infos, gone, me)
+                for owner, infos, gone in self._groups_delta:
+                    # only onto this read's list: the core heard of these when they were pushed (this account's only)
+                    if owner == me.id:
+                        self._apply_chats_locked(infos, gone, me)
                 self._groups_delta = []
                 self._groups_busy = False
-            self._report_gone(left)
+            self._report_gone(left, me)
             log.info("Feishu groups: %d%s", len(groups), "" if whole else " (not all of them: read again soon)")
         except BackendError as e:
             log.info("the groups could not be read: %s", e.kind)
@@ -1089,19 +1116,20 @@ class LarkXBackend(Backend):
                 infos[str(info.get("id") or key)] = info
         with self._groups_mu:
             if self._groups_busy:
-                self._groups_delta.append((infos, list(gone)))  # put on the read's result too, when it comes
+                self._groups_delta.append((me.id, infos, list(gone)))  # put on the read's result too, when it comes
             left = self._apply_chats_locked(infos, gone, me)
-        self._report_gone(left)
+        self._report_gone(left, me)
 
-    def _report_gone(self, chat_ids) -> None:
-        """Tell the core the account left these chats (or they were dissolved): out of its lists, unmarked for
-        自动代答, until a newer message brings one back. Outside any lock of the adapter's."""
+    def _report_gone(self, chat_ids, me: Account) -> None:
+        """Tell the core the account (me) left these chats (or they were dissolved): out of its lists, unmarked for
+        自动代答, until a newer message brings one back; the core keeps it only while me is the one signed in. Outside
+        any lock of the adapter's."""
         cb = self.on_chat_gone
         if cb is None:
             return
         for cid in sorted(set(chat_ids)):
             try:
-                cb(cid)
+                cb(cid, account=me.id)
             except Exception as e:
                 log.warning("a chat gone was not taken (%s)", type(e).__name__)
 
@@ -1284,7 +1312,7 @@ class LarkXBackend(Backend):
             cb = self.on_doc_mention
             if cb is not None:
                 try:
-                    cb(m)
+                    cb(m, account=me.id)  # heard for me: taken only while me is the one signed in
                 except Exception as e:
                     log.warning("a document mention was not taken (%s)", type(e).__name__)
 
@@ -1297,11 +1325,13 @@ class LarkXBackend(Backend):
         now = time.monotonic()
         with self._lock:
             hit = getattr(self, "_doc_writer", None)
+            me = self._me
         if hit is not None and hit[0] > now and not fresh:
             return hit[1]
         name = self.cli.user_name()
         with self._lock:
-            self._doc_writer = (now + (600.0 if name else 60.0), name)
+            if self._still(me):  # asked while the account is the one signed in: kept for it
+                self._doc_writer = (now + (600.0 if name else 60.0), name)
         return name
 
     def reply_doc_comment(self, doc_url: str, comment_id: str, text: str) -> str:
@@ -1339,7 +1369,7 @@ class LarkXBackend(Backend):
         # a copy in the main stream: of the reply it names, else of one it does not (still a copy, never a command)
         same_as = (marks.get("sync_related") or msg_id) if marks.get("sync_type") == SYNC_TARGET else ""
         if sender and sender != me_id and _int(d.get("chat_type")) == CHAT_P2P:
-            self._learn_peer(chat_id, sender)
+            self._learn_peer(chat_id, sender, me_id)
         mentions = self._mentions(data)
         at_all = "all" in mentions
         at_me = bool(me_id) and (me_id in mentions or (bool(d.get("at_me")) and not at_all))
@@ -1399,10 +1429,11 @@ class LarkXBackend(Backend):
         except Exception:
             return False
 
-    def _learn_peer(self, chat_id: str, user_id: str) -> None:
-        """The other person of a direct chat, from their message in it (the chat's own record may have no name)."""
+    def _learn_peer(self, chat_id: str, user_id: str, me_id: str) -> None:
+        """The other person of a direct chat, from their message in it (the chat's own record may have no name), for
+        the account that read it while it is the one signed in."""
         with self._lock:
-            if self._peers.get(chat_id) == user_id:
+            if self._me is None or self._me.id != me_id or self._peers.get(chat_id) == user_id:
                 return
             self._peers[chat_id] = user_id
             hit = self._chats.get(chat_id)
@@ -1570,7 +1601,7 @@ class LarkXBackend(Backend):
         if limit <= 0:
             return []
         if before_position is None:
-            info = self._chat_raw(client, chat_id)
+            info = self._chat_raw(client, chat_id, me)
             hi = _int(info.get("lastMessagePosition")) + 1
         else:
             hi = _int(before_position)
@@ -1640,7 +1671,12 @@ class LarkXBackend(Backend):
             else:
                 note_flags(m.type, entity_flags(ent))
 
-    def _chat_raw(self, client, chat_id: str) -> dict:
+    def _chat_raw(self, client, chat_id: str, me: Optional[Account] = None) -> dict:
+        return self._chat_read(client, chat_id, me)[0]
+
+    def _chat_read(self, client, chat_id: str, me: Optional[Account] = None) -> Tuple[dict, Chat]:
+        """The service's answer about a chat and the chat it makes, kept for the session that asked (while it is the
+        one)."""
         try:
             info = client.get_chat_info(chat_id)
         except Exception as e:
@@ -1652,11 +1688,12 @@ class LarkXBackend(Backend):
             raise BackendError("飞书暂时没有回答（读取会话信息时）", "unreachable")
         chat = self._chat_of(chat_id, info)
         with self._lock:
-            self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
+            if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
+                self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
             last = _int(info.get("lastMessagePosition"))
             if last > self._last_pos.get(chat_id, 0):
                 self._last_pos[chat_id] = last
-        return info
+        return info, chat
 
     def _chat_of(self, chat_id: str, info: dict) -> Chat:
         dec = self.lx.decoders
@@ -1704,7 +1741,7 @@ class LarkXBackend(Backend):
         return chat_id
 
     def recent_chats(self, limit: int) -> List[Chat]:
-        client, _ = self._signed_in()
+        client, me = self._signed_in()
         if limit <= 0:
             return []
         chats: List[Chat] = []
@@ -1725,8 +1762,9 @@ class LarkXBackend(Backend):
             raise self._net(failed, "读取最近的会话")
         now = time.monotonic()
         with self._lock:
-            for c in chats:
-                self._chats[c.id] = (now + CHAT_TTL, c)
+            if self._still(me):
+                for c in chats:
+                    self._chats[c.id] = (now + CHAT_TTL, c)
         return chats[:limit]
 
     def _recent_from_chats(self, client, limit: int) -> List[Chat]:
@@ -1777,10 +1815,8 @@ class LarkXBackend(Backend):
             hit = self._chats.get(chat_id)
         if hit is not None and hit[0] > time.monotonic():
             return hit[1]
-        client, _ = self._signed_in()
-        self._chat_raw(client, chat_id)
-        with self._lock:
-            return self._chats[chat_id][1]
+        client, me = self._signed_in()
+        return self._chat_read(client, chat_id, me)[1]
 
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         user_id = _id(user_id)
@@ -1806,7 +1842,8 @@ class LarkXBackend(Backend):
         if not name:
             name = self._chatter_name(client, user_id)
         with self._lock:
-            self._names[key] = (now + (NAME_TTL if name else NAME_MISS_TTL), name)
+            if self._still(me):
+                self._names[key] = (now + (NAME_TTL if name else NAME_MISS_TTL), name)
         return name
 
     def react(self, chat_id: str, message_id: str, reaction: str) -> None:
@@ -2013,7 +2050,7 @@ class LarkXBackend(Backend):
         user_id = _id(user_id)
         if not user_id.isdigit():
             raise BackendError("%s用户 id 不对" % self.region.label, "not_found")
-        client, _ = self._signed_in()
+        client, me = self._signed_in()
         try:
             chat_id = _id(client.create_chat(user_id))
         except Exception as e:
@@ -2021,10 +2058,11 @@ class LarkXBackend(Backend):
         if not chat_id:
             raise BackendError("%s没有给出和这个人的私聊" % self.region.label, "not_found")
         with self._lock:
-            self._peers[chat_id] = user_id
-            hit = self._chats.get(chat_id)
-            if hit is not None:
-                hit[1].peer_id = user_id
+            if self._still(me):  # the account that opened it is still the one: kept for it
+                self._peers[chat_id] = user_id
+                hit = self._chats.get(chat_id)
+                if hit is not None:
+                    hit[1].peer_id = user_id
         return chat_id
 
     # ------------------------------------------------------------ errors
