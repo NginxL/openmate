@@ -21,7 +21,7 @@ JPG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
 class Pictures(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="openmate-image-test-", dir="/tmp")
+        self.tmp = tempfile.mkdtemp(prefix="openmate-image-test-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def picture(self, name="flow.png", data=PNG):
