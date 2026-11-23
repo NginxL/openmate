@@ -824,7 +824,16 @@ class AgentRunner:
                 return
             self._starting_now.add(run["id"])
         try:
-            self._start_once(run, row, epoch)
+            if not self.app.owns(epoch):
+                return  # another account's sign-in took the store, or the app is closing
+            cur = self.store.run_get(run["id"])
+            if cur is None or cur.get("state") != "starting":
+                return  # a resume that read it before the other start ended it (started, stopped, failed)
+            try:
+                self._start_once(cur, row, epoch)
+            except Exception:
+                log.exception("/agent start failed")
+                self._fail(run["id"], "没能启动 Agent：扩展内部错误")  # while this loop still holds the run
         finally:
             with self._mu:
                 self._starting_now.discard(run["id"])
@@ -939,12 +948,14 @@ class AgentRunner:
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if op and e.delivered == "none" and e.retryable is True:
+                if (op and e.delivered == "none" and e.retryable is True
+                        and time.time() < float(run.get("created") or 0) + t.agent_hub_wait):
                     # The hub's own answer to this operation: nothing ran (the machine was away for a moment). The hub
                     # keeps that answer as the operation's receipt, so the same id asked again only gets it back until
                     # the deadline (2026-11-23: a node restarted for 9 s, the request then waited out its 5 minutes).
                     # The next try goes under a new id: the old one started nothing, so it cannot start a second
-                    # conversation, and nothing asked under the old one may have run.
+                    # conversation, and nothing asked under the old one may have run. Only within the request's own
+                    # wait: one a restart resumes later (overnight) asks under its old id, as before, and ends.
                     nxt = self._new_start_op(run, op, epoch)
                     if nxt is None:
                         return  # the other start of this run goes on, or closing, another account, stopped or started

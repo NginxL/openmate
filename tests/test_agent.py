@@ -1043,6 +1043,32 @@ class NetworkTest(unittest.TestCase):
         running(h, m)
         self.assertEqual(len(h.http.sessions), 1)
 
+    def test_a_resume_that_comes_after_the_start_ended_does_nothing(self):
+        h = agent(self)
+        m = ask(h, "/agent 恢复线程来晚了")
+        snapshot = dict(run_of(h, m), state="starting")  # as a resume read it, before the live start ended
+        running(h, m)
+        before = len(h.http.starts())
+        h.app.agent._resume_start(snapshot)
+        self.assertEqual(len(h.http.starts()), before, "not asked again")
+        self.assertEqual(run_of(h, m)["state"], "running")
+
+    def test_a_request_resumed_after_its_wait_keeps_its_id(self):
+        # one a restart resumes long after it was asked: never a new conversation under a new id (overnight)
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.machine_offline = 1
+        kept = self._stop_at_new_id(h, change=False)
+        m = ask(h, "/agent 隔夜才恢复")
+        wait_until(lambda: kept, what="the refusal")
+        old = run_of(h, m)  # asked a day ago (run_put keeps created: the column is set here)
+        h.app.store._tx(lambda db: db.execute("UPDATE runs SET created = ? WHERE id = ?", (time.time() - 86400, old["id"])))
+        refused = kept[0]
+        h2 = h.restart(timing=fast(agent_hub_wait=0.5))
+        h2.wait_ok()
+        wait_until(lambda: run_of(h2, m)["state"] == "failed", what="it ends")
+        self.assertEqual({s["op"] for s in h2.http.starts()}, {refused}, "only ever the old id")
+        self.assertEqual(h2.http.sessions, {})
+
     def test_a_refusal_after_the_store_closed_changes_nothing(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
         h.http.offline = 10 ** 6
