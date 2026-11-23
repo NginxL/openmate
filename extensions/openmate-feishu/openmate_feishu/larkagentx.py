@@ -2681,9 +2681,12 @@ def rich_after_mentions(rich: dict, P, cut: bool = True) -> Optional[str]:
             break
         i += 1
     # a new paragraph starts a new line (two paragraphs never run into one word: "/st" + "op" is no /stop), a code
-    # block stands on lines of its own
+    # block stands on lines of its own, its indents as written (only the words' own leading spaces go)
+    rest = pieces[i:]
+    if rest and rest[0][0] != "code":
+        rest = [(rest[0][0], rest[0][1].lstrip())] + rest[1:]
     return "".join("\n" if kind == "break" else w + "\n" if kind == "code" else w
-                   for kind, w in pieces[i:]).strip()
+                   for kind, w in rest).lstrip("\n").rstrip()
 
 
 def hang_links(entity: dict) -> List[str]:

@@ -486,23 +486,29 @@ class AgentRunner:
             self._take_stop(row, epoch)
             return
         req = match_prefix(body, self.prefix)
-        if req is None:
-            # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store) and is
-            # surely not an edit (edited or not known: never a request). The request is the message after its leading
-            # @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right before
-            # the words, a typed "@types/node" kept), else at spaces; a stop or the prefix there count as usual.
-            if not (self.self_mention and row.get("live_at_me")) or row.get("blocked"):
+        # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), is surely not
+        # an edit (edited or not known: never a request) and was not held back. Its request is the message after its
+        # leading @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right
+        # before the words, a typed "@types/node" kept, code blocks and their indents kept), else at spaces; a stop or
+        # the prefix there count as usual.
+        mine_at = bool(self.self_mention and row.get("live_at_me") and not row.get("blocked"))
+        cut = row.get("text_after_mentions") if mine_at and row.get("edited") is False else None
+        if req is not None:
+            if cut is not None:  # "@自己 /agent …": its words as the cut reads them (with its code blocks)
+                again = match_prefix(cut.lstrip(), self.prefix)
+                req = again if again is not None else req
+        else:
+            if not mine_at:
                 return  # a line the data-loss policy held back is never a request, whatever a reading brought
             if row.get("edited") is not False:
                 log.info("@自己 not taken: the message %s (edited=%s)", "is an edit" if row.get("edited") else
                          "may be an edit (the push does not say)", row.get("edited"))
                 return
-            cut = row.get("text_after_mentions")
-            words = (cut if cut is not None else body).strip()
-            if words.lower() in STOP_WORDS:
+            words = cut if cut is not None else body
+            if words.strip().lower() in STOP_WORDS:
                 self._take_stop(row, epoch)
                 return
-            prefixed = match_prefix(words, self.prefix)
+            prefixed = match_prefix(words.lstrip(), self.prefix)
             req = prefixed if prefixed is not None else words
         with self.app.owned(epoch) as ok:
             if not ok:

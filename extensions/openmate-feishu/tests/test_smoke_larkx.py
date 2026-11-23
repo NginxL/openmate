@@ -137,6 +137,10 @@ rich = {"elementIds": ["a", "t", "c1", "c2"], "elements": {"dictionary": {
     "a": {"tag": 5, "property": ap.SerializeToString()}, "t": {"tag": 1, "property": tp.SerializeToString()},
     "c1": {"tag": 31, "property": cb.SerializeToString()}, "c2": {"tag": 37, "property": v2.SerializeToString()}}}}
 out["code_cut"] = [larkagentx.rich_after_mentions(rich, b.lx.P), larkagentx.rich_text(rich, b.lx.P)]
+ind = E.CodeBlockProperty(); ind.content = "    def a():\n        pass"
+first = {"elementIds": ["a", "c"], "elements": {"dictionary": {
+    "a": {"tag": 5, "property": ap.SerializeToString()}, "c": {"tag": 31, "property": ind.SerializeToString()}}}}
+out["code_first"] = larkagentx.rich_after_mentions(first, b.lx.P)
 out["pushed_threads"] = [[k, marks[k], larkagentx.synced_mark(marks[k])] for k in sorted(marks)]
 pkt = b.lx.builders.build_send_message_packet("也发到群里", "900", "rid", root_id="80", thread_chat=False)
 pkt = larkagentx.also_to_chat(pkt, "81", "sync")
@@ -201,6 +205,7 @@ class RealLarkAgentXTest(unittest.TestCase):
             "where pushed messages show, read from a real push; an unset thread kind is told from a quote's 0; edits")
         self.assertEqual(out["code_cut"], ["/stop\nSELECT 1\n\na = 1\nb = 2", "@我 /stop"],
                          "an @自己 request keeps code blocks (no bare /stop then); the message's text as before")
+        self.assertEqual(out["code_first"], "    def a():\n        pass", "a code block first keeps its indents")
         self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
                          "into the thread, also to the chat, quoting the request")
         self.assertEqual(out["also_to_chat_send"], ["83", False, True])

@@ -184,6 +184,19 @@ class SelfMentionReadingTest(unittest.TestCase):
         started(h, 2)
         self.assertEqual(run_of(h, m2)["request_text"], "查一下", "a prefix after the @ of me: dropped as usual")
 
+    def test_an_at_of_me_with_the_prefix_keeps_the_cut_s_code(self):
+        h = agent(self)
+        m = ask(h, "@示例用户 /agent 请解释这段 SQL", at_me=True, text_after_mentions="/agent 请解释这段 SQL\nSELECT 1")
+        started(h)
+        self.assertEqual(run_of(h, m)["request_text"], "请解释这段 SQL\nSELECT 1")
+
+    def test_a_code_block_first_keeps_its_indents(self):
+        h = agent(self)
+        cut = "    def a(self):\n        pass\n\n这两个方法该怎么测？"
+        m = ask(h, "@示例用户 这两个方法该怎么测？", at_me=True, text_after_mentions=cut)
+        started(h)
+        self.assertEqual(run_of(h, m)["request_text"], cut)
+
     def test_commands_read_as_before_whatever_the_cut(self):
         # /agent and /stop are matched as before 0.11.40 (leading @s cut at spaces): a typed "@旧称" after a real @
         h = agent(self)
