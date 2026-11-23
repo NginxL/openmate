@@ -177,6 +177,20 @@ def match_prefix(body: str, prefix: str) -> Optional[str]:
     return None
 
 
+def after_prefix(words: str, prefix: str) -> Optional[str]:
+    """An @自己 cut's request after the prefix, its code as written: only the prefix, the spaces and one ":" after
+    it on its line, and the one line break after that go (match_prefix also strips a code block's first indent)."""
+    body = (words or "").lstrip()
+    if match_prefix(body, prefix) is None:
+        return None
+    rest = body[len(prefix):].lstrip(" \t:：")
+    if rest.startswith("\r\n"):
+        rest = rest[2:]
+    elif rest.startswith("\n"):
+        rest = rest[1:]
+    return rest.rstrip()
+
+
 def _attr(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -495,7 +509,7 @@ class AgentRunner:
         cut = row.get("text_after_mentions") if mine_at and row.get("edited") is False else None
         if req is not None:
             if cut is not None:  # "@自己 /agent …": its words as the cut reads them (with its code blocks)
-                again = match_prefix(cut.lstrip(), self.prefix)
+                again = after_prefix(cut, self.prefix)
                 req = again if again is not None else req
         else:
             if not mine_at:
@@ -508,7 +522,7 @@ class AgentRunner:
             if words.strip().lower() in STOP_WORDS:
                 self._take_stop(row, epoch)
                 return
-            prefixed = match_prefix(words.lstrip(), self.prefix)
+            prefixed = after_prefix(words, self.prefix) if cut is not None else match_prefix(words, self.prefix)
             req = prefixed if prefixed is not None else words
         with self.app.owned(epoch) as ok:
             if not ok:

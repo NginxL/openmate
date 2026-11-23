@@ -190,6 +190,15 @@ class SelfMentionReadingTest(unittest.TestCase):
         started(h)
         self.assertEqual(run_of(h, m)["request_text"], "请解释这段 SQL\nSELECT 1")
 
+    def test_code_right_after_the_prefix_stays_as_written(self):
+        h = agent(self)
+        m = ask(h, "@示例用户 /agent", at_me=True, text_after_mentions="/agent\n    ::f();\n    g();")
+        started(h)
+        self.assertEqual(run_of(h, m)["request_text"], "    ::f();\n    g();")
+        m2 = ask(h, "@示例用户 /agent：看看", at_me=True, text_after_mentions="/agent：看看", chat="chat_example_dm_b")
+        started(h, 2)
+        self.assertEqual(run_of(h, m2)["request_text"], "看看")
+
     def test_a_code_block_first_keeps_its_indents(self):
         h = agent(self)
         cut = "    def a(self):\n        pass\n\n这两个方法该怎么测？"
