@@ -1069,6 +1069,35 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual({s["op"] for s in h2.http.starts()}, {refused}, "only ever the old id")
         self.assertEqual(h2.http.sessions, {})
 
+    def test_a_stop_during_the_wait_leaves_the_old_id_for_an_overnight_resume(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0, agent_hub_probe=30.0))
+        h.http.machine_offline = 1
+        m = ask(h, "/agent 等待中退出，隔天恢复")
+        wait_until(lambda: len(h.http.starts()) == 1, what="the refusal")
+        time.sleep(0.3)  # it waits before asking again
+        refused = h.http.starts()[0]["op"]
+        self.assertEqual(run_of(h, m)["start_op"], refused, "the new id is taken only right before the next ask")
+        rid = run_of(h, m)["id"]
+        h.app.store._tx(lambda db: db.execute("UPDATE runs SET created = ? WHERE id = ?", (time.time() - 86400, rid)))
+        h2 = h.restart(timing=fast(agent_hub_wait=0.5))
+        h2.wait_ok()
+        wait_until(lambda: run_of(h2, m)["state"] == "failed", what="it ends")
+        self.assertEqual({s["op"] for s in h2.http.starts()}, {refused})
+        self.assertEqual(h2.http.sessions, {})
+
+    def test_the_restart_scan_leaves_this_start_s_own_runs(self):
+        # the live line may make a run before the scan of the runs a restart cut off: it is not one of them
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 刚启动就来的")
+        run = run_of(h, m)
+        run.pop("start_op", None)  # as before its start took an id
+        run.pop("start_prompt", None)
+        h.app.store.run_put(run)
+        h.app.agent._resume_cut_off()
+        self.assertEqual(run_of(h, m)["state"], "starting", "not taken for a request a restart cut off")
+        self.assertEqual([x for x in h.sent() if "扩展重启了" in x["text"]], [])
+
     def test_a_refusal_after_the_store_closed_changes_nothing(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
         h.http.offline = 10 ** 6

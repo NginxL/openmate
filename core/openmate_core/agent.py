@@ -232,6 +232,7 @@ class AgentRunner:
         self.purpose = getattr(app.platform, "agent_purpose", "") or ""
         self._mu = threading.Lock()
         self._starting_now: set = set()  # runs a start loop is working on here: one loop per run (_start)
+        self._born = time.time()  # runs made from now on are this start's own, never one a restart cut off
         self._run_locks: Dict[str, threading.RLock] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -265,9 +266,25 @@ class AgentRunner:
         except Exception:
             log.exception("the guest quota ledger could not be filled from the kept runs")
         self._prune(force=True)
-        # Starts cut off by the restart: those that can go on do, the others are told
+        self._resume_cut_off()
+        if self.enabled:
+            for run in self.store.runs_in_state(["forwarded"]):
+                if not run.get("noted") and time.time() - float(run.get("created") or 0) < self.app.timing.agent_keep:
+                    # handed on, then cut off before the thread was told: told now (once: the send journal's key)
+                    threading.Thread(target=self._forward_noted, args=(run["id"],), name="openmate-agent-forward",
+                                     daemon=True).start()
+        resumed = len(self.store.runs_in_state(["running"]))
+        if resumed:
+            log.info("resuming %d running /agent request(s)", resumed)
+        self._thread = threading.Thread(target=self._loop, name="openmate-agent", daemon=True)
+        self._thread.start()
+
+    def _resume_cut_off(self) -> None:
+        """The starts a restart cut off (runs made before this start): those that can go on do, the others are told."""
         lost = []
         for run in sorted(self.store.runs_in_state(["starting"]), key=lambda r: float(r.get("created") or 0)):
+            if float(run.get("created") or 0) >= self._born:
+                continue  # made by this start's live line meanwhile (the listener may run first): its own start has it
             how = self._resume_how(run)
             if not how:
                 lost.append(run)
@@ -290,17 +307,6 @@ class AgentRunner:
             self._post_once(run, "agent-restart:" + run["id"],
                             "扩展重启了，没法确认这个 /agent 请求有没有开始处理。" + CHECK,
                             **(self._where(run) if run.get("placement") else {"reply_to": run["request_id"]}))
-        if self.enabled:
-            for run in self.store.runs_in_state(["forwarded"]):
-                if not run.get("noted") and time.time() - float(run.get("created") or 0) < self.app.timing.agent_keep:
-                    # handed on, then cut off before the thread was told: told now (once: the send journal's key)
-                    threading.Thread(target=self._forward_noted, args=(run["id"],), name="openmate-agent-forward",
-                                     daemon=True).start()
-        resumed = len(self.store.runs_in_state(["running"]))
-        if resumed:
-            log.info("resuming %d running /agent request(s)", resumed)
-        self._thread = threading.Thread(target=self._loop, name="openmate-agent", daemon=True)
-        self._thread.start()
 
     def _resume_how(self, run: dict) -> str:
         """How a start cut off by a restart goes on ("" when it cannot: it is told instead)."""
@@ -904,6 +910,7 @@ class AgentRunner:
         tries = 1
         maybe = False
         first_try = 0.0  # when a try first went to the hub: the conversation may have it from then on
+        refused = ""  # the id the hub answered "nothing ran": the next ask goes under a new one (see the except)
         while True:
             if self._stop.is_set():  # shutting down: the next start tells the user to send it again
                 return
@@ -915,6 +922,17 @@ class AgentRunner:
                                           "网络恢复后请重新发送。" % _span(t.agent_hub_wait))
                 return
             attempt = 0.0  # when this try's request went out (right before the call)
+            if refused and prev is None:
+                # Right before asking again, and only within the request's own wait: a new id, kept with the run. One a
+                # restart resumes later (overnight) keeps its old id, whose kept refusal ends it as before; and a stop
+                # during the wait leaves the old id stored, so nothing new is ever asked for a stale request.
+                if time.time() < float(run.get("created") or 0) + t.agent_hub_wait:
+                    nxt = self._new_start_op(run, refused, epoch)
+                    if nxt is None:
+                        return  # the other start of this run goes on, or closing, another account, stopped or started
+                    run, op = nxt
+                    tries = 1  # the new id gets its own tries (the deadline stays)
+                refused = ""
             try:
                 if prev is not None:
                     mid, sid = prev["machine_id"], prev["session_id"]
@@ -948,19 +966,14 @@ class AgentRunner:
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if (op and e.delivered == "none" and e.retryable is True
-                        and time.time() < float(run.get("created") or 0) + t.agent_hub_wait):
+                if op and prev is None and e.delivered == "none" and e.retryable is True:
                     # The hub's own answer to this operation: nothing ran (the machine was away for a moment). The hub
                     # keeps that answer as the operation's receipt, so the same id asked again only gets it back until
                     # the deadline (2026-11-23: a node restarted for 9 s, the request then waited out its 5 minutes).
-                    # The next try goes under a new id: the old one started nothing, so it cannot start a second
-                    # conversation, and nothing asked under the old one may have run. Only within the request's own
-                    # wait: one a restart resumes later (overnight) asks under its old id, as before, and ends.
-                    nxt = self._new_start_op(run, op, epoch)
-                    if nxt is None:
-                        return  # the other start of this run goes on, or closing, another account, stopped or started
-                    run, op = nxt
-                    maybe, first_try, tries = False, 0.0, 1  # the new id gets its own tries (the deadline stays)
+                    # The next try goes under a new id (taken right before it): the old one started nothing, so it
+                    # cannot start a second conversation, and nothing asked under it may have run.
+                    refused = op
+                    maybe, first_try = False, 0.0
                 elif not e.unsent and attempt:
                     first_try = first_try or attempt  # it may have reached the hub
                 if op and e.code in ("unknown", "assistant_in_doubt", "op_id_reused"):
