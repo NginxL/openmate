@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.11.40",
+        "version": "0.11.41",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -186,9 +186,9 @@
             "agent": {
               "type": "boolean",
               "title": "启用 /agent",
-              "description": "你在飞书里发以前缀开头的消息时，交给 Agent 处理，并以你的身份回复。",
+              "description": "你在飞书里发以前缀开头的消息（或 @ 你自己的消息，见下面的开关）时，交给 Agent 处理，并以你的身份回复。",
               "default": false,
-              "x-confirm": "打开后，你自己在飞书里发的 /agent 消息会让 Agent 用你的全部权限处理，并以你的身份回复到原话题。确定打开吗？"
+              "x-confirm": "打开后，你自己在飞书里发的 /agent 消息（和 @ 你自己的消息）会让 Agent 用你的全部权限处理，并以你的身份回复到原话题。确定打开吗？"
             },
             "agent_prefix": {
               "type": "string",
@@ -197,6 +197,12 @@
               "default": "/agent",
               "pattern": "^/\\S+$",
               "maxLength": 32
+            },
+            "agent_self_mention": {
+              "type": "boolean",
+              "title": "@自己 也交给 Agent",
+              "description": "你自己发的消息里 @ 了你自己（真正的 @，不是手打的文字）时，也当作一次 /agent 请求，@ 后面的话就是要办的事。不以“/”开头，群里别的机器人不会把它当成自己的命令。要先打开 /agent。",
+              "default": true
             },
             "agent_machine": {
               "type": "string",
@@ -404,9 +410,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.11.40/openmate-feishu-0.11.40.tar.gz",
-          "sha256": "d3d7dae56c9bfce09be8e1a3423e2034b19f312bdd4b2e9ceccd8e7c3c240848",
-          "size": 253073
+          "url": "packages/openmate-feishu/0.11.41/openmate-feishu-0.11.41.tar.gz",
+          "sha256": "bc824beded30cb313afd93c27116ac181242ffba7f79954cc342d4fd05bf1c11",
+          "size": 256270
         }
       ]
     },
@@ -415,7 +421,7 @@
         "manifest_version": 1,
         "id": "openmate-wechat",
         "name": "微信（OpenMate）",
-        "version": "0.1.38",
+        "version": "0.1.39",
         "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -693,9 +699,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-wechat/0.1.38/openmate-wechat-0.1.38.tar.gz",
-          "sha256": "444f91c8aaafcd05a9eaa0ddbd8ac6251b89788bc3936e25b56566ca06c726bc",
-          "size": 228901
+          "url": "packages/openmate-wechat/0.1.39/openmate-wechat-0.1.39.tar.gz",
+          "sha256": "3b5b2f53b7fc9c29fc49492f55099b1a533787cc2e85fdd62e22a4ce26066759",
+          "size": 230139
         }
       ]
     }
