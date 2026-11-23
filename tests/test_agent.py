@@ -994,12 +994,12 @@ class NetworkTest(unittest.TestCase):
         time.sleep(0.2)
         run = run_of(h, m)
         first = h.app.agent._new_start_op(run, refused, None)
-        second = h.app.agent._new_start_op(run, refused, None)
         self.assertNotEqual(first[1], refused)
-        self.assertEqual(second[1], first[1], "the second asks under the id the first kept")
+        # the other start, with the same refusal: it leaves the run to the first (never marks it failed after)
+        self.assertIsNone(h.app.agent._new_start_op(run, refused, None))
         self.assertEqual(run_of(h, m)["start_op"], first[1])
         cur = run_of(h, m)
-        cur["state"] = "running"  # started meanwhile (by the other): nothing more to ask
+        cur["state"] = "running"  # started meanwhile (by the first): nothing more to ask
         h.app.store.run_put(cur)
         self.assertIsNone(h.app.agent._new_start_op(cur, first[1], None))
 

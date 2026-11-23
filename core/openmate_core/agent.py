@@ -931,7 +931,7 @@ class AgentRunner:
                     # conversation, and nothing asked under the old one may have run.
                     nxt = self._new_start_op(run, op, epoch)
                     if nxt is None:
-                        return  # closing, another account's sign-in, or the run stopped or started meanwhile
+                        return  # the other start of this run goes on, or closing, another account, stopped or started
                     run, op = nxt
                     maybe, first_try = False, 0.0
                 elif not e.unsent and attempt:
@@ -1031,19 +1031,19 @@ class AgentRunner:
     def _new_start_op(self, run: dict, refused: str, epoch: Optional[int]):
         """(run, op id) to ask under after the hub answered the start's operation `refused` with "nothing ran": a new
         id kept with the run in place of `refused` (a restart asks under it), the body unchanged. Two starts of one run
-        at once (the live line's and the restart's resume) may both get that answer: only the first changes the id,
-        the other asks under the one it finds. None: nothing more to ask (the app closing or another account's
-        sign-in, or the run gone, stopped or started meanwhile)."""
+        at once (the live line's and the restart's resume) may both get that answer: only the first changes the id and
+        goes on; the other finds the id changed and stops there (a late copy of the old refusal must never mark a run
+        the other start may have started as failed). None: nothing more to ask here (that, the app closing or another
+        account's sign-in, or the run gone, stopped or started meanwhile)."""
         with self._lock(run["id"]):
             with self.app.owned(epoch) as ok:
                 if not ok:
                     return None
                 cur = self.store.run_get(run["id"])
-                if cur is None or cur.get("state") != "starting":
+                if cur is None or cur.get("state") != "starting" or cur.get("start_op") != refused:
                     return None
-                if cur.get("start_op") == refused:
-                    cur["start_op"] = str(uuid.uuid4())
-                    self.store.run_put(cur)
+                cur["start_op"] = str(uuid.uuid4())
+                self.store.run_put(cur)
                 return cur, cur["start_op"]
 
     def _retry_as(self, run_id: str, ref: str) -> Optional[dict]:
