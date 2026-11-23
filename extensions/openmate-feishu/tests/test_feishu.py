@@ -69,6 +69,7 @@ class ManifestTest(unittest.TestCase):
     def test_configuration(self):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
+                                       "agent_self_mention",
                                        "agent_machine", "agent_launcher", "agent_forward", "channel_chat", "agent_reply_header", "agent_mark_position",
                                        "agent_ack_reaction",
                                        "agent_done_reaction", "agent_fail_reaction",

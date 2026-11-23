@@ -122,6 +122,8 @@ x = pm.messages["85"]; x.id = "85"
 x = pm.messages["86"]; x.id = "86"; x.rootId = "80"; x.parentId = "80"; x.threadMessageType = 0
 x = pm.messages["87"]; x.id = "87"; x.status = 3; x.editVersion = 2  # an edited message
 x = pm.messages["88"]; x.id = "88"; x.editVersion = 1
+x = pm.messages["89"]; x.id = "89"; x.createTimeMs = 1763000000000; x.editTimeMs = 1763000060000  # edited a minute on
+x = pm.messages["90"]; x.id = "90"; x.createTimeMs = 1763000000000; x.editTimeMs = 1763000000000
 marks = larkagentx.pushed_threads(pm.SerializeToString())
 out["pushed_threads"] = [[k, marks[k], larkagentx.synced_mark(marks[k])] for k in sorted(marks)]
 pkt = b.lx.builders.build_send_message_packet("也发到群里", "900", "rid", root_id="80", thread_chat=False)
@@ -179,7 +181,9 @@ class RealLarkAgentXTest(unittest.TestCase):
             ["85", dict(none, thread_type=0, thread_known=False), ""],
             ["86", dict(none, thread_type=0), ""],
             ["87", dict(none, thread_type=0, thread_known=False, edited=True), ""],
-            ["88", dict(none, thread_type=0, thread_known=False, edited=True), ""]],
+            ["88", dict(none, thread_type=0, thread_known=False, edited=True), ""],
+            ["89", dict(none, thread_type=0, thread_known=False, edited=True), ""],
+            ["90", dict(none, thread_type=0, thread_known=False), ""]],
             "where pushed messages show, read from a real push; an unset thread kind is told from a quote's 0; edits")
         self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
                          "into the thread, also to the chat, quoting the request")

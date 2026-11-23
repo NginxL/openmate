@@ -180,9 +180,22 @@ class SelfMentionReadingTest(unittest.TestCase):
         m = ask(h, "@Jane Doe 总结日报", at_me=True, text_after_mentions="总结日报")
         started(h)
         self.assertEqual(run_of(h, m)["request_text"], "总结日报", "not \"Doe 总结日报\"")
-        m2 = ask(h, "@张三/agent 查一下", text_after_mentions="/agent 查一下", chat="chat_example_dm_b")
+        m2 = ask(h, "@张三/agent 查一下", at_me=True, text_after_mentions="/agent 查一下", chat="chat_example_dm_b")
         started(h, 2)
-        self.assertEqual(run_of(h, m2)["request_text"], "查一下", "an @ right before the prefix")
+        self.assertEqual(run_of(h, m2)["request_text"], "查一下", "a prefix after the @ of me: dropped as usual")
+
+    def test_commands_read_as_before_whatever_the_cut(self):
+        # /agent and /stop are matched as before 0.11.40 (leading @s cut at spaces): a typed "@旧称" after a real @
+        h = agent(self)
+        m = ask(h, "@同事 @旧称 /agent 查订单", text_after_mentions="@旧称 /agent 查订单")
+        started(h)
+        self.assertEqual(run_of(h, m)["request_text"], "查订单")
+
+    def test_an_edit_not_known_makes_no_request(self):
+        h = agent(self)
+        ask(h, "@示例用户 不知道改没改过", at_me=True, edited=None)
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
 
     def test_a_stop_after_a_name_with_a_space_still_stops(self):
         h = agent(self)

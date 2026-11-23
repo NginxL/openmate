@@ -127,6 +127,7 @@ class MappingTest(Base):
         self.assertTrue(pushed.at_me, "the push's own @me mark counts when the text has no mentions")
         mine = self.m(from_id=ME, content_data=text_data("我发的"))
         self.assertTrue(mine.mine)
+        self.assertEqual(self.m(create_time=1763000000123, content_data=text_data("x")).at, 1763000000.123)
         # an own message: @me only by a real @ of me in it (「@自己 …」), never by the service's mark alone (a reply to
         # or quote of an own message must not ask the Agent)
         marked = self.m(from_id=ME, content_data=text_data("回复我自己"), at_me=True)
@@ -147,11 +148,23 @@ class MappingTest(Base):
         self.assertEqual(cut(("at", "7002", "@同事"), " ", ("at", ME, "@我"), " /stop"), "/stop")
         self.assertEqual(cut(("at", ME, "@我"), " @types/node 怎么装"), "@types/node 怎么装", "typed @ words stay")
         self.assertEqual(cut(("at", ME, "@我")), "")
-        self.assertIsNone(cut("没有 @ 开头 ", ("at", ME, "@我")), "no @ in front: the core cuts the text itself")
+        self.assertEqual(cut("没有 @ 开头 ", ("at", ME, "@我")), "没有 @ 开头 @我", "no @ in front: all of it")
+        self.assertEqual(cut("@types/node 怎么装 ", ("at", ME, "@我")), "@types/node 怎么装 @我", "typed @ words kept")
         self.assertIsNone(self.m(msg_type=2, content_data={"title": "标题", "text": "x"}).text_after_mentions)
-        self.assertFalse(self.m(content_data=text_data("x")).edited)
+        self.assertIsNone(self.m(content_data=text_data("x")).edited, "no marks from the push: not known")
+        self.assertIs(self.m(content_data=text_data("x"), _placement={"edited": False}).edited, False)
         self.assertTrue(self.m(content_data=text_data("x"), _placement={"edited": True}).edited)
-        self.assertEqual(self.m(create_time=1763000000123, content_data=text_data("x")).at, 1763000000.123)
+
+    def test_paragraphs_never_run_into_one_word_in_the_cut(self):
+        from larkx._fake import at
+
+        rich = {"richText": {"elementIds": ["p1", "p2"], "elements": {"dictionary": {
+            "p1": {"tag": 3, "childIds": ["a", "t1"]}, "a": {"tag": 5, "property": at(ME, "@我")},
+            "t1": {"tag": 1, "property": "/st".encode("utf-8")},
+            "p2": {"tag": 3, "childIds": ["t2"]}, "t2": {"tag": 1, "property": "op".encode("utf-8")}}}}}
+        m = self.m(from_id=ME, content_data=rich)
+        self.assertEqual(m.text_after_mentions, "/st\nop", "two paragraphs: no /stop")
+        self.assertEqual(m.text, "@我/stop", "the message's text reads as before")
 
     def test_post_card_system_and_others(self):
         from larkx._fake import text_data

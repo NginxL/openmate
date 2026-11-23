@@ -474,11 +474,8 @@ class AgentRunner:
         if self.is_agent_text(text):
             return
         view = getattr(self.app.platform, "mark_view", None)
-        # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after the leading @s, where
-        # the service's @ elements end when the backend read them (an "@Jane Doe", an @ right before the words), else
-        # at spaces
-        cut = row.get("text_after_mentions")
-        body = (view(text) if view is not None else cut if cut is not None else strip_leading_mentions(text)).strip()
+        # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after any leading @s
+        body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
         if channel is not None and channel.take(row, body, epoch):
             # the 「Persona 渠道会话」's: handed to Persona's channel flow (channel.py), whether /agent is on or not; its
             # echoes are told by the channel's own record of what was sent there, not /agent's text cache
@@ -486,18 +483,23 @@ class AgentRunner:
         if self._echo(text) or not self.enabled:
             return
         if body.lower() in STOP_WORDS:
-            with self.app.owned(epoch) as ok:
-                taken = ok and self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"]))
-            if taken:
-                threading.Thread(target=self._on_stop, args=(row, epoch), name="openmate-agent-stop", daemon=True).start()
+            self._take_stop(row, epoch)
             return
         req = match_prefix(body, self.prefix)
         if req is None:
-            # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), and it is
-            # not an edit (editing an old line never asks); the whole message, without the @s it starts with
-            if not (self.self_mention and row.get("live_at_me") and not row.get("edited")):
+            # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store) and is
+            # surely not an edit (edited or not known: never a request). The request is the message after its leading
+            # @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right before
+            # the words, a typed "@types/node" kept), else at spaces; a stop or the prefix there count as usual.
+            if not (self.self_mention and row.get("live_at_me") and row.get("edited") is False):
                 return
-            req = body
+            cut = row.get("text_after_mentions")
+            words = (cut if cut is not None else body).strip()
+            if words.lower() in STOP_WORDS:
+                self._take_stop(row, epoch)
+                return
+            prefixed = match_prefix(words, self.prefix)
+            req = prefixed if prefixed is not None else words
         with self.app.owned(epoch) as ok:
             if not ok:
                 log.info("an /agent line of an account signed out meanwhile: not taken")
@@ -510,6 +512,13 @@ class AgentRunner:
         self._prune()
         threading.Thread(target=self._start_run, args=(run, row, epoch), name="openmate-agent-start",
                          daemon=True).start()
+
+    def _take_stop(self, row: dict, epoch: Optional[int]) -> None:
+        """A /stop of the user's (once per message): the request it is about is stopped, in a thread of its own."""
+        with self.app.owned(epoch) as ok:
+            taken = ok and self.store.seen_add("stop:%s:%s" % (row["chat_id"], row["id"]))
+        if taken:
+            threading.Thread(target=self._on_stop, args=(row, epoch), name="openmate-agent-stop", daemon=True).start()
 
     # ---------------------------------------------------------------- 自动代答
 

@@ -51,8 +51,10 @@ class Message:
     a copy is never a command or a question to answer, its original is. Neither is stored: only a live read hands them on (the core's rows of new
     messages carry them).
     text_after_mentions: the text after the @-mentions it starts with, cut where the service's own @ elements end
-    (an "@Jane Doe" with a space in the name, or one right before the words); None when the backend cannot tell
-    (the core then cuts at spaces). edited: this reading is of an edited message. Live-only too, like placement.
+    (an "@Jane Doe" with a space in the name, or one right before the words; the whole text when it starts with
+    none); None when the backend cannot tell (the core then cuts at spaces). edited: this reading is of an edited
+    message (True), surely not (False), or the backend could not tell (None: never a new @自己 request). Live-only
+    too, like placement.
     """
 
     id: str
@@ -74,7 +76,7 @@ class Message:
     placement: str = ""
     same_as: str = ""
     text_after_mentions: Optional[str] = None
-    edited: bool = False
+    edited: Optional[bool] = False
 
 
 @dataclass

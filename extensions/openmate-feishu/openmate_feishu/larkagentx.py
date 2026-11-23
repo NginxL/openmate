@@ -311,8 +311,10 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
                         "send_to_chat": bool(m.sendToChat),
                         "sync_type": int(m.syncToChatMessageType), "sync_related": _id(m.syncToChatRelatedMessageId),
                         "sync_root": _id(m.syncToChatThreadRootId),
-                        # an edited message's push (status MODIFIED, an edit version): never a new request (@自己)
-                        "edited": int(m.status) == STATUS_MODIFIED or int(m.editVersion) > 0}
+                        # an edited message's push (status MODIFIED, an edit version, an edit time after its
+                        # creation): never a new request (@自己)
+                        "edited": (int(m.status) == STATUS_MODIFIED or int(m.editVersion) > 0
+                                   or int(m.editTimeMs) > int(m.createTimeMs))}
     return out
 
 
@@ -1423,7 +1425,7 @@ class LarkXBackend(Backend):
             text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
             media=self._media_of(mt, data, chat_id, msg_id), placement=placement, same_as=same_as,
-            text_after_mentions=cut, edited=bool(marks.get("edited")))
+            text_after_mentions=cut, edited=marks["edited"] if "edited" in marks else None)  # None: not known
 
     def _placement(self, d: dict, chat_id: str, msg_id: str, in_thread: bool, topic_root: bool, mine: bool,
                    client) -> str:
@@ -2550,7 +2552,8 @@ def link_text(prop: bytes) -> str:
 
 
 def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
-    """A rich text's pieces in order, as (kind, words): "text" runs, "at" names, "other" (links, placeholders)."""
+    """A rich text's pieces in order, as (kind, words): "text" runs, "at" names, "other" (links, placeholders), and
+    "break" (no words) where an element that holds others (a paragraph) starts."""
     try:
         dictionary = (rich.get("elements") or {}).get("dictionary") or {}
     except AttributeError:
@@ -2612,6 +2615,8 @@ def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
         if tag in PLACEHOLDERS:
             out.append(("other", PLACEHOLDERS[tag]))
             continue
+        if el.get("childIds"):
+            out.append(("break", ""))
     return out
 
 
@@ -2623,20 +2628,19 @@ def rich_text(rich: dict, P) -> str:
 
 def rich_after_mentions(rich: dict, P) -> Optional[str]:
     """A rich text's words after the @ elements it starts with (and the spaces around them), cut where those
-    elements end: "@Jane Doe 总结" → "总结", "@张三总结" → "总结". None when it starts with no @ element or has no
-    pieces (the core cuts the text itself then)."""
+    elements end: "@Jane Doe 总结" → "总结", "@张三总结" → "总结"; all of them when it starts with none (a typed
+    "@types/node" is words). None when it has no pieces (the core cuts the text itself then)."""
     pieces = rich_pieces(rich, P)
-    i, cut = 0, False
+    if not pieces:
+        return None
+    i = 0
     while i < len(pieces):
         kind, words = pieces[i]
-        if kind == "at":
-            cut = True
-        elif not (kind == "text" and not words.strip()):
+        if kind not in ("at", "break") and not (kind == "text" and not words.strip()):
             break
         i += 1
-    if not cut:
-        return None
-    return "".join(w for _, w in pieces[i:]).strip()
+    # a new paragraph starts a new line (two paragraphs never run into one word: "/st" + "op" is no /stop)
+    return "".join("\n" if kind == "break" else w for kind, w in pieces[i:]).strip()
 
 
 def hang_links(entity: dict) -> List[str]:
