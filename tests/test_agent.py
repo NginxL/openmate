@@ -197,6 +197,17 @@ class SelfMentionReadingTest(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(h.http.starts(), [])
 
+    def test_a_held_back_line_makes_no_request(self):
+        from openmate_core.backend import Message
+
+        h = agent(self)
+        kw = dict(id="m-dlp", chat_id="chat_example_team", position=9002, sender_id=h.world.me.id, mine=True,
+                  at=time.time())
+        h.app.ingest([Message(text="[消息被拦截]", blocked=True, **kw)], live=False)  # a catch-up: held back
+        h.app.ingest([Message(text="@示例用户 查一下", at_me=True, text_after_mentions="查一下", **kw)], live=True)
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+
     def test_a_stop_after_a_name_with_a_space_still_stops(self):
         h = agent(self)
         ask(h, "@Jane Doe /stop", at_me=True, text_after_mentions="/stop")

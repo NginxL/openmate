@@ -150,7 +150,10 @@ class MappingTest(Base):
         self.assertEqual(cut(("at", ME, "@我")), "")
         self.assertEqual(cut("没有 @ 开头 ", ("at", ME, "@我")), "没有 @ 开头 @我", "no @ in front: all of it")
         self.assertEqual(cut("@types/node 怎么装 ", ("at", ME, "@我")), "@types/node 怎么装 @我", "typed @ words kept")
-        self.assertIsNone(self.m(msg_type=2, content_data={"title": "标题", "text": "x"}).text_after_mentions)
+        self.assertEqual(self.m(msg_type=2, content_data={"title": "标题", "text": "x"}).text_after_mentions, "标题")
+        titled = dict(text_data(("at", ME, "@我"), " 看下"), title="@types/node 怎么装")
+        self.assertEqual(self.m(msg_type=2, from_id=ME, content_data=titled).text_after_mentions,
+                         "@types/node 怎么装\n@我 看下", "a title first: nothing cut, its typed words kept")
         self.assertIsNone(self.m(content_data=text_data("x")).edited, "no marks from the push: not known")
         self.assertIs(self.m(content_data=text_data("x"), _placement={"edited": False}).edited, False)
         self.assertTrue(self.m(content_data=text_data("x"), _placement={"edited": True}).edited)
@@ -165,6 +168,18 @@ class MappingTest(Base):
         m = self.m(from_id=ME, content_data=rich)
         self.assertEqual(m.text_after_mentions, "/st\nop", "two paragraphs: no /stop")
         self.assertEqual(m.text, "@我/stop", "the message's text reads as before")
+
+        def one_paragraph(*els):
+            dic = {"p": {"tag": 3, "childIds": [k for k, _ in els]}}
+            dic.update(els)
+            return {"richText": {"elementIds": ["p"], "elements": {"dictionary": dic}}}
+
+        ruled = one_paragraph(("a", {"tag": 5, "property": at(ME, "@我")}), ("t1", {"tag": 1, "property": b"/st"}),
+                              ("hr", {"tag": 32}), ("t2", {"tag": 1, "property": b"op"}))
+        self.assertEqual(self.m(from_id=ME, content_data=ruled).text_after_mentions, "/st\nop", "a rule: a new line")
+        bold = one_paragraph(("a", {"tag": 5, "property": at(ME, "@我")}), ("t1", {"tag": 1, "property": b"/st"}),
+                             ("b", {"tag": 7, "childIds": ["t2"]}), ("t2", {"tag": 1, "property": b"op"}))
+        self.assertEqual(self.m(from_id=ME, content_data=bold).text_after_mentions, "/stop", "bold runs on in the line")
 
     def test_post_card_system_and_others(self):
         from larkx._fake import text_data

@@ -77,7 +77,10 @@ THREAD_REPLY = 2  # entities.Message.ThreadMessageType THREAD_REPLY_MESSAGE: a r
 SYNC_TARGET, SYNC_SOURCE = 1, 2  # entities.Message.SyncToChatMessageType: a thread reply's copy in the main stream, the reply
 SYNCED_KEEP = 500  # how many messages' "also in the main stream" marks are remembered (a reply copies the request's)
 AT_TAG = 5
-STATUS_MODIFIED = 3  # entities.Message.Status.MODIFIED: the message was edited
+STATUS_NORMAL, STATUS_MODIFIED = 1, 3  # entities.Message.Status: as sent, edited
+BLOCK_TAGS = frozenset((3, 4, 14, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46))
+# RichTextElement.Tag: P, FIGURE, DIV, H1-H3, UL, OL, LI, QUOTE, CODE_BLOCK, HR, CODE_BLOCK_V2, TABLE…, COLUMNS, COLUMN,
+# H4-H6: blocks (a new line where one starts, in an @自己 request); B, I, U, LINK, CODE, A run on in the line
 PUSH_CMD = 6
 PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
 PUSH_FEED_CARDS_CMD = 1002  # feed.PushFeedCardsRequest: feed cards changed, among them chats moved to 完成 (done)
@@ -311,11 +314,19 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
                         "send_to_chat": bool(m.sendToChat),
                         "sync_type": int(m.syncToChatMessageType), "sync_related": _id(m.syncToChatRelatedMessageId),
                         "sync_root": _id(m.syncToChatThreadRootId),
-                        # an edited message's push (status MODIFIED, an edit version, an edit time after its
-                        # creation): never a new request (@自己)
-                        "edited": (int(m.status) == STATUS_MODIFIED or int(m.editVersion) > 0
-                                   or int(m.editTimeMs) > int(m.createTimeMs))}
+                        "status": int(m.status) if m.HasField("status") else None,
+                        "edited": push_edited(m)}
     return out
+
+
+def push_edited(m) -> Optional[bool]:
+    """Whether a pushed message entity is an edit: True (status MODIFIED, an edit version, an edit time after its
+    creation), False only when it says status NORMAL with none of those, None when it does not say (no status, or
+    another one: deleted…). Only a sure False may make a new request of an own @ of the account (@自己)."""
+    if (m.HasField("status") and int(m.status) == STATUS_MODIFIED) or int(m.editVersion) > 0 or (
+            m.HasField("editTimeMs") and int(m.editTimeMs) > int(m.createTimeMs)):
+        return True
+    return False if m.HasField("status") and int(m.status) == STATUS_NORMAL else None
 
 
 _MARK_NAMES = {"THREAD_ROOT_MESSAGE": 1, "THREAD_REPLY_MESSAGE": 2, "SYNC_TO_CHAT_TARGET_MESSAGE": 1,
@@ -1413,8 +1424,13 @@ class LarkXBackend(Backend):
         mentions = self._mentions(data)
         # where the leading @ elements end (TEXT, and a POST without a title): the core cuts there, not at spaces
         cut = None
-        if data is not None and (mt == TEXT or (mt == POST and not str(data.get("title") or ""))):
-            cut = rich_after_mentions(data.get("richText") or {}, self.lx.P)
+        if data is not None and mt in (TEXT, POST):
+            title = str(data.get("title") or "") if mt == POST else ""
+            body = rich_after_mentions(data.get("richText") or {}, self.lx.P, cut=not title)
+            if title:  # a title first: nothing is cut, the title's words stay as typed
+                cut = (title + "\n" + (body or "")).strip()
+            else:
+                cut = body
         at_all = "all" in mentions
         # the service's own at-me mark counts for someone else's message only: an own message @-mentions the account
         # only by a real @ of it in the text (@自己 asks the Agent, so a reply or quote of an own message never does)
@@ -2553,7 +2569,7 @@ def link_text(prop: bytes) -> str:
 
 def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
     """A rich text's pieces in order, as (kind, words): "text" runs, "at" names, "other" (links, placeholders), and
-    "break" (no words) where an element that holds others (a paragraph) starts."""
+    "break" (no words) where a block element starts (a paragraph, a heading, a list item, a rule…: BLOCK_TAGS)."""
     try:
         dictionary = (rich.get("elements") or {}).get("dictionary") or {}
     except AttributeError:
@@ -2591,6 +2607,8 @@ def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
         except (TypeError, ValueError):
             tag = -1
         prop = el.get("property") or b""
+        if tag in BLOCK_TAGS:
+            out.append(("break", ""))
         if tag in TEXT_TAGS and prop:
             try:
                 tp = P.TextProperty()
@@ -2615,8 +2633,6 @@ def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
         if tag in PLACEHOLDERS:
             out.append(("other", PLACEHOLDERS[tag]))
             continue
-        if el.get("childIds"):
-            out.append(("break", ""))
     return out
 
 
@@ -2626,15 +2642,16 @@ def rich_text(rich: dict, P) -> str:
     return text if text.strip() else ""
 
 
-def rich_after_mentions(rich: dict, P) -> Optional[str]:
+def rich_after_mentions(rich: dict, P, cut: bool = True) -> Optional[str]:
     """A rich text's words after the @ elements it starts with (and the spaces around them), cut where those
     elements end: "@Jane Doe 总结" → "总结", "@张三总结" → "总结"; all of them when it starts with none (a typed
-    "@types/node" is words). None when it has no pieces (the core cuts the text itself then)."""
+    "@types/node" is words). cut=False: nothing cut (a POST's body after its title). A new block starts a new line.
+    None when it has no pieces (the core cuts the text itself then)."""
     pieces = rich_pieces(rich, P)
     if not pieces:
         return None
     i = 0
-    while i < len(pieces):
+    while cut and i < len(pieces):
         kind, words = pieces[i]
         if kind not in ("at", "break") and not (kind == "text" and not words.strip()):
             break

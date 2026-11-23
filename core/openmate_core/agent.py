@@ -491,7 +491,11 @@ class AgentRunner:
             # surely not an edit (edited or not known: never a request). The request is the message after its leading
             # @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right before
             # the words, a typed "@types/node" kept), else at spaces; a stop or the prefix there count as usual.
-            if not (self.self_mention and row.get("live_at_me") and row.get("edited") is False):
+            if not (self.self_mention and row.get("live_at_me")) or row.get("blocked"):
+                return  # a line the data-loss policy held back is never a request, whatever a reading brought
+            if row.get("edited") is not False:
+                log.info("@自己 not taken: the message %s (edited=%s)", "is an edit" if row.get("edited") else
+                         "may be an edit (the push does not say)", row.get("edited"))
                 return
             cut = row.get("text_after_mentions")
             words = (cut if cut is not None else body).strip()
