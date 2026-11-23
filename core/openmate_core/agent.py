@@ -231,6 +231,7 @@ class AgentRunner:
         self.fail_reaction = DEFAULT_FAIL if fail is None else str(fail).strip()
         self.purpose = getattr(app.platform, "agent_purpose", "") or ""
         self._mu = threading.Lock()
+        self._starting_now: set = set()  # runs a start loop is working on here: one loop per run (_start)
         self._run_locks: Dict[str, threading.RLock] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -814,6 +815,21 @@ class AgentRunner:
         return run.get("ref") or run["id"]
 
     def _start(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
+        """One start loop per run: the live line's start and the resume of the runs a restart cut off may both reach
+        a run made right as the app started; the second leaves it to the first (two could each end it their own way:
+        one started, the other marking it failed on a late answer)."""
+        with self._mu:
+            if run["id"] in self._starting_now:
+                log.info("/agent: this request is being started already")
+                return
+            self._starting_now.add(run["id"])
+        try:
+            self._start_once(run, row, epoch)
+        finally:
+            with self._mu:
+                self._starting_now.discard(run["id"])
+
+    def _start_once(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
         """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
         is touched, once another account's sign-in took the store."""
         if not self.app.owns(epoch):
@@ -933,7 +949,7 @@ class AgentRunner:
                     if nxt is None:
                         return  # the other start of this run goes on, or closing, another account, stopped or started
                     run, op = nxt
-                    maybe, first_try = False, 0.0
+                    maybe, first_try, tries = False, 0.0, 1  # the new id gets its own tries (the deadline stays)
                 elif not e.unsent and attempt:
                     first_try = first_try or attempt  # it may have reached the hub
                 if op and e.code in ("unknown", "assistant_in_doubt", "op_id_reused"):

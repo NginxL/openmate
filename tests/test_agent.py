@@ -2,6 +2,7 @@
 continuing a thread, /stop, the timeout and resuming after a restart."""
 
 import re
+import threading
 import time
 import unittest
 
@@ -1002,6 +1003,45 @@ class NetworkTest(unittest.TestCase):
         cur["state"] = "running"  # started meanwhile (by the first): nothing more to ask
         h.app.store.run_put(cur)
         self.assertIsNone(h.app.agent._new_start_op(cur, first[1], None))
+
+    def test_the_new_id_gets_its_own_tries(self):
+        from openmate_core.hub import HubError
+
+        h = agent(self, timing=fast(agent_hub_wait=60.0, agent_start_tries=2))
+        real = h.app.agent.hub.start_conversation
+        ops = []
+        script = [HubError(502, "回包丢了", "hub_unreachable"),  # A: may have reached it (a try counted)
+                  HubError(503, "离线", "node_unreachable", retryable=True, delivered="none"),  # A: nothing ran
+                  HubError(502, "回包丢了", "hub_unreachable")]  # B: may have reached it
+
+        def start(*a, **kw):
+            ops.append(kw.get("op_id"))
+            if script:
+                raise script.pop(0)
+            return real(*a, **kw)
+
+        h.app.agent.hub.start_conversation = start
+        m = ask(h, "/agent 换号后的重试次数")
+        run = running(h, m)
+        self.assertEqual(len(ops), 4)
+        self.assertEqual(ops[0], ops[1])
+        self.assertNotEqual(ops[1], ops[2], "a new id after the hub's nothing ran")
+        self.assertEqual(ops[2], ops[3], "B asked again, not given up on A's count")
+        self.assertEqual(run["start_op"], ops[3])
+        self.assertEqual(replies(h), [])
+
+    def test_one_start_loop_per_run(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6  # the live line's start waits for the manager
+        m = ask(h, "/agent 只有一个启动")
+        wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
+        other = threading.Thread(target=h.app.agent._resume_start, args=(run_of(h, m),), daemon=True)
+        other.start()  # as the restart's resume would, for a run made right as the app started
+        other.join(2)
+        self.assertFalse(other.is_alive(), "the second start of the run leaves it to the first")
+        h.http.offline = 0
+        running(h, m)
+        self.assertEqual(len(h.http.sessions), 1)
 
     def test_a_refusal_after_the_store_closed_changes_nothing(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
