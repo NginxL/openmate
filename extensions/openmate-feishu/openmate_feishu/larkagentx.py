@@ -78,6 +78,7 @@ SYNC_TARGET, SYNC_SOURCE = 1, 2  # entities.Message.SyncToChatMessageType: a thr
 SYNCED_KEEP = 500  # how many messages' "also in the main stream" marks are remembered (a reply copies the request's)
 AT_TAG = 5
 STATUS_NORMAL, STATUS_MODIFIED = 1, 3  # entities.Message.Status: as sent, edited
+CODE_BLOCK_TAGS = (31, 37)  # CODE_BLOCK, CODE_BLOCK_V2: their own properties, not a TextProperty
 BLOCK_TAGS = frozenset((3, 4, 14, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46))
 # RichTextElement.Tag: P, FIGURE, DIV, H1-H3, UL, OL, LI, QUOTE, CODE_BLOCK, HR, CODE_BLOCK_V2, TABLE…, COLUMNS, COLUMN,
 # H4-H6: blocks (a new line where one starts, in an @自己 request); B, I, U, LINK, CODE, A run on in the line
@@ -2568,8 +2569,9 @@ def link_text(prop: bytes) -> str:
 
 
 def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
-    """A rich text's pieces in order, as (kind, words): "text" runs, "at" names, "other" (links, placeholders), and
-    "break" (no words) where a block element starts (a paragraph, a heading, a list item, a rule…: BLOCK_TAGS)."""
+    """A rich text's pieces in order, as (kind, words): "text" runs, "at" names, "other" (links, placeholders),
+    "code" (a code block's lines; in an @自己 request only, the message's text reads as before), and "break" (no
+    words) where a block element starts (a paragraph, a heading, a list item, a rule…: BLOCK_TAGS)."""
     try:
         dictionary = (rich.get("elements") or {}).get("dictionary") or {}
     except AttributeError:
@@ -2609,6 +2611,11 @@ def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
         prop = el.get("property") or b""
         if tag in BLOCK_TAGS:
             out.append(("break", ""))
+        if tag in CODE_BLOCK_TAGS and prop:
+            words = code_block_words(tag, prop)
+            if words:
+                out.append(("code", words))
+            continue
         if tag in TEXT_TAGS and prop:
             try:
                 tp = P.TextProperty()
@@ -2636,9 +2643,26 @@ def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
     return out
 
 
+def code_block_words(tag: int, prop: bytes) -> str:
+    """A code block's text (CODE_BLOCK's content, CODE_BLOCK_V2's lines), "" when it cannot be read."""
+    try:
+        from larkx.proto import lark_all_pb2
+
+        E = lark_all_pb2.entities.RichTextElement
+        if tag == 31:
+            cb = E.CodeBlockProperty()
+            cb.ParseFromString(prop)
+            return cb.content
+        v2 = E.CodeBlockV2Property()
+        v2.ParseFromString(prop)
+        return "\n".join("".join(c.content for c in line.contents) for line in v2.contents)
+    except Exception:
+        return ""
+
+
 def rich_text(rich: dict, P) -> str:
     """A rich text's words in order: text runs, @names, links (their words and address), placeholders."""
-    text = "".join(w for _, w in rich_pieces(rich, P))
+    text = "".join(w for k, w in rich_pieces(rich, P) if k != "code")
     return text if text.strip() else ""
 
 
@@ -2656,8 +2680,10 @@ def rich_after_mentions(rich: dict, P, cut: bool = True) -> Optional[str]:
         if kind not in ("at", "break") and not (kind == "text" and not words.strip()):
             break
         i += 1
-    # a new paragraph starts a new line (two paragraphs never run into one word: "/st" + "op" is no /stop)
-    return "".join("\n" if kind == "break" else w for kind, w in pieces[i:]).strip()
+    # a new paragraph starts a new line (two paragraphs never run into one word: "/st" + "op" is no /stop), a code
+    # block stands on lines of its own
+    return "".join("\n" if kind == "break" else w + "\n" if kind == "code" else w
+                   for kind, w in pieces[i:]).strip()
 
 
 def hang_links(entity: dict) -> List[str]:

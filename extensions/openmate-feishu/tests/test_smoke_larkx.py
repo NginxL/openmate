@@ -127,6 +127,16 @@ x = pm.messages["90"]; x.id = "90"; x.createTimeMs = 1763000000000; x.editTimeMs
 x = pm.messages["91"]; x.id = "91"; x.status = 1  # as sent: surely not an edit
 x = pm.messages["92"]; x.id = "92"; x.status = 2  # deleted: not known as unedited
 marks = larkagentx.pushed_threads(pm.SerializeToString())
+E = LA.entities.RichTextElement
+cb = E.CodeBlockProperty(); cb.content = "SELECT 1"
+v2 = E.CodeBlockV2Property(); ln = v2.contents.add(); ln.contents.add().content = "a = 1"
+ln = v2.contents.add(); ln.contents.add().content = "b = 2"
+tp = b.lx.P.TextProperty(); tp.content = " /stop"
+ap = b.lx.P.AtProperty(); ap.userId = "7001"; ap.content = "@我"
+rich = {"elementIds": ["a", "t", "c1", "c2"], "elements": {"dictionary": {
+    "a": {"tag": 5, "property": ap.SerializeToString()}, "t": {"tag": 1, "property": tp.SerializeToString()},
+    "c1": {"tag": 31, "property": cb.SerializeToString()}, "c2": {"tag": 37, "property": v2.SerializeToString()}}}}
+out["code_cut"] = [larkagentx.rich_after_mentions(rich, b.lx.P), larkagentx.rich_text(rich, b.lx.P)]
 out["pushed_threads"] = [[k, marks[k], larkagentx.synced_mark(marks[k])] for k in sorted(marks)]
 pkt = b.lx.builders.build_send_message_packet("也发到群里", "900", "rid", root_id="80", thread_chat=False)
 pkt = larkagentx.also_to_chat(pkt, "81", "sync")
@@ -189,6 +199,8 @@ class RealLarkAgentXTest(unittest.TestCase):
             ["91", dict(none, thread_type=0, thread_known=False, status=1, edited=False), ""],
             ["92", dict(none, thread_type=0, thread_known=False, status=2), ""]],
             "where pushed messages show, read from a real push; an unset thread kind is told from a quote's 0; edits")
+        self.assertEqual(out["code_cut"], ["/stop\nSELECT 1\n\na = 1\nb = 2", "@我 /stop"],
+                         "an @自己 request keeps code blocks (no bare /stop then); the message's text as before")
         self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
                          "into the thread, also to the chat, quoting the request")
         self.assertEqual(out["also_to_chat_send"], ["83", False, True])
