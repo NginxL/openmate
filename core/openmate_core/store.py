@@ -199,6 +199,13 @@ def _live_row(r: sqlite3.Row, m: Message) -> dict:
             d["parent_id"] = m.parent_id
     if m.same_as:
         d["same_as"] = m.same_as
+    # this reading's own: whether it @-mentions the user (the stored at_me keeps any reading's), whether it is of an
+    # edit, and its text after the leading @s as the backend cut it
+    d["live_at_me"] = bool(m.at_me)
+    if m.edited:
+        d["edited"] = True
+    if m.text_after_mentions is not None:
+        d["text_after_mentions"] = m.text_after_mentions
     return d
 
 

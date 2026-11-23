@@ -135,6 +135,22 @@ class MappingTest(Base):
         self.assertEqual((self_at.mine, self_at.at_me, self_at.text), (True, True, "@我 设置为 write"))
         other_at = self.m(from_id=ME, content_data=text_data(("at", "7002", "@同事"), " 看下"), at_me=True)
         self.assertEqual((other_at.mine, other_at.at_me), (True, False))
+
+    def test_text_after_the_leading_mentions_is_cut_where_they_end(self):
+        from larkx._fake import text_data
+
+        def cut(*parts, **kw):
+            return self.m(from_id=ME, content_data=text_data(*parts), **kw).text_after_mentions
+
+        self.assertEqual(cut(("at", ME, "@Jane Doe"), " 总结日报"), "总结日报", "a name with a space")
+        self.assertEqual(cut(("at", ME, "@张三"), "总结日报"), "总结日报", "an @ right before the words")
+        self.assertEqual(cut(("at", "7002", "@同事"), " ", ("at", ME, "@我"), " /stop"), "/stop")
+        self.assertEqual(cut(("at", ME, "@我"), " @types/node 怎么装"), "@types/node 怎么装", "typed @ words stay")
+        self.assertEqual(cut(("at", ME, "@我")), "")
+        self.assertIsNone(cut("没有 @ 开头 ", ("at", ME, "@我")), "no @ in front: the core cuts the text itself")
+        self.assertIsNone(self.m(msg_type=2, content_data={"title": "标题", "text": "x"}).text_after_mentions)
+        self.assertFalse(self.m(content_data=text_data("x")).edited)
+        self.assertTrue(self.m(content_data=text_data("x"), _placement={"edited": True}).edited)
         self.assertEqual(self.m(create_time=1763000000123, content_data=text_data("x")).at, 1763000000.123)
 
     def test_post_card_system_and_others(self):

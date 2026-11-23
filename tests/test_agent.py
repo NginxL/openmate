@@ -137,15 +137,58 @@ class SelfMentionTest(unittest.TestCase):
     def test_switched_off_or_agent_off(self):
         off = agent(self, agent_self_mention=False)
         self.assertFalse(off.app.agent.self_mention)
-        ask(off, "@示例用户 设置为 write", at_me=True)
-        ask(off, "/agent 前缀照常")
-        started(off)
+        at = ask(off, "@示例用户 设置为 write", at_me=True)
+        prefixed = ask(off, "/agent 前缀照常")
+        run_of(off, prefixed)
+        time.sleep(0.3)
+        self.assertEqual([r["request_id"] for r in off.app.store.runs_in_chat(at.chat_id)], [prefixed.id])
         self.assertEqual(len(off.http.starts()), 1)
         h = Harness(self, config={"agent": False})
         h.sign_in()
         ask(h, "@示例用户 设置为 write", at_me=True)
         time.sleep(0.3)
         self.assertEqual(h.http.starts(), [])
+
+
+class SelfMentionReadingTest(unittest.TestCase):
+    """What one live reading says decides an @自己, never a mark another reading left in the store."""
+
+    def test_an_at_me_an_earlier_reading_stored_does_not_make_a_request(self):
+        from openmate_core.backend import Message
+
+        h = agent(self)
+        kw = dict(id="m-hist", chat_id="chat_example_team", position=9000, sender_id=h.world.me.id, mine=True,
+                  at=time.time())
+        h.app.ingest([Message(text="@示例用户 先这么写", at_me=True, **kw)], live=False)  # a catch-up read it with the @
+        h.app.ingest([Message(text="已自行处理", at_me=False, **kw)], live=True)  # its push: the @ taken out
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+        self.assertTrue(h.app.store.message("chat_example_team", "m-hist")["at_me"], "the stored mark is kept")
+
+    def test_an_edit_heard_first_makes_no_request(self):
+        from openmate_core.backend import Message
+
+        h = agent(self)
+        h.app.ingest([Message(id="m-edit", chat_id="chat_example_team", position=9001, sender_id=h.world.me.id,
+                              mine=True, at=time.time(), text="@示例用户 改成这样", at_me=True, edited=True)],
+                     live=True)
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+
+    def test_the_backend_s_cut_is_the_request(self):
+        h = agent(self)
+        m = ask(h, "@Jane Doe 总结日报", at_me=True, text_after_mentions="总结日报")
+        started(h)
+        self.assertEqual(run_of(h, m)["request_text"], "总结日报", "not \"Doe 总结日报\"")
+        m2 = ask(h, "@张三/agent 查一下", text_after_mentions="/agent 查一下", chat="chat_example_dm_b")
+        started(h, 2)
+        self.assertEqual(run_of(h, m2)["request_text"], "查一下", "an @ right before the prefix")
+
+    def test_a_stop_after_a_name_with_a_space_still_stops(self):
+        h = agent(self)
+        ask(h, "@Jane Doe /stop", at_me=True, text_after_mentions="/stop")
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [], "a stop, not a request")
 
 
 class ConversationTest(unittest.TestCase):

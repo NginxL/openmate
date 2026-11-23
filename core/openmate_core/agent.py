@@ -474,8 +474,11 @@ class AgentRunner:
         if self.is_agent_text(text):
             return
         view = getattr(self.app.platform, "mark_view", None)
-        # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after any leading @s
-        body = (view(text) if view is not None else strip_leading_mentions(text)).strip()
+        # WeChat: right after the real @s (a typed "@x" before /agent is text); elsewhere after the leading @s, where
+        # the service's @ elements end when the backend read them (an "@Jane Doe", an @ right before the words), else
+        # at spaces
+        cut = row.get("text_after_mentions")
+        body = (view(text) if view is not None else cut if cut is not None else strip_leading_mentions(text)).strip()
         if channel is not None and channel.take(row, body, epoch):
             # the 「Persona 渠道会话」's: handed to Persona's channel flow (channel.py), whether /agent is on or not; its
             # echoes are told by the channel's own record of what was sent there, not /agent's text cache
@@ -490,9 +493,11 @@ class AgentRunner:
             return
         req = match_prefix(body, self.prefix)
         if req is None:
-            if not (self.self_mention and row.get("at_me")):
+            # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), and it is
+            # not an edit (editing an old line never asks); the whole message, without the @s it starts with
+            if not (self.self_mention and row.get("live_at_me") and not row.get("edited")):
                 return
-            req = body  # @自己: the whole message, without the @s it starts with, is the request
+            req = body
         with self.app.owned(epoch) as ok:
             if not ok:
                 log.info("an /agent line of an account signed out meanwhile: not taken")

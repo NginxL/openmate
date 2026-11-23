@@ -77,6 +77,7 @@ THREAD_REPLY = 2  # entities.Message.ThreadMessageType THREAD_REPLY_MESSAGE: a r
 SYNC_TARGET, SYNC_SOURCE = 1, 2  # entities.Message.SyncToChatMessageType: a thread reply's copy in the main stream, the reply
 SYNCED_KEEP = 500  # how many messages' "also in the main stream" marks are remembered (a reply copies the request's)
 AT_TAG = 5
+STATUS_MODIFIED = 3  # entities.Message.Status.MODIFIED: the message was edited
 PUSH_CMD = 6
 PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
 PUSH_FEED_CARDS_CMD = 1002  # feed.PushFeedCardsRequest: feed cards changed, among them chats moved to 完成 (done)
@@ -309,7 +310,9 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
             out[mid] = {"thread_type": int(m.threadMessageType), "thread_known": m.HasField("threadMessageType"),
                         "send_to_chat": bool(m.sendToChat),
                         "sync_type": int(m.syncToChatMessageType), "sync_related": _id(m.syncToChatRelatedMessageId),
-                        "sync_root": _id(m.syncToChatThreadRootId)}
+                        "sync_root": _id(m.syncToChatThreadRootId),
+                        # an edited message's push (status MODIFIED, an edit version): never a new request (@自己)
+                        "edited": int(m.status) == STATUS_MODIFIED or int(m.editVersion) > 0}
     return out
 
 
@@ -1406,6 +1409,10 @@ class LarkXBackend(Backend):
         if sender and sender != me_id and _int(d.get("chat_type")) == CHAT_P2P:
             self._learn_peer(chat_id, sender, me_id)
         mentions = self._mentions(data)
+        # where the leading @ elements end (TEXT, and a POST without a title): the core cuts there, not at spaces
+        cut = None
+        if data is not None and (mt == TEXT or (mt == POST and not str(data.get("title") or ""))):
+            cut = rich_after_mentions(data.get("richText") or {}, self.lx.P)
         at_all = "all" in mentions
         # the service's own at-me mark counts for someone else's message only: an own message @-mentions the account
         # only by a real @ of it in the text (@自己 asks the Agent, so a reply or quote of an own message never does)
@@ -1415,7 +1422,8 @@ class LarkXBackend(Backend):
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),
             text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
-            media=self._media_of(mt, data, chat_id, msg_id), placement=placement, same_as=same_as)
+            media=self._media_of(mt, data, chat_id, msg_id), placement=placement, same_as=same_as,
+            text_after_mentions=cut, edited=bool(marks.get("edited")))
 
     def _placement(self, d: dict, chat_id: str, msg_id: str, in_thread: bool, topic_root: bool, mine: bool,
                    client) -> str:
@@ -2541,12 +2549,12 @@ def link_text(prop: bytes) -> str:
     return href or words
 
 
-def rich_text(rich: dict, P) -> str:
-    """A rich text's words in order: text runs, @names, links (their words and address), placeholders."""
+def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
+    """A rich text's pieces in order, as (kind, words): "text" runs, "at" names, "other" (links, placeholders)."""
     try:
         dictionary = (rich.get("elements") or {}).get("dictionary") or {}
     except AttributeError:
-        return ""
+        return []
     ids = [str(k) for k in rich.get("elementIds") or []]
     if not ids:
         try:
@@ -2569,7 +2577,7 @@ def rich_text(rich: dict, P) -> str:
         visit(k)
     for k in dictionary:
         visit(k)
-    out: List[str] = []
+    out: List[Tuple[str, str]] = []
     for k in order:
         el = dictionary.get(k)
         if not isinstance(el, dict):
@@ -2584,7 +2592,7 @@ def rich_text(rich: dict, P) -> str:
             try:
                 tp = P.TextProperty()
                 tp.ParseFromString(prop)
-                out.append(tp.content + ("\n" if tag == 3 else ""))
+                out.append(("text", tp.content + ("\n" if tag == 3 else "")))
                 continue
             except Exception:
                 pass
@@ -2592,20 +2600,43 @@ def rich_text(rich: dict, P) -> str:
             try:
                 ap = P.AtProperty()
                 ap.ParseFromString(prop)
-                out.append(ap.content or "[@]")
+                out.append(("at", ap.content or "[@]"))
             except Exception:
-                out.append("[@]")
+                out.append(("at", "[@]"))
             continue
         if tag == ANCHOR_TAG and prop:
             words = link_text(prop)
             if words:
-                out.append(words)
+                out.append(("other", words))
                 continue
         if tag in PLACEHOLDERS:
-            out.append(PLACEHOLDERS[tag])
+            out.append(("other", PLACEHOLDERS[tag]))
             continue
-    text = "".join(out)
+    return out
+
+
+def rich_text(rich: dict, P) -> str:
+    """A rich text's words in order: text runs, @names, links (their words and address), placeholders."""
+    text = "".join(w for _, w in rich_pieces(rich, P))
     return text if text.strip() else ""
+
+
+def rich_after_mentions(rich: dict, P) -> Optional[str]:
+    """A rich text's words after the @ elements it starts with (and the spaces around them), cut where those
+    elements end: "@Jane Doe 总结" → "总结", "@张三总结" → "总结". None when it starts with no @ element or has no
+    pieces (the core cuts the text itself then)."""
+    pieces = rich_pieces(rich, P)
+    i, cut = 0, False
+    while i < len(pieces):
+        kind, words = pieces[i]
+        if kind == "at":
+            cut = True
+        elif not (kind == "text" and not words.strip()):
+            break
+        i += 1
+    if not cut:
+        return None
+    return "".join(w for _, w in pieces[i:]).strip()
 
 
 def hang_links(entity: dict) -> List[str]:
