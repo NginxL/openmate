@@ -198,6 +198,12 @@ class SelfMentionReadingTest(unittest.TestCase):
         m2 = ask(h, "@示例用户 /agent：看看", at_me=True, text_after_mentions="/agent：看看", chat="chat_example_dm_b")
         started(h, 2)
         self.assertEqual(run_of(h, m2)["request_text"], "看看")
+        from openmate_core.agent import after_prefix
+
+        self.assertEqual(after_prefix("/agent\r看看", "/agent"), "看看", "a lone CR")
+        self.assertEqual(after_prefix("/agent：::f();", "/agent"), "::f();", "one separator, the code's colons stay")
+        self.assertEqual(after_prefix("/agent \r\n  x", "/agent"), "  x")
+        self.assertIsNone(after_prefix("/agents x", "/agent"))
 
     def test_a_code_block_first_keeps_its_indents(self):
         h = agent(self)

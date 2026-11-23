@@ -183,10 +183,18 @@ def after_prefix(words: str, prefix: str) -> Optional[str]:
     body = (words or "").lstrip()
     if match_prefix(body, prefix) is None:
         return None
-    rest = body[len(prefix):].lstrip(" \t:：")
+    rest = body[len(prefix):]
+    i = 0
+    while i < len(rest) and rest[i] in " \t":
+        i += 1
+    if i < len(rest) and rest[i] in ":：":  # one separator, never the code's own colons ("::f();")
+        i += 1
+        while i < len(rest) and rest[i] in " \t":
+            i += 1
+    rest = rest[i:]
     if rest.startswith("\r\n"):
         rest = rest[2:]
-    elif rest.startswith("\n"):
+    elif rest[:1] in ("\r", "\n"):
         rest = rest[1:]
     return rest.rstrip()
 
