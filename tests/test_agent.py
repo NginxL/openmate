@@ -1112,6 +1112,39 @@ class NetworkTest(unittest.TestCase):
         running(h2, m)
         self.assertEqual(len(h2.http.sessions), 1)
 
+    def test_no_new_id_for_a_request_dated_ahead_of_the_clock(self):
+        # the clock went back since it was asked: its wait cannot be told, so it keeps its id (as main)
+        h = agent(self, timing=fast(agent_hub_wait=60.0, agent_hub_probe=30.0))
+        h.http.machine_offline = 1
+        m = ask(h, "/agent 时钟回拨后的拒绝")
+        wait_until(lambda: len(h.http.starts()) == 1, what="the refusal")
+        refused = h.http.starts()[0]["op"]
+        rid = run_of(h, m)["id"]
+        h.app.store._tx(lambda db: db.execute("UPDATE runs SET created = ? WHERE id = ?", (time.time() + 900, rid)))
+        h2 = h.restart(timing=fast(agent_hub_wait=0.5))
+        h2.wait_ok()
+        wait_until(lambda: run_of(h2, m)["state"] == "failed", what="it ends")
+        self.assertEqual({s["op"] for s in h2.http.starts()}, {refused})
+        self.assertEqual(h2.http.sessions, {})
+
+    def test_without_the_snapshot_the_scan_goes_by_the_start_time(self):
+        from openmate_core.agent import AgentRunner
+
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        real = h.app.store.runs_in_state
+        h.app.store.runs_in_state = lambda states: (_ for _ in ()).throw(RuntimeError("busy"))
+        runner = AgentRunner(h.app)  # its snapshot of the starting runs could not be read
+        h.app.store.runs_in_state = real
+        self.assertIsNone(runner._cut_off)
+        m = ask(h, "/agent 快照没读到")
+        run = run_of(h, m)
+        run.pop("start_op", None)
+        run.pop("start_prompt", None)
+        h.app.store.run_put(run)
+        runner._resume_cut_off()
+        self.assertEqual(run_of(h, m)["state"], "starting", "made after the runner: not one a restart cut off")
+
     def test_a_refusal_after_the_store_closed_changes_nothing(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
         h.http.offline = 10 ** 6
