@@ -929,7 +929,10 @@ class AgentRunner:
                     # the deadline (2026-11-23: a node restarted for 9 s, the request then waited out its 5 minutes).
                     # The next try goes under a new id: the old one started nothing, so it cannot start a second
                     # conversation, and nothing asked under the old one may have run.
-                    run, op = self._new_start_op(run)
+                    nxt = self._new_start_op(run, op, epoch)
+                    if nxt is None:
+                        return  # closing, another account's sign-in, or the run stopped or started meanwhile
+                    run, op = nxt
                     maybe, first_try = False, 0.0
                 elif not e.unsent and attempt:
                     first_try = first_try or attempt  # it may have reached the hub
@@ -1025,16 +1028,23 @@ class AgentRunner:
                 self.store.run_put(cur)
         return cur, cur["start_op"], cur.get("start_prompt") or prompt
 
-    def _new_start_op(self, run: dict):
-        """(run, op id) after the hub answered the start's operation with \"nothing ran\": a new id, kept with the run in
-        place of the old one (a restart asks under it), with the same body."""
+    def _new_start_op(self, run: dict, refused: str, epoch: Optional[int]):
+        """(run, op id) to ask under after the hub answered the start's operation `refused` with "nothing ran": a new
+        id kept with the run in place of `refused` (a restart asks under it), the body unchanged. Two starts of one run
+        at once (the live line's and the restart's resume) may both get that answer: only the first changes the id,
+        the other asks under the one it finds. None: nothing more to ask (the app closing or another account's
+        sign-in, or the run gone, stopped or started meanwhile)."""
         with self._lock(run["id"]):
-            cur = self.store.run_get(run["id"])
-            if cur is None:  # gone (another account's sign-in wiped it): the start loop ends at its next check
-                return run, run.get("start_op") or ""
-            cur["start_op"] = str(uuid.uuid4())
-            self.store.run_put(cur)
-        return cur, cur["start_op"]
+            with self.app.owned(epoch) as ok:
+                if not ok:
+                    return None
+                cur = self.store.run_get(run["id"])
+                if cur is None or cur.get("state") != "starting":
+                    return None
+                if cur.get("start_op") == refused:
+                    cur["start_op"] = str(uuid.uuid4())
+                    self.store.run_put(cur)
+                return cur, cur["start_op"]
 
     def _retry_as(self, run_id: str, ref: str) -> Optional[dict]:
         with self._lock(run_id):

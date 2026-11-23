@@ -938,23 +938,79 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(run["start_op"], ops[-1])
         self.assertEqual({s["body"]["prompt"] for s in h.http.starts()}, {h.http.starts()[0]["body"]["prompt"]})
 
-    def test_a_restart_after_a_machine_away_asks_under_the_new_operation(self):
+    def _stop_at_new_id(self, h, change: bool):
+        """Stop the agent at its first "nothing ran": after the new id is kept (change) or before. The id kept."""
+        agent_ = h.app.agent
+        real = agent_._new_start_op
+        kept = []
+
+        def once(run, refused, epoch):
+            out = real(run, refused, epoch) if change else None
+            kept.append(out[1] if out else refused)
+            agent_._stop.set()  # as at a shutdown: the start loop asks nothing more
+            return None
+
+        agent_._new_start_op = once
+        return kept
+
+    def test_a_restart_after_the_new_id_was_kept_asks_under_it(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
-        h.http.machine_offline = 10 ** 6
+        h.http.machine_offline = 1
+        kept = self._stop_at_new_id(h, change=True)
         m = ask(h, "/agent 电脑离开了一下又重启")
-        wait_until(lambda: len(h.http.starts()) >= 2, what="asked again")
-        h.close()  # stopped while it waits: the run keeps the id it would ask under next
-        time.sleep(0.3)  # its start loop has seen the stop
-        refused = {s["op"] for s in h.http.starts()}
+        wait_until(lambda: kept, what="the new id")
+        refused = h.http.starts()[0]["op"]
+        self.assertNotEqual(kept[0], refused)
         before = len(h.http.starts())
-        h.http.machine_offline = 0
         h2 = h.restart()
         h2.wait_ok()
         run = running(h2, m)
-        after = h2.http.starts()[before]["op"]
-        self.assertNotIn(after, refused, "the restart asks under the new id, not one the hub keeps a refusal for")
-        self.assertEqual(run["start_op"], after)
+        self.assertEqual(h2.http.starts()[before]["op"], kept[0], "the restart asks under the kept id")
+        self.assertEqual(run["start_op"], kept[0])
         self.assertEqual(len(h2.http.sessions), 1)
+
+    def test_a_restart_before_the_new_id_was_kept_gets_the_refusal_then_goes_on(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.machine_offline = 1
+        kept = self._stop_at_new_id(h, change=False)
+        m = ask(h, "/agent 换号前就重启了")
+        wait_until(lambda: kept, what="the refusal")
+        refused = kept[0]
+        before = len(h.http.starts())
+        h2 = h.restart()
+        h2.wait_ok()
+        run = running(h2, m)
+        self.assertEqual(h2.http.starts()[before]["op"], refused, "asked again: the hub's kept refusal")
+        self.assertNotEqual(run["start_op"], refused)
+        self.assertEqual(len(h2.http.sessions), 1)
+
+    def test_two_starts_of_one_run_change_its_id_once(self):
+        # the live line's start and the restart's resume may both get the same "nothing ran": one new id, not two
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6  # it waits, under its first id
+        m = ask(h, "/agent 两个线程同时换号")
+        refused = wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
+        h.app.agent._stop.set()
+        time.sleep(0.2)
+        run = run_of(h, m)
+        first = h.app.agent._new_start_op(run, refused, None)
+        second = h.app.agent._new_start_op(run, refused, None)
+        self.assertNotEqual(first[1], refused)
+        self.assertEqual(second[1], first[1], "the second asks under the id the first kept")
+        self.assertEqual(run_of(h, m)["start_op"], first[1])
+        cur = run_of(h, m)
+        cur["state"] = "running"  # started meanwhile (by the other): nothing more to ask
+        h.app.store.run_put(cur)
+        self.assertIsNone(h.app.agent._new_start_op(cur, first[1], None))
+
+    def test_a_refusal_after_the_store_closed_changes_nothing(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 关掉以后才回来的拒绝")
+        wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
+        run = run_of(h, m)
+        h.close()
+        self.assertIsNone(h.app.agent._new_start_op(run, run["start_op"], None))
 
     def test_it_gives_up_when_the_machine_stays_offline(self):
         h = agent(self, timing=fast(agent_hub_wait=0.3))
