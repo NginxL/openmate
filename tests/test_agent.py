@@ -1098,6 +1098,20 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(run_of(h, m)["state"], "starting", "not taken for a request a restart cut off")
         self.assertEqual([x for x in h.sent() if "扩展重启了" in x["text"]], [])
 
+    def test_a_restart_after_the_clock_went_back_still_resumes(self):
+        # the runs to resume are the ones starting when the runner was made, whatever their times say
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.offline = 10 ** 6
+        m = ask(h, "/agent 时钟往回调了")
+        wait_until(lambda: run_of(h, m).get("start_op"), what="its operation id")
+        rid = run_of(h, m)["id"]
+        h.app.store._tx(lambda db: db.execute("UPDATE runs SET created = ? WHERE id = ?", (time.time() + 200, rid)))
+        h.http.offline = 0
+        h2 = h.restart()
+        h2.wait_ok()
+        running(h2, m)
+        self.assertEqual(len(h2.http.sessions), 1)
+
     def test_a_refusal_after_the_store_closed_changes_nothing(self):
         h = agent(self, timing=fast(agent_hub_wait=60.0))
         h.http.offline = 10 ** 6

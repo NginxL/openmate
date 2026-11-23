@@ -232,7 +232,12 @@ class AgentRunner:
         self.purpose = getattr(app.platform, "agent_purpose", "") or ""
         self._mu = threading.Lock()
         self._starting_now: set = set()  # runs a start loop is working on here: one loop per run (_start)
-        self._born = time.time()  # runs made from now on are this start's own, never one a restart cut off
+        # the runs a restart cut off: those starting when this runner was made, before the live line runs (a run it
+        # makes later is its own start's); None when the store could not be read (then every starting run)
+        try:
+            self._cut_off: Optional[set] = {r["id"] for r in app.store.runs_in_state(["starting"])} if app.store else None
+        except Exception:
+            self._cut_off = None
         self._run_locks: Dict[str, threading.RLock] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -283,7 +288,7 @@ class AgentRunner:
         """The starts a restart cut off (runs made before this start): those that can go on do, the others are told."""
         lost = []
         for run in sorted(self.store.runs_in_state(["starting"]), key=lambda r: float(r.get("created") or 0)):
-            if float(run.get("created") or 0) >= self._born:
+            if self._cut_off is not None and run["id"] not in self._cut_off:
                 continue  # made by this start's live line meanwhile (the listener may run first): its own start has it
             how = self._resume_how(run)
             if not how:
