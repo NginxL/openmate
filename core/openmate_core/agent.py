@@ -923,7 +923,15 @@ class AgentRunner:
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
-                if not e.unsent and attempt:
+                if op and e.delivered == "none" and e.retryable is True:
+                    # The hub's own answer to this operation: nothing ran (the machine was away for a moment). The hub
+                    # keeps that answer as the operation's receipt, so the same id asked again only gets it back until
+                    # the deadline (2026-11-23: a node restarted for 9 s, the request then waited out its 5 minutes).
+                    # The next try goes under a new id: the old one started nothing, so it cannot start a second
+                    # conversation, and nothing asked under the old one may have run.
+                    run, op = self._new_start_op(run)
+                    maybe, first_try = False, 0.0
+                elif not e.unsent and attempt:
                     first_try = first_try or attempt  # it may have reached the hub
                 if op and e.code in ("unknown", "assistant_in_doubt", "op_id_reused"):
                     self._fail(run["id"], "Persona 不确定这个 /agent 有没有开始处理（网络中途断了）。请先在 Persona 里看看有没有"
@@ -1016,6 +1024,17 @@ class AgentRunner:
                 cur["start_prompt"] = prompt
                 self.store.run_put(cur)
         return cur, cur["start_op"], cur.get("start_prompt") or prompt
+
+    def _new_start_op(self, run: dict):
+        """(run, op id) after the hub answered the start's operation with \"nothing ran\": a new id, kept with the run in
+        place of the old one (a restart asks under it), with the same body."""
+        with self._lock(run["id"]):
+            cur = self.store.run_get(run["id"])
+            if cur is None:  # gone (another account's sign-in wiped it): the start loop ends at its next check
+                return run, run.get("start_op") or ""
+            cur["start_op"] = str(uuid.uuid4())
+            self.store.run_put(cur)
+        return cur, cur["start_op"]
 
     def _retry_as(self, run_id: str, ref: str) -> Optional[dict]:
         with self._lock(run_id):

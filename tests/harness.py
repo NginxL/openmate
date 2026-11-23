@@ -229,7 +229,7 @@ class FakeHubHTTP:
         self.offline = 0  # the next this many requests (any route) get the manager's 503 manager_offline
         self.lost_starts = 0  # the next this many conversation starts open a conversation, but the answer is lost (502)
         self.lost_code = "hub_unreachable"  # … with this code (the relay's, or the hub's node_unreachable)
-        self.machine_offline = 0  # the next this many starts find the machine offline (503, nothing ran)
+        self.machine_offline = 0  # the next this many starts find the machine offline (503, nothing ran; kept as the receipt)
         self.lost_sends = 0  # the next this many messages are typed, but the answer is lost (502)
         self.ops: Dict[str, dict] = {}  # X-Persona-Op-Id of conversation starts → their receipt (assistant_start_ops)
         self.start_pending = 0  # the next this many asks about a start find it still under way (202 pending)
@@ -391,8 +391,10 @@ class FakeHubHTTP:
                     return self.start_fail, {"error": "refused"}
                 if self.machine_offline > 0:
                     self.machine_offline -= 1
-                    return 503, {"error": "示例电脑离线了", "code": "node_unreachable", "retryable": True,
-                                 "delivered": "none"}
+                    refusal = {"error": "示例电脑离线了", "code": "node_unreachable", "retryable": True, "delivered": "none"}
+                    if op:  # as the hub does (clientOpRetry lets only assistant_offline go): the refusal is the receipt
+                        self.ops[op] = {"body": body, "state": "done", "status": 503, "answer": refusal}
+                    return 503, refusal
                 sid = "sess-%d" % next(self._n)
                 mid = (body or {}).get("machine_id") or "mac-example"
                 self.sessions[sid] = {"machine": mid, "items": [], "reporter": bool((body or {}).get("report_tasks")),

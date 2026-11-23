@@ -932,6 +932,29 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(len(h.http.sessions), 1)
         self.assertNotIn("ref", run)
         self.assertEqual(replies(h), [])
+        # the hub keeps "nothing ran" as an operation's receipt: each try after one goes under a new operation id
+        ops = [s["op"] for s in h.http.starts()]
+        self.assertEqual(len(set(ops)), 4)
+        self.assertEqual(run["start_op"], ops[-1])
+        self.assertEqual({s["body"]["prompt"] for s in h.http.starts()}, {h.http.starts()[0]["body"]["prompt"]})
+
+    def test_a_restart_after_a_machine_away_asks_under_the_new_operation(self):
+        h = agent(self, timing=fast(agent_hub_wait=60.0))
+        h.http.machine_offline = 10 ** 6
+        m = ask(h, "/agent 电脑离开了一下又重启")
+        wait_until(lambda: len(h.http.starts()) >= 2, what="asked again")
+        h.close()  # stopped while it waits: the run keeps the id it would ask under next
+        time.sleep(0.3)  # its start loop has seen the stop
+        refused = {s["op"] for s in h.http.starts()}
+        before = len(h.http.starts())
+        h.http.machine_offline = 0
+        h2 = h.restart()
+        h2.wait_ok()
+        run = running(h2, m)
+        after = h2.http.starts()[before]["op"]
+        self.assertNotIn(after, refused, "the restart asks under the new id, not one the hub keeps a refusal for")
+        self.assertEqual(run["start_op"], after)
+        self.assertEqual(len(h2.http.sessions), 1)
 
     def test_it_gives_up_when_the_machine_stays_offline(self):
         h = agent(self, timing=fast(agent_hub_wait=0.3))
