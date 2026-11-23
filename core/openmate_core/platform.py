@@ -41,6 +41,10 @@ class Platform:
     #: the service can edit a sent message (Backend.edit). Without it /agent sends no progress messages at all: each
     #: would be a new message in the chat, as the user
     can_edit: bool = True
+    #: the user's own live message that @-mentions the user (a real @, Message.at_me) is a request like /agent, when
+    #: agent_self_mention is on (on by default): no "/" in front, so the chat's own bots never take it for theirs.
+    #: Feishu: yes. WeChat: no (its @ list never names the sender)
+    self_mention: bool = False
     #: an 自动代答 (someone else's @ of the user) gets the taken mark too. WeChat: no; its mark is a message of its own
     #: in front of the whole group, while /agent (the user's own request) keeps it
     ack_auto: bool = True

@@ -101,6 +101,53 @@ class TriggerTest(unittest.TestCase):
             self.assertEqual(hb.app.agent.prefix, "/agent", bad)
 
 
+class SelfMentionTest(unittest.TestCase):
+    """「@自己 …」: the user's own live message with a real @ of the user is a request like /agent (Feishu)."""
+
+    def test_my_own_mention_of_me_is_a_request(self):
+        h = agent(self)
+        m = ask(h, "@示例用户 设置为 write", at_me=True)
+        body = started(h)["body"]
+        self.assertTrue(body["prompt"].endswith("\n设置为 write"))
+        self.assertNotIn("guest", body, "the user's own request: a full conversation, not a guest one")
+        self.assertEqual(run_of(h, m)["request_text"], "设置为 write")
+        row = h.app.store.message(m.chat_id, m.id)
+        h.app.agent.on_message(row)  # delivered again
+        time.sleep(0.2)
+        self.assertEqual(len(h.http.starts()), 1)
+
+    def test_a_mention_of_me_anywhere_and_a_bare_one(self):
+        h = agent(self)
+        m = ask(h, "@示例同事甲 这个问题 @示例用户 帮忙看下", at_me=True)
+        started(h)
+        self.assertEqual(run_of(h, m)["request_text"], "这个问题 @示例用户 帮忙看下")
+        bare = ask(h, "@示例用户", at_me=True, chat="chat_example_dm_b")
+        started(h, 2)
+        self.assertEqual(run_of(h, bare)["request_text"], "")
+
+    def test_only_my_fresh_live_mentions_of_me(self):
+        h = agent(self)
+        ask(h, "@示例同事甲 帮我看下")  # mine, someone else's @
+        ask(h, "@示例用户 很久以前的", at_me=True, ago=11 * 60)  # too old
+        ask(h, "@示例用户 这是一条代答\n\n" + SUFFIX, at_me=True)  # one of the Agent's own replies
+        h.world.push("chat_example_team", "user_example_a", "@示例用户 帮我看下", at_me=True)  # someone else's: not this
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+
+    def test_switched_off_or_agent_off(self):
+        off = agent(self, agent_self_mention=False)
+        self.assertFalse(off.app.agent.self_mention)
+        ask(off, "@示例用户 设置为 write", at_me=True)
+        ask(off, "/agent 前缀照常")
+        started(off)
+        self.assertEqual(len(off.http.starts()), 1)
+        h = Harness(self, config={"agent": False})
+        h.sign_in()
+        ask(h, "@示例用户 设置为 write", at_me=True)
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+
+
 class ConversationTest(unittest.TestCase):
     def test_start_with_context(self):
         h = agent(self, agent_machine="mac-2", agent_launcher="example-launcher")

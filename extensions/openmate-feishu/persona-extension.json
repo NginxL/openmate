@@ -90,9 +90,9 @@
       "agent": {
         "type": "boolean",
         "title": "启用 /agent",
-        "description": "你在飞书里发以前缀开头的消息时，交给 Agent 处理，并以你的身份回复。",
+        "description": "你在飞书里发以前缀开头的消息（或 @ 你自己的消息，见下面的开关）时，交给 Agent 处理，并以你的身份回复。",
         "default": false,
-        "x-confirm": "打开后，你自己在飞书里发的 /agent 消息会让 Agent 用你的全部权限处理，并以你的身份回复到原话题。确定打开吗？"
+        "x-confirm": "打开后，你自己在飞书里发的 /agent 消息（和 @ 你自己的消息）会让 Agent 用你的全部权限处理，并以你的身份回复到原话题。确定打开吗？"
       },
       "agent_prefix": {
         "type": "string",
@@ -101,6 +101,12 @@
         "default": "/agent",
         "pattern": "^/\\S+$",
         "maxLength": 32
+      },
+      "agent_self_mention": {
+        "type": "boolean",
+        "title": "@自己 也交给 Agent",
+        "description": "你自己发的消息里 @ 了你自己（真正的 @，不是手打的文字）时，也当作一次 /agent 请求，@ 后面的话就是要办的事。不以“/”开头，群里别的机器人不会把它当成自己的命令。要先打开 /agent。",
+        "default": true
       },
       "agent_machine": {
         "type": "string",

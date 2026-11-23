@@ -205,6 +205,8 @@ class AgentRunner:
         cfg = app.config
         self.enabled = bool(cfg.get("agent"))
         self.prefix = valid_prefix(cfg.get("agent_prefix"))
+        # 「@自己 …」: the user's own message that @-mentions the user is a request too (where the platform offers it)
+        self.self_mention = bool(getattr(app.platform, "self_mention", False)) and bool(cfg.get("agent_self_mention", True))
         self.machine = str(cfg.get("agent_machine") or "").strip()
         self.launcher = str(cfg.get("agent_launcher") or "").strip()
         self.suffix = parse_suffix(cfg.get("agent_reply_suffix"))
@@ -488,7 +490,9 @@ class AgentRunner:
             return
         req = match_prefix(body, self.prefix)
         if req is None:
-            return
+            if not (self.self_mention and row.get("at_me")):
+                return
+            req = body  # @自己: the whole message, without the @s it starts with, is the request
         with self.app.owned(epoch) as ok:
             if not ok:
                 log.info("an /agent line of an account signed out meanwhile: not taken")

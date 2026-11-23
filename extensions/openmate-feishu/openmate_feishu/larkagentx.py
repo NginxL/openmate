@@ -1407,7 +1407,9 @@ class LarkXBackend(Backend):
             self._learn_peer(chat_id, sender, me_id)
         mentions = self._mentions(data)
         at_all = "all" in mentions
-        at_me = bool(me_id) and (me_id in mentions or (bool(d.get("at_me")) and not at_all))
+        # the service's own at-me mark counts for someone else's message only: an own message @-mentions the account
+        # only by a real @ of it in the text (@自己 asks the Agent, so a reply or quote of an own message never does)
+        at_me = bool(me_id) and (me_id in mentions or (bool(d.get("at_me")) and not at_all and sender != me_id))
         return Message(
             id=msg_id, chat_id=chat_id, position=self._position(chat_id, d.get("position"), client),
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),

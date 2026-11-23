@@ -127,6 +127,14 @@ class MappingTest(Base):
         self.assertTrue(pushed.at_me, "the push's own @me mark counts when the text has no mentions")
         mine = self.m(from_id=ME, content_data=text_data("我发的"))
         self.assertTrue(mine.mine)
+        # an own message: @me only by a real @ of me in it (「@自己 …」), never by the service's mark alone (a reply to
+        # or quote of an own message must not ask the Agent)
+        marked = self.m(from_id=ME, content_data=text_data("回复我自己"), at_me=True)
+        self.assertEqual((marked.mine, marked.at_me), (True, False))
+        self_at = self.m(from_id=ME, content_data=text_data(("at", ME, "@我"), " 设置为 write"))
+        self.assertEqual((self_at.mine, self_at.at_me, self_at.text), (True, True, "@我 设置为 write"))
+        other_at = self.m(from_id=ME, content_data=text_data(("at", "7002", "@同事"), " 看下"), at_me=True)
+        self.assertEqual((other_at.mine, other_at.at_me), (True, False))
         self.assertEqual(self.m(create_time=1763000000123, content_data=text_data("x")).at, 1763000000.123)
 
     def test_post_card_system_and_others(self):

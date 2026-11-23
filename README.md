@@ -27,7 +27,7 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 | 知识库选群 | 飞书声明了 Persona 的“历史”能力：在 Persona 的“设置 → 知识库选择 → 单项设置 → 添加聊天”里选来源“飞书（OpenMate）”，能搜到这个扩展存过的会话，添加后打开“全部保存”，这个群以后的消息就全部进知识库（不打开时只存 @我 和我发言前后的消息）。旧消息可以用 Persona 的历史导入补进来，只能补扩展登录以来存下的部分 |
 | 只读工具 | `matefeishu_status`、`matefeishu_chats`、`matefeishu_messages`（可按时间段和关键词查，会自己往前补读历史）、`matefeishu_search`（搜人和群）、`matefeishu_docs`（通过管理端的 lark-cli 只读集成搜文档）、`matefeishu_starkmesh`（中转站额度：还剩多少号、多久重置、哪些号不可用，早报用它）、`matefeishu_media`（按消息 id 以现在登录的账号把图片或文件下载到本机临时目录（每次重新下载，25 MB 以内），返回本地路径；`matefeishu_messages` 和 /agent 上下文里带图片或文件的消息写着「看图：matefeishu_media message=…」） |
 | 写操作 | `matefeishu_send`、`matefeishu_send_dm`：每次都在手机上确认全文和发给谁；同一个请求只执行一次；结果不确定时绝不重发 |
-| `/agent` | 你自己在飞书里发 `/agent …`，交给 Agent 处理并以你的身份回复到提问的地方：话题里问的回到话题；话题里勾了“也发到群里”的，回复同样回到话题、也发到群里，并引用这条请求；群聊主界面问的（包括引用回复），在主界面引用回复这条请求；私聊里是引用回复，AI 标记放在回复最后一行（话题折叠时直接显示答案；设置“AI 标记位置”可改回第一行）；同一话题里接着发会进同一个会话；助手已经把活派给 Agent（建了待办、Agent 还在做）时，话题里你自己的追问直接转给那个 Agent，话题里回一句“已转给正在做这件事的 Agent”，结果照常经助手回到话题（写“问 Persona”“问助手”、任务结束了、Agent 不在了，就照旧交给助手；设置“话题里的追问直接转给干活的 Agent”可关）；`/stop`、`/停止`、`/停` 可以停下。请求上的表情说明状态：🤔 处理中，✅ 做完了，❌ 失败或超时（停下就撤掉 🤔；三个表情都能在设置里换）。中途进度只占一条消息、原地更新，最终结果另发一条新回复（会提醒你），那条进度消息标成已完成。回复不经手机确认，每一条都记进 Persona 的“以你身份发出的消息”记录，所以安装时 Persona 会提示这个扩展会“以你的身份发消息” |
+| `/agent` | 你自己在飞书里发 `/agent …`，或者发一条真正 @ 你自己的消息（`@自己 …`，@ 后面的话就是要办的事；不以“/”开头，群里别的机器人不会当成自己的命令；设置“@自己 也交给 Agent”默认打开，可关），交给 Agent 处理并以你的身份回复到提问的地方：话题里问的回到话题；话题里勾了“也发到群里”的，回复同样回到话题、也发到群里，并引用这条请求；群聊主界面问的（包括引用回复），在主界面引用回复这条请求；私聊里是引用回复，AI 标记放在回复最后一行（话题折叠时直接显示答案；设置“AI 标记位置”可改回第一行）；同一话题里接着发会进同一个会话；助手已经把活派给 Agent（建了待办、Agent 还在做）时，话题里你自己的追问直接转给那个 Agent，话题里回一句“已转给正在做这件事的 Agent”，结果照常经助手回到话题（写“问 Persona”“问助手”、任务结束了、Agent 不在了，就照旧交给助手；设置“话题里的追问直接转给干活的 Agent”可关）；`/stop`、`/停止`、`/停` 可以停下。请求上的表情说明状态：🤔 处理中，✅ 做完了，❌ 失败或超时（停下就撤掉 🤔；三个表情都能在设置里换）。中途进度只占一条消息、原地更新，最终结果另发一条新回复（会提醒你），那条进度消息标成已完成。回复不经手机确认，每一条都记进 Persona 的“以你身份发出的消息”记录，所以安装时 Persona 会提示这个扩展会“以你的身份发消息” |
 | Persona 渠道 | 在 Persona 的“设置 › 渠道”里显示为“飞书（OpenMate）”（绑定、账号、开关跟着连接器走），不用装官方 larkx 也能把飞书当成 Persona 的一个渠道。只在你指定的一个会话里生效：扩展设置里的“Persona 渠道会话”填会话 id（问 Persona 助手“飞书里 xx 群的 chat id”即可，要是这个扩展收到过消息的会话），请用只有你自己的群；默认留空，留空时渠道什么都不收也不发。那个会话就是你和 Persona 的对话，相当于官方飞书机器人的私聊：你自己说的每一句都交给 Persona 统一的渠道流程（开头的 `/agent` 可写可不写；默认进主对话，可在“设置 › 渠道”改目标；`/new`、`/status` 等 Persona 渠道命令也能用），回答以你的身份回到提问处（话题里问的回到话题，主界面问的引用回复）；`/stop`、`/停止`、`/停` 打断渠道正在跑的对话。Agent 要你回答或批准时（渠道驱动的对话，或“设置 › 渠道”里打开了“所有 Agent 的问题”），问题以你的身份发到这个会话，直接回复就是作答；你在 App 等别处答了，这条问题会自动撤回。别的会话里的 `/agent`、进度原地更新、自动代答、话题追问转给 Agent 都和原来一样 |
 | 历史补收 | 首次登录和每次重连后补收最近会话里漏掉的消息 |
 
@@ -105,7 +105,7 @@ OpenMate 是一组开源（MIT）的 [Persona](https://github.com/nwverse/person
 - **不分发 LarkAgentX。** 本仓库和发布包里都不包含 LarkAgentX，需要你自己安装并遵守它的条款。
 - **微信扩展用的也是非官方协议。** 它以一台新电脑的身份登录你的微信：你已登录的电脑版微信可能会下线；账号被限制的可能无法排除，请自己判断。与腾讯官方无关，“微信”是腾讯的商标。
 - 所有发出的消息都以你本人的身份出现；写操作每次都需要你在手机上确认。下面四种消息不再逐条确认，发出后会记进 Persona 的“以你身份发出的消息”记录（极少数情况下可能缺记一条）：
-  - `/agent`：只响应你自己发的消息；
+  - `/agent`（飞书里也包括 @ 你自己的消息）：只响应你自己发的消息；
   - 群里自动代答：只在你勾选的群、有人真正 @ 你时，用访客会话（读不到你的私人知识库）回复，每群每天有上限；
   - 文档代答：飞书文档评论里 @ 你时回复，默认关闭，要在设置里单独打开；它经 lark-cli 发出，发之前核对 lark-cli 登录的账号和飞书登录的账号同名（目前只能比对显示名，同名的另一个账号拦不住）。
   - Persona 渠道：只发到你在设置里指定的“Persona 渠道会话”（默认没有，就一条都不发），内容是 Persona 对你在那里说的话的回答、Agent 要你回答或批准的问题和 Persona 的提示；在“设置 › 渠道”里打开“通知”“同步”后还有推送。
@@ -135,7 +135,8 @@ into Persona: direct and group messages flow into the Inbox and knowledge base, 
 answer in the chat app as you. Every message the assistant sends as you is confirmed on your phone first. Four kinds
 of message go out unconfirmed, and are recorded in Persona's sent-as-user ledger after they go (one can be missing when
 the extension exits right after sending; the connector declares `sends_as_user`):
-the replies to your own `/agent` requests; the automatic answers when someone really @-mentions you in a group you
+the replies to your own `/agent` requests (on Feishu also a message of yours that really @-mentions yourself,
+`@me …`, unless the setting `agent_self_mention` is off); the automatic answers when someone really @-mentions you in a group you
 marked (a guest conversation, capped per group and day); and, off unless you turn it on, the answers to a Feishu
 document comment that @-mentions you (through lark-cli, only while lark-cli's account has the same display name: another account of the same name
 is not told apart yet); and what Persona's channel (listed under Settings › Channels) says in the one chat you

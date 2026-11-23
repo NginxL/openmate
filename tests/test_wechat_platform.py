@@ -100,6 +100,17 @@ class WeChatPlatformTest(unittest.TestCase):
         self.assertEqual([r for r in h.app.store.runs_in_chat(TEAM, 50) if r.get("kind") == "auto"], [])
 
 
+class SelfMentionOffTest(unittest.TestCase):
+    def test_wechat_takes_no_mention_of_the_user_by_the_user(self):
+        """「@自己」 is a Feishu request: WeChat's @ list never names the sender, so its platform leaves it off."""
+        h = wechat(self)
+        self.assertFalse(h.platform.self_mention)
+        self.assertFalse(h.app.agent.self_mention)
+        ask(h, "@示例用户 帮我看下", at_me=True)
+        time.sleep(0.3)
+        self.assertEqual(h.http.starts(), [])
+
+
 class AckOnlyForAgentTest(unittest.TestCase):
     def test_agent_gets_the_taken_line_an_at_of_the_user_does_not(self):
         """WeChat has no reactions: the taken line is a message of its own in the chat. The user's /agent gets it;
