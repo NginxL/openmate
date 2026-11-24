@@ -1,7 +1,10 @@
 """The user's switches: a connector turned off in Persona (initialize's active.connectors leaves it out) runs no live
 link and no /agent; a member hub (another hub is primary) runs no /agent either."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import time
 import unittest
 

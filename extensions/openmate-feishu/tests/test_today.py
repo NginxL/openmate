@@ -1,6 +1,9 @@
 """The 今天 page and card: Persona's Agents, inbox and to-dos through the hub API, Feishu's chats and calendar, one page."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import datetime as dt
 import os
 import re

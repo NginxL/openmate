@@ -8,7 +8,10 @@ protobuf classes, and starts the real launcher, which must re-execute itself the
 Nothing here signs in, sends or connects to Feishu.
 """
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import json
 import os
 import shutil

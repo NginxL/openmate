@@ -1,7 +1,10 @@
 """文档代答: an @-mention of the user in a document's comment (a doc or a wiki page) is always answered there by the
 Agent as the user, unless it came from a bot, someone the service can't name, or another AI."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import time
 import unittest
 

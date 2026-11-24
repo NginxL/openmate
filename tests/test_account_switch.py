@@ -3,7 +3,10 @@ still under way: nothing of the one before reaches the store of the next (its me
 its chats coming back or gone), and nothing of it acts on the next one's runs. Each test holds one thread at the very
 point of the switch, switches, then lets it go (or hands the callback of the account before in late)."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import os
 import shutil
 import tempfile

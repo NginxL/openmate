@@ -1,7 +1,10 @@
 """Delivery between a backend and the core: a message a history read stored first still reaches /agent when its live
 copy comes (once); a message the core could not store is not counted delivered."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import time
 import unittest
 

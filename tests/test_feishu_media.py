@@ -2,7 +2,10 @@
 backend under openmate-feishu's Platform. What is fetched where, the size limit, why nothing is there, and what the
 models read (matefeishu_messages, /agent's context and instructions); WeChat's lines are left as they were."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import hashlib
 import json
 import os

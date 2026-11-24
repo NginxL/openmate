@@ -1,7 +1,10 @@
 """处理完: the user marks something that needs them as handled; it is left out (the pages, the badge) while it is the
 same, and comes back with a newer message (a direct chat) or a newer @me (a group)."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import time
 import unittest
 

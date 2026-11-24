@@ -2,7 +2,10 @@
 (live only; our own echo never; the user's desktop typing as their own), sends (key, quote, @, outcomes), reads made
 in the desktop app, a gap the event log no longer covers, media, groups left, and the account signed out there."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import os
 import shutil
 import sys

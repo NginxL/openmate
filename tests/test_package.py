@@ -1,6 +1,9 @@
 """scripts/package.py: the archive's contents, reproducibility, the index, and the package running as installed."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import gzip
 import hashlib
 import io

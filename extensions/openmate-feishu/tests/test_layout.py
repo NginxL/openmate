@@ -1,7 +1,10 @@
 """The 今天 page as the user arranges it: 调整布局 (order, hidden, whole row or half), the status tiles, the Agent
 block from the Agent progress read, the shortcuts and the bookmarks."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import datetime as dt
 import json
 import os

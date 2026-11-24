@@ -1,6 +1,9 @@
 """WeChat in 今天: openmate-wechat's chats (its todayapi, through the hub) beside Feishu's, on the card and the page."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import json
 import os
 import sys

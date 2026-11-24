@@ -2,7 +2,10 @@
 matewechat-native: what is fetched where, the text the core gets (local paths, or why not), what never leaves this
 backend (the CDN keys, the inline bytes), the matewechat_media tool and media(ref)."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import base64
 import json
 import os

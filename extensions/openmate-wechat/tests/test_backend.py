@@ -2,7 +2,10 @@
 cursor after its messages, a rotated sign-in sealed before it is used, sends (quote + @ only for someone else's
 message, what counts as surely not sent) and the program going away."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import json
 import os
 import shutil

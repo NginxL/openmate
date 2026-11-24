@@ -1,7 +1,10 @@
 """需要我 keeps what still needs the user: an @me or a direct message older than needs_hours goes, and so does a
 direct chat where the other side only answered the user ("27层" after "几楼呀")."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import time
 import unittest
 

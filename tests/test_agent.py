@@ -1,7 +1,10 @@
 """/agent: which messages start a request, the conversation and its context, the reply tool's binding, the fallback,
 continuing a thread, /stop, the timeout and resuming after a restart."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import re
 import threading
 import time

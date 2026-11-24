@@ -2,7 +2,10 @@
 mapping, the QR sign-in, restoring and expiry, sends that surely failed versus ones that may have gone out, the proxy,
 the live link, reads and media."""
 
-import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
+try:  # first: every temporary directory of this run in one, removed at its end
+    import _runtmp  # noqa: F401
+except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
+    pass
 import json
 import os
 import shutil
