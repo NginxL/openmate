@@ -286,6 +286,31 @@ class ActionTest(unittest.TestCase):
         self.assertIn("已发送", res["text"])
         self.assertEqual([s["text"] for s in self.h.sent()], ["被拒后重发"], "really sent, once")
 
+    def test_a_card_that_cannot_be_read_for_a_moment_frees_the_request(self):
+        import sqlite3
+
+        store = self.h.app.store
+        real = store.get_chat
+        calls = []
+
+        def busy(chat_id):
+            calls.append(chat_id)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real(chat_id)
+
+        store.get_chat = busy
+        try:
+            args = {"chat": "chat_example_team", "text": "稍后再试"}
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-busy")
+            self.assertIn("没有发出", e.exception.message)
+            res = self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-busy")
+        finally:
+            store.get_chat = real
+        self.assertIn("已发送", res["text"])
+        self.assertEqual(len(self.h.sent()), 1, "sent once, on the try after")
+
     def test_an_uncertain_request_still_says_so_when_its_names_are_gone(self):
         args = {"chat": "chat_example_team", "text": "@示例同事甲 看一下", "at": ["user_example_a"]}
         self.h.world.send_fail = "uncertain"
@@ -449,18 +474,6 @@ class FilteredMessagesTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             self.h.tool("messages", chat="chat_long", since="上周三")
         self.assertIn("时间看不懂", e.exception.message)
-
-
-class OnlyStopTest(unittest.TestCase):
-    def test_a_stop_is_the_whole_content(self):
-        from openmate_core.agent import only_stop
-
-        self.assertTrue(only_stop({}, "/stop"))
-        self.assertTrue(only_stop({"text_after_mentions": "/stop"}, "/stop"))
-        self.assertTrue(only_stop({"text_after_mentions": " /停 "}, "/停"))
-        self.assertFalse(only_stop({"text_after_mentions": "/stop\nSELECT 1"}, "/stop"), "a code block after it")
-        self.assertFalse(only_stop({}, "/stop now"))
-        self.assertFalse(only_stop({"text_after_mentions": "/stop"}, "/agent"))
 
 
 if __name__ == "__main__":

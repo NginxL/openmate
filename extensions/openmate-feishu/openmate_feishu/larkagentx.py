@@ -104,7 +104,7 @@ GROUPS_SPACING = 60.0  # and never more often than this
 CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
 MENTIONS_MOST = 20
 TOPIC_MODE_KEEP = 2000  # groups in topic mode remembered (_topic_mode)…
-TOPIC_MODE_TTL = 6 * 3600.0  # …this long (a group may be switched back; a refusal teaches it again)
+TOPIC_MODE_TTL = 3600.0  # …this long (a group may be switched back; a refusal teaches it again)
 TOPIC_REFUSAL = 5801  # the error code of Feishu's refusal of a new message to a group in topic mode  # people one message @-s at most
 CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
@@ -2279,7 +2279,7 @@ class LarkXBackend(Backend):
                         mark = self._synced.get(reply_to or "", "")
                     pkt = also_to_chat(pkt, reply_to or root, mark or "sync")
             elif root or reply_to:
-                group = not self._is_dm(client, chat_id)
+                group = not self._known_dm(chat_id)  # (known, no request: a quote never waited for a chat's read)
                 if group and self.topic_mode(chat_id):
                     pkt = build(reply_to or root, False)  # a group in topic mode: into the topic, the thread way
                 else:
@@ -2289,7 +2289,7 @@ class LarkXBackend(Backend):
                     into_topic = (reply_to or root) if group else ""
             else:
                 pkt = build()
-                new_in_group = not self._is_dm(client, chat_id)
+                new_in_group = not self._known_dm(chat_id)  # (known, no request; only a group refuses so anyway)
         except Exception as e:
             raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
         try:
@@ -2297,6 +2297,8 @@ class LarkXBackend(Backend):
         except Exception as e:
             err = self._send_error(e)
             if not (isinstance(err, SendRejected) and (new_in_group or into_topic) and self._topic_refusal(e)):
+                raise err
+            if self._is_dm(client, chat_id):  # (asked only now: a group refuses so, a direct chat never should)
                 raise err
             with self._lock:
                 same = self._client is client  # signed out or another account meanwhile: nothing learnt or sent

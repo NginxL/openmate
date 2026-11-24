@@ -918,6 +918,14 @@ class SendTest(Base):
         b.send("510", "普通引用", reply_to="86")
         self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("86", False), "a quote again")
 
+    def test_a_quote_or_a_new_message_never_waits_for_a_chat_read(self):
+        b = self.b
+        n = len(S.chat_info_calls)
+        b.send("512", "引用", reply_to="85")
+        b.send("512", "新消息")
+        self.assertEqual(len(S.chat_info_calls), n, "no request before the post (a sign-out meanwhile cannot slip in)")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("", False))
+
     def test_no_retry_for_a_session_gone_meanwhile(self):
         b = self.b
         S.chats.update({"511": {"id": "511", "type": 2, "chatMode": 1}})

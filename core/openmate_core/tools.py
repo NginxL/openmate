@@ -651,12 +651,17 @@ def do(app, params: dict) -> dict:
         def send():
             # the card's reading inside the journal's claim: a request seen before answers from the journal first
             # (went out, or may have), whatever its names read now; a card that cannot be made frees the request id
-            chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
-            root = None
-            if reply_to:
-                quoted = app.store.message(chat_id, reply_to)
-                if quoted is not None and quoted.get("root_id"):
-                    root = quoted["root_id"]
+            try:
+                chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
+                root = None
+                if reply_to:
+                    quoted = app.store.message(chat_id, reply_to)
+                    if quoted is not None and quoted.get("root_id"):
+                        root = quoted["root_id"]
+            except RPCError:
+                raise
+            except Exception as e:  # (a store busy for a moment): nothing sent, the same request may try again
+                raise RPCError("没能读出这条消息的发送信息（%s），没有发出，请再试一次" % type(e).__name__)
             as_asked()
             mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None)
             return {"text": "已发送到%s" % visible, "message_ref": mid}
