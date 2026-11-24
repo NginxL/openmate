@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
-from typing import Optional
+from typing import List, Optional, Sequence, Tuple
 
 try:  # Python 3.9+: zoneinfo; tzdata may be missing on a minimal system
     from zoneinfo import ZoneInfo
@@ -95,3 +95,50 @@ _LEADING_MENTIONS = re.compile(r"^(?:\s*@\S+)+\s*")
 def strip_leading_mentions(text: str) -> str:
     """text without the @mentions it starts with ("@张三 @李四 /agent …" → "/agent …")."""
     return _LEADING_MENTIONS.sub("", text or "", count=1).lstrip()
+
+
+def mention_pieces(text: str, mentions: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """The text as pieces ("text", words) and ("at", user id) in order. A mention [(user id, name)] goes where the text
+    first writes its "@name" that no other mention took: at each place the longest name written there wins (so
+    "@Annette" is Annette's even when Ann is @-ed too). A mention the text does not write goes in front, in the order
+    given, a space between them and after the last."""
+    spots: List[Tuple[int, int, str]] = []  # (start, end, user id) of each mention written in the text
+    taken = set()
+    for uid, name in sorted(mentions, key=lambda m: -len(m[1] or "")):  # longest names first
+        if not name or uid in taken:
+            continue
+        word = "@" + name
+        start = 0
+        while True:
+            at = text.find(word, start)
+            if at < 0:
+                break
+            if not any(a < at + len(word) and at < b for a, b, _ in spots):
+                spots.append((at, at + len(word), uid))
+                taken.add(uid)
+                break
+            start = at + 1
+    front = [uid for uid, _ in mentions if uid not in taken]
+    out: List[Tuple[str, str]] = []
+    for i, uid in enumerate(front):
+        if i:
+            out.append(("text", " "))
+        out.append(("at", uid))
+    if front and text and not text[0].isspace():
+        out.append(("text", " "))
+    pos = 0
+    for a, b, uid in sorted(spots):
+        if a > pos:
+            out.append(("text", text[pos:a]))
+        out.append(("at", uid))
+        pos = b
+    if pos < len(text):
+        out.append(("text", text[pos:]))
+    return out
+
+
+def with_mention_names(text: str, mentions: Sequence[Tuple[str, str]]) -> str:
+    """The text as it will read once its mentions are @s: those it does not write go in front as "@name" (what the
+    confirm card shows, what is sent and what the echo of it is known by)."""
+    names = dict(mentions)
+    return "".join("@" + (names.get(v) or v) if k == "at" else v for k, v in mention_pieces(text, mentions))

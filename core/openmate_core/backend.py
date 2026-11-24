@@ -399,6 +399,10 @@ class Backend(abc.ABC):
     #: Whether send takes mentions (real @s that tell those people); the send tool offers them only then
     can_mention: bool = False
 
+    #: Whether chats may be thread-first (Chat.topic: every message opens a topic or replies in one); the send card
+    #: asks chat_info only then
+    topic_groups: bool = False
+
     @abc.abstractmethod
     def create_chat(self, user_id: str) -> str:
         """The direct chat with a person (created when there is none yet, without sending anything); its chat id."""

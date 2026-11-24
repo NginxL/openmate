@@ -37,6 +37,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, DocMention, LoginDone, LoginQR,
                                    Media, Message, Person, SendRejected)
+from openmate_core.textutil import mention_pieces
 
 from . import DLP_BLOCKED_TEXT, launch, pin  # DLP_BLOCKED_TEXT: a blocked message's note (Message.blocked)
 
@@ -79,7 +80,8 @@ SYNCED_KEEP = 500  # how many messages' "also in the main stream" marks are reme
 AT_TAG = 5
 STATUS_NORMAL, STATUS_MODIFIED = 1, 3  # entities.Message.Status: as sent, edited
 CODE_BLOCK_TAGS = (31, 37)  # CODE_BLOCK, CODE_BLOCK_V2: their own properties, not a TextProperty
-BLOCK_TAGS = frozenset((3, 4, 14, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46))
+# DOCS (22) included: the newer rich text's block around its paragraphs (not a document; read "[文档]" before)
+BLOCK_TAGS = frozenset((3, 4, 14, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46))
 # RichTextElement.Tag: P, FIGURE, DIV, H1-H3, UL, OL, LI, QUOTE, CODE_BLOCK, HR, CODE_BLOCK_V2, TABLE…, COLUMNS, COLUMN,
 # H4-H6: blocks (a new line where one starts, in an @自己 request); B, I, U, LINK, CODE, A run on in the line
 PUSH_CMD = 6
@@ -100,11 +102,9 @@ GROUPS_INFO_MOST = 50  # groups per PullChatsByIdsRequest
 GROUPS_EVERY = 3600.0  # every group is read again this often while the link is up (pushes say the changes between)
 GROUPS_SPACING = 60.0  # and never more often than this
 CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
-TOPIC_GROUP_TYPES = (3, "TOPIC_GROUP")  # entities.Chat.Type of a topic group (话题群)
-# entities.Chat.ChatMode of a thread-first chat: THREAD (a topic group) and THREAD_V2 (taken as an ordinary group set to
-# show its messages as topics, 话题模式); every message there opens a topic or replies in one
-THREAD_CHAT_MODES = (2, 3, "THREAD", "THREAD_V2")
-MENTIONS_MOST = 20  # people one message @-s at most
+MENTIONS_MOST = 20
+TOPIC_MODE_KEEP = 2000  # groups in topic mode remembered (_topic_mode)
+TOPIC_REFUSAL = 5801  # the error code of Feishu's refusal of a new message to a group in topic mode  # people one message @-s at most
 CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
 
@@ -385,27 +385,41 @@ def also_to_chat(pkt, parent_id: str, mark: str):
     return pkt
 
 
-def thread_first(dec, info: dict) -> bool:
-    """Whether a chat's record (enums as numbers or names) says it is thread-first: a topic group, or a group in topic
-    mode. LarkAgentX's own check first; a name it does not read, too."""
+def wire_varints(data: bytes) -> Dict[int, List[int]]:
+    """The top-level varint fields of a protobuf message, {field number: [values]} (as far as it reads)."""
+    out: Dict[int, List[int]] = {}
+    i, n = 0, len(data or b"")
+
+    def varint() -> int:
+        nonlocal i
+        v, shift = 0, 0
+        while i < n and shift < 64:
+            c = data[i]
+            i += 1
+            v |= (c & 0x7F) << shift
+            if not c & 0x80:
+                return v
+            shift += 7
+        raise ValueError("cut off")
+
     try:
-        if dec.is_thread_chat(info):
-            return True
-    except Exception:
+        while i < n:
+            key = varint()
+            field, kind = key >> 3, key & 7
+            if kind == 0:
+                out.setdefault(field, []).append(varint())
+            elif kind == 2:
+                size = varint()  # (read before i moves on: "i += varint()" would add to the old i)
+                i += size
+            elif kind == 1:
+                i += 8
+            elif kind == 5:
+                i += 4
+            else:
+                break
+    except ValueError:
         pass
-    return info.get("chatMode") in THREAD_CHAT_MODES or info.get("type") in TOPIC_GROUP_TYPES
-
-
-def new_topic(pkt):
-    """LarkAgentX's packet of a message to a chat (build_send_message_packet, no root), made to open a topic of its own:
-    what a thread-first group takes a new message as (isThreadGroupTopic)."""
-    from larkx.proto import lark_all_pb2
-
-    req = lark_all_pb2.messages.PutMessageRequest()
-    req.ParseFromString(pkt.payload)
-    req.isThreadGroupTopic = True
-    pkt.payload = req.SerializeToString()
-    return pkt
+    return out
 
 
 def _element_id(taken: Set[str]) -> str:
@@ -415,38 +429,6 @@ def _element_id(taken: Set[str]) -> str:
         if eid not in taken:
             taken.add(eid)
             return eid
-
-
-def mention_pieces(text: str, mentions) -> List[Tuple[str, str]]:
-    """The text as pieces ("text", words) and ("at", user id) in order: where the text writes a mention's "@name" first,
-    that @ goes there; a mention it does not write goes in front, in the order given, a space after the last."""
-    spots: List[Tuple[int, int, str]] = []  # (start, end, user id) of each mention written in the text
-    front: List[str] = []
-    for uid, name in mentions:
-        word = "@" + name
-        at = -1
-        start = 0
-        while name:
-            at = text.find(word, start)
-            if at < 0 or not any(a < at + len(word) and at < b for a, b, _ in spots):
-                break  # not written, or written where no other mention is
-            start = at + 1
-        if at < 0 or not name:
-            front.append(uid)
-        else:
-            spots.append((at, at + len(word), uid))
-    out: List[Tuple[str, str]] = [("at", uid) for uid in front]
-    if front and text and not text[0].isspace():
-        out.append(("text", " "))
-    pos = 0
-    for a, b, uid in sorted(spots):
-        if a > pos:
-            out.append(("text", text[pos:a]))
-        out.append(("at", uid))
-        pos = b
-    if pos < len(text):
-        out.append(("text", text[pos:]))
-    return out
 
 
 def with_mentions(pkt, text: str, mentions):
@@ -465,7 +447,7 @@ def with_mentions(pkt, text: str, mentions):
     rich.elements.dictionary.clear()
     taken: Set[str] = set()
     words: List[str] = []
-    for kind, value in mention_pieces(text, mentions):
+    for kind, value in mention_pieces(text, mentions):  # (the core's: the text there writes every mention)
         eid = _element_id(taken)
         el = rich.elements.dictionary[eid]
         if kind == "at":
@@ -662,7 +644,10 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
-        self._kinds_said: Dict[str, tuple] = {}  # group id → how its record read when last logged (_say_kind)
+        # groups whose messages show as topics though their record does not say so (an ordinary group switched to 话题
+        # 模式), learnt from a send Feishu refused so (TOPIC_REFUSAL): a reply there goes into the topic the thread
+        # way, a new message cannot be posted (newest last)
+        self._topic_mode: Dict[str, float] = {}
         self._synced: Dict[str, str] = {}  # message id → how it also went to the main stream (synced_mark), the newest
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
@@ -1307,15 +1292,7 @@ class LarkXBackend(Backend):
                     if isinstance(names, dict) and names:
                         name = str(names.get(self.region.locale.lower()) or next(iter(names.values())) or "") or old.name
                 members = _int(info.get("memberCount")) or _int(info.get("userCount")) or old.members
-                # a push carries only what changed: a chat mode in it says the kind anew (switched to topic mode, or
-                # back), else the kind stays
-                topic = old.topic if info.get("chatMode") is None else thread_first(self.lx.decoders, info)
-                if topic != old.topic:
-                    log.info("group %s: chatMode=%s; now read as %s", cid, info.get("chatMode"),
-                             "thread-first" if topic else "ordinary")
-                    with self._lock:  # (taken inside _groups_mu: nothing takes _groups_mu inside _lock)
-                        self._chats.pop(cid, None)  # read again when asked
-                update[cid] = Chat(id=cid, kind="group", name=name, members=members, topic=topic)
+                update[cid] = Chat(id=cid, kind="group", name=name, members=members, topic=old.topic)
             elif not ended and info.get("type") in CHAT_GROUP_TYPES:
                 soon = True  # made or joined: the next read lists it (with what the account is in it)
         self._groups = [update.get(g.id, g) for g in self._groups if g.id not in drop]
@@ -1599,8 +1576,8 @@ class LarkXBackend(Backend):
             return chat_id in self._peers or (hit is not None and hit[1].kind == "dm")
 
     def _topic_group(self, client, chat_id: str, ask: bool) -> bool:
-        """Whether the chat is a thread-first group: from the chats read (no request), or, with ask, its record read
-        now (thread_first); False when it cannot tell."""
+        """Whether the chat is a thread-first group: from the chats read (no request), or, with ask, LarkAgentX's
+        own check (it keeps the answer); False when it cannot tell."""
         with self._lock:
             hit = self._chats.get(chat_id)
         if hit is not None:
@@ -1608,18 +1585,24 @@ class LarkXBackend(Backend):
         if not ask or client is None:
             return False
         try:
-            return self._thread_first(client, chat_id)
+            return bool(client.is_thread_chat(chat_id))
         except Exception:
             return False
 
-    def _thread_first(self, client, chat_id: str) -> bool:
-        """Whether a chat is thread-first (a topic group, or a group in topic mode), as its record reads: the one read
-        (while fresh), else read now (and kept). Raises when it cannot be read."""
+    def topic_mode(self, chat_id: str) -> bool:
+        """Whether the group shows its messages as topics though its record does not say so (_topic_mode)."""
         with self._lock:
-            hit = self._chats.get(chat_id)
-        if hit is not None and hit[0] > time.monotonic():
-            return bool(hit[1].topic)
-        return self._chat_read(client, chat_id)[1].topic
+            return str(chat_id) in self._topic_mode
+
+    def _learn_topic_mode(self, chat_id: str, why: str) -> None:
+        with self._lock:
+            known = chat_id in self._topic_mode
+            self._topic_mode.pop(chat_id, None)
+            self._topic_mode[chat_id] = time.time()
+            while len(self._topic_mode) > TOPIC_MODE_KEEP:
+                del self._topic_mode[next(iter(self._topic_mode))]
+        if not known:
+            log.info("group %s shows its messages as topics (%s)", chat_id, why)
 
     def _plain_group(self, client, chat_id: str, chat_type, me_id: str) -> bool:
         """Whether the chat is known as an ordinary group (not thread-first), for the account me_id while it is the
@@ -1929,8 +1912,6 @@ class LarkXBackend(Backend):
             # only a status: the service did not answer (a chat's own status comes with the chat)
             raise BackendError("飞书暂时没有回答（读取会话信息时）", "unreachable")
         chat = self._chat_of(chat_id, info)
-        if chat.kind == "group":
-            self._say_kind(chat_id, info, chat.topic)
         with self._lock:
             if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
                 self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
@@ -1938,19 +1919,6 @@ class LarkXBackend(Backend):
                 if last > self._last_pos.get(chat_id, 0):
                     self._last_pos[chat_id] = last
         return info, chat
-
-    def _say_kind(self, chat_id: str, info: dict, topic: bool) -> None:
-        """Log once per group (while the backend runs) how its record reads: its type and chat mode (numbers, no
-        name), and whether that is thread-first. A group read as ordinary that turns out thread-first is found so."""
-        key = (str(info.get("type")), str(info.get("chatMode")), topic)
-        with self._lock:
-            if self._kinds_said.get(chat_id) == key:
-                return
-            self._kinds_said[chat_id] = key
-            while len(self._kinds_said) > SYNCED_KEEP:
-                del self._kinds_said[next(iter(self._kinds_said))]
-        log.info("group %s: type=%s chatMode=%s; read as %s", chat_id, key[0], key[1],
-                 "thread-first" if topic else "ordinary")
 
     def _chat_of(self, chat_id: str, info: dict) -> Chat:
         dec = self.lx.decoders
@@ -1960,7 +1928,10 @@ class LarkXBackend(Backend):
             names = info.get("i18nNames") or {}
             if isinstance(names, dict) and names:
                 name = str(names.get(self.region.locale.lower()) or names.get(self.region.locale) or next(iter(names.values())) or "")
-        topic = thread_first(dec, info)
+        try:
+            topic = bool(dec.is_thread_chat(info))
+        except Exception:
+            topic = False
         with self._lock:
             peer = self._peers.get(chat_id, "")
         if kind == "dm" and not name and not peer:
@@ -2253,11 +2224,13 @@ class LarkXBackend(Backend):
 
     #: send takes mentions: real @s, Feishu tells those people
     can_mention = True
+    #: chats may be thread-first (a topic group, a group in topic mode): Chat.topic says which
+    topic_groups = True
 
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
              to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
-        """Backend.send. With neither root nor reply_to in a thread-first group (a topic group, a group in topic mode)
-        the message opens a topic of its own. mentions [(user id, name)]: real @s (with_mentions)."""
+        """Backend.send. mentions [(user id, name)]: real @s (with_mentions). A group in topic mode (topic_mode) takes
+        a reply only into its topic, the thread way, and no new message (Feishu asks a newer client for that)."""
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -2272,47 +2245,57 @@ class LarkXBackend(Backend):
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
         b = self.lx.builders
-        plain = False  # a new message to a group read as ordinary: sent again as a topic when refused (below)
-        try:
+
+        def build(root_id: str = "", thread_chat: bool = False):
             rid = self.lx.ids.generate_long_request_id()
+            if root_id:
+                pkt = b.build_send_message_packet(text, chat_id, rid, root_id=root_id, thread_chat=thread_chat)
+            else:
+                pkt = b.build_send_message_packet(text, chat_id, rid)
+            return with_mentions(pkt, text, people) if people else pkt
+
+        new_in_group = False  # a new message to a group (none there in topic mode can be posted)
+        into_topic = ""  # a quote in a group: the message whose topic it goes into when the group shows topics
+        try:
             if root and not self._is_dm(client, chat_id):
                 # into the thread on root (LarkAgentX opens it when there is none yet); a thread-first group takes
                 # the reply into the topic without the reply-in-thread mark
-                topic = self._thread_first(client, chat_id)
-                pkt = b.build_send_message_packet(text, chat_id, rid, root_id=root, thread_chat=topic)
+                topic = bool(client.is_thread_chat(chat_id))
+                pkt = build(root, topic)
                 if to_chat and not topic:
                     # …and into the main stream too, quoting the request, marked the way the request itself was
                     with self._lock:
                         mark = self._synced.get(reply_to or "", "")
                     pkt = also_to_chat(pkt, reply_to or root, mark or "sync")
             elif root or reply_to:
-                # a reply that quotes and stays in the main stream (a direct chat has no threads here):
-                # thread_chat=True is the builder's way to leave the reply-in-thread mark out
-                pkt = b.build_send_message_packet(text, chat_id, rid, root_id=reply_to or root, thread_chat=True)
+                group = not self._is_dm(client, chat_id)
+                if group and self.topic_mode(chat_id):
+                    pkt = build(reply_to or root, False)  # a group in topic mode: into the topic, the thread way
+                else:
+                    # a reply that quotes and stays in the main stream (a direct chat has no threads here):
+                    # thread_chat=True is the builder's way to leave the reply-in-thread mark out
+                    pkt = build(reply_to or root, True)
+                    into_topic = (reply_to or root) if group else ""
             else:
-                pkt = b.build_send_message_packet(text, chat_id, rid)
-                plain = not self._is_dm(client, chat_id)
-                if plain and self._thread_first(client, chat_id):
-                    pkt, plain = new_topic(pkt), False  # a thread-first group takes a new message only as a topic
-            if people:
-                pkt = with_mentions(pkt, text, people)
+                pkt = build()
+                new_in_group = not self._is_dm(client, chat_id)
         except Exception as e:
             raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
         try:
             content = client._gateway_post(pkt)
         except Exception as e:
             err = self._send_error(e)
-            if not (plain and isinstance(err, SendRejected) and self._http_status(e) == 400):
+            if not (isinstance(err, SendRejected) and (new_in_group or into_topic) and self._topic_refusal(e)):
                 raise err
-            # refused, so surely not sent: a group thread-first in a way its record does not say takes it only as a
-            # topic of its own; once more so (a new request id)
-            log.info("group %s refused a plain message (HTTP 400): sent again as a topic of its own", chat_id)
+            # refused (surely not sent) as a group in topic mode refuses a message outside a topic: known from now on
+            self._learn_topic_mode(chat_id, "it refused a message outside a topic")
+            if new_in_group:
+                raise SendRejected("这个群的消息以话题形式展示，OpenMate 只能回复群里已有的话题，开不了新话题")
             try:
-                pkt = new_topic(b.build_send_message_packet(text, chat_id, self.lx.ids.generate_long_request_id()))
-                if people:
-                    pkt = with_mentions(pkt, text, people)
+                pkt = build(into_topic, False)  # the quote, once more: into that message's topic, the thread way
             except Exception:
                 raise err
+            log.info("group %s: the quote goes into the topic instead", chat_id)
             try:
                 content = client._gateway_post(pkt)
             except Exception as e2:
@@ -2338,6 +2321,14 @@ class LarkXBackend(Backend):
         if len(out) > MENTIONS_MOST:
             raise SendRejected("一条消息最多 @ %d 个人" % MENTIONS_MOST)
         return out
+
+    def _topic_refusal(self, e: Exception) -> bool:
+        """Whether a refused post is Feishu's refusal of a message outside a topic in a group in topic mode (HTTP 400
+        whose answer carries TOPIC_REFUSAL as its code)."""
+        if self._http_status(e) != 400:
+            return False
+        body = getattr(getattr(e, "response", None), "content", b"") or b""
+        return TOPIC_REFUSAL in wire_varints(body).get(2, [])
 
     def _http_status(self, e: Exception) -> int:
         """The HTTP status of a refused post (0 when it is no HTTP answer)."""
@@ -2680,7 +2671,7 @@ def shape_of(value, depth: int = 0) -> str:
 TEXT_TAGS = (1, 3, 7, 8, 9, 17, 23, 24, 25, 28, 29, 30, 31)  # text, p, b, i, u, link, h1-h3, li, quote, code: TextProperty
 AT_TAG_RICH = 5
 ANCHOR_TAG = 6  # A: a link, its address and words in the property
-PLACEHOLDERS = {2: "[图片]", 10: "[表情]", 18: "[视频]", 22: "[文档]"}
+PLACEHOLDERS = {2: "[图片]", 10: "[表情]", 18: "[视频]"}
 URL_RE = re.compile(r"^https?://\S+$")
 WORDLESS_RE = re.compile(r"^[A-Za-z0-9_.:/#-]+$")  # a key, a target, an id: not the words a link shows
 

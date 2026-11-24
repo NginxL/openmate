@@ -90,6 +90,7 @@ class FixtureWorld:
         self.image_fail: Optional[str] = None  # "rejected" | "uncertain" for the next picture
         self.send_delay = 0.0
         self.create_fail = False
+        self.topic_mode_chats: set = set()  # groups that show their messages as topics (no new message there)
         self.history_fail = False
         self.history_fail_chats: set = set()  # history raises for these chats only
         self.recent_fail = False  # recent_chats raises
@@ -450,6 +451,11 @@ class FixtureBackend(Backend):
     # writes
 
     can_mention = True
+    topic_groups = True
+
+    def topic_mode(self, chat_id: str) -> bool:
+        with self.world.lock:
+            return chat_id in self.world.topic_mode_chats
 
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
              to_chat: bool = False, mentions: Optional[list] = None) -> str:

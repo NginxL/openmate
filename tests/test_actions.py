@@ -242,6 +242,40 @@ class ActionTest(unittest.TestCase):
                  request_id="req-no-at")
         self.assertEqual(self.h.sent()[-1]["mentions"], [], "none asked: none passed")
 
+    def test_a_mention_not_written_goes_in_front_on_the_card_and_in_what_is_sent(self):
+        args = {"chat": "chat_example_team", "text": "看一下", "at": ["user_example_b", "user_example_a"]}
+        d = self.h.c("actions.describe", name=CID + "_send", args=args)
+        self.assertTrue(d["summary"].endswith("——\n@示例同事乙 @示例同事甲 看一下"), d["summary"])
+        self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-front")
+        self.assertEqual(self.h.sent()[-1]["text"], "@示例同事乙 @示例同事甲 看一下", "sent as the card showed it")
+
+    def test_a_request_sent_before_answers_again_without_looking_names_up(self):
+        args = {"chat": "chat_example_team", "text": "@示例同事甲 看一下", "at": ["user_example_a"]}
+        first = self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-again")
+        backend = self.h.app.backend
+        real_name, real_store = backend.user_name, self.h.app.store.name
+        backend.user_name = lambda *a, **k: (_ for _ in ()).throw(AssertionError("looked up again"))
+        self.h.app.store.name = lambda *a, **k: ""
+        try:
+            self.assertEqual(self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-again"), first)
+        finally:
+            backend.user_name, self.h.app.store.name = real_name, real_store
+        self.assertEqual(len(self.h.sent()), 1)
+
+    def test_too_many_mentions_are_refused_before_any_name_is_looked_up(self):
+        calls = []
+        backend = self.h.app.backend
+        real = backend.user_name
+        backend.user_name = lambda uid, chat=None: calls.append(uid) or ""
+        try:
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("actions.describe", name=CID + "_send",
+                         args={"chat": "chat_example_team", "text": "x", "at": ["8%03d" % i for i in range(100)]})
+        finally:
+            backend.user_name = real
+        self.assertIn("最多 @ 20 个人", e.exception.message)
+        self.assertEqual(calls, [])
+
     def test_mentions_that_cannot_be_made_are_refused_before_anything(self):
         base = {"chat": "chat_example_team", "text": "看一下"}
         many = ["7000%02d" % i for i in range(21)]
@@ -282,6 +316,25 @@ class ActionTest(unittest.TestCase):
         d = self.h.c("actions.describe", name=CID + "_send",
                      args={"chat": "chat_example_team", "text": "回答", "reply_to": root.id})
         self.assertNotIn("开一个新话题", d["summary"], "a reply goes into its topic")
+        with self.h.world.lock:
+            self.h.world.topic_mode_chats.add("chat_example_team")
+        with self.assertRaises(HubSideError) as e:  # a group in topic mode: refused before the phone is asked
+            self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "新话题"})
+        self.assertIn("只能回复群里已有的话题", e.exception.message)
+        d = self.h.c("actions.describe", name=CID + "_send",
+                     args={"chat": "chat_example_team", "text": "回答", "reply_to": root.id})
+        self.assertIn("回答", d["summary"], "a reply there is fine")
+        with self.h.world.lock:
+            self.h.world.topic_mode_chats.discard("chat_example_team")
+        backend = self.h.app.backend
+        real = backend.chat_info
+        backend.topic_groups = False  # a platform without such groups (WeChat): its chat is never looked up for it
+        backend.chat_info = lambda *a: (_ for _ in ()).throw(AssertionError("asked"))
+        try:
+            d = self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "x"})
+        finally:
+            backend.topic_groups, backend.chat_info = True, real
+        self.assertNotIn("开一个新话题", d["summary"])
 
     def test_bad_args(self):
         with self.assertRaises(HubSideError):

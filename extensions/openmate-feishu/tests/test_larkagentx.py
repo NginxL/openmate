@@ -113,6 +113,17 @@ class MappingTest(Base):
         d.update(kw)
         return self.b._message(d, ME, self.b._client)
 
+    def test_a_docs_block_is_no_document(self):
+        """The newer rich text wraps its paragraphs in a DOCS element (22): never "[文档]" before the words, so an
+        /agent or a stop written in it is seen (a topic group's posts, and many others, are written so)."""
+        dic = {"d": {"tag": 22, "property": b"", "childIds": ["t"]}, "t": {"tag": 1, "property": "/agent 总结".encode()},
+               "d2": {"tag": 22, "property": b"", "childIds": ["t2"]}, "t2": {"tag": 1, "property": "第二段".encode()}}
+        m = self.m(content_data={"richText": {"elementIds": ["d", "d2"], "elements": {"dictionary": dic}}})
+        self.assertNotIn("[文档]", m.text)
+        self.assertTrue(m.text.startswith("/agent 总结"), m.text)
+        self.assertIn("第二段", m.text)
+        self.assertNotIn("[文档]", m.text_after_mentions or "")
+
     def test_text_mentions_and_mine(self):
         from larkx._fake import text_data
 
@@ -468,14 +479,8 @@ class MappingTest(Base):
         marked = dict(alone, thread_type=2)  # its marks say a thread reply, it was not read as one: the old way
         self.assertEqual(self.m(msg_id="105", _placement=marked, content_data=t).placement, "")
         S.thread_chats.add("503")  # a thread-first group whose root was read as a plain message
-        S.chats["503"] = {"id": "503", "type": 2, "chatMode": 2}  # its record says so (asked for an own message)
         self.assertEqual(self.m(chat_id="503", msg_id="106", from_id=ME, content_data=t).placement, "", "asked: mine")
-        self.assertEqual(self.m(chat_id="503", msg_id="110", content_data=t).placement, "", "known since: kept")
-        S.thread_chats.add("514")
-        S.chats["514"] = {"id": "514", "type": 2, "chatMode": 3}
-        n = len(S.chat_info_calls)
-        self.assertEqual(self.m(chat_id="514", msg_id="107", content_data=t).placement, "chat", "others' never ask")
-        self.assertEqual(len(S.chat_info_calls), n)
+        self.assertEqual(self.m(chat_id="503", msg_id="107", content_data=t).placement, "chat", "others' never ask")
         copy = {"thread_type": 0, "send_to_chat": False, "sync_type": 1, "sync_related": "101", "sync_root": "90"}
         c = self.m(msg_id="108", _placement=copy, content_data=t)
         self.assertEqual((c.same_as, c.placement), ("101", "chat"), "the main stream's copy of a thread reply")
@@ -757,27 +762,21 @@ class SwitchTest(Base):
 
 
 class ThreadFirstAndMentionsTest(unittest.TestCase):
-    def test_thread_first_reads_numbers_and_names(self):
-        from larkx.proto import decoders as dec
-
-        for info, want in (({"type": 3}, True), ({"type": "TOPIC_GROUP"}, True), ({"type": 2, "chatMode": 2}, True),
-                           ({"type": 2, "chatMode": 3}, True), ({"type": 2, "chatMode": "THREAD_V2"}, True),
-                           ({"type": 2, "chatMode": "THREAD"}, True), ({"type": 2, "chatMode": 1}, False),
-                           ({"type": 2}, False), ({"type": 1}, False), ({}, False)):
-            self.assertEqual(larkagentx.thread_first(dec, info), want, info)
-
     def test_mention_pieces(self):
         P = larkagentx.mention_pieces
         self.assertEqual(P("请 @张三 看，@李四 也看", [("1", "张三"), ("2", "李四")]),
                          [("text", "请 "), ("at", "1"), ("text", " 看，"), ("at", "2"), ("text", " 也看")])
         self.assertEqual(P("请看一下", [("1", "张三"), ("2", "李四")]),
-                         [("at", "1"), ("at", "2"), ("text", " "), ("text", "请看一下")], "not written: in front")
+                         [("at", "1"), ("text", " "), ("at", "2"), ("text", " "), ("text", "请看一下")],
+                         "not written: in front")
         self.assertEqual(P(" 请看", [("1", "张三")]), [("at", "1"), ("text", " 请看")], "a space there already")
         self.assertEqual(P("@张三丰 和 @张三", [("1", "张三丰"), ("2", "张三")]),
                          [("at", "1"), ("text", " 和 "), ("at", "2")], "a longer name first: each its own")
         self.assertEqual(P("@张三 和 @张三丰", [("1", "张三"), ("2", "张三丰")]),
                          [("at", "1"), ("text", " 和 "), ("at", "2")], "a shorter name never takes a longer one's place")
         self.assertEqual(P("@张三 @张三", [("1", "张三")]), [("at", "1"), ("text", " @张三")], "the first place only")
+        self.assertEqual(P("See @Annette and @Ann", [("1", "Ann"), ("2", "Annette")]),
+                         [("text", "See "), ("at", "2"), ("text", " and "), ("at", "1")], "the longest name at a place")
         self.assertEqual(P("x", [("1", "")]), [("at", "1"), ("text", " "), ("text", "x")], "no name: in front")
 
 
@@ -829,87 +828,67 @@ class SendTest(Base):
             b.send("500", "x", reply_to="97", root="90", to_chat=True)
 
     def patch_packets(self):
-        """new_topic and with_mentions on the fake packet (a dict; the real ones: the smoke test)."""
-        for name, fake in (("new_topic", lambda pkt: dict(pkt, new_topic=True)),
-                           ("with_mentions", lambda pkt, text, people: dict(pkt, mentions=list(people)))):
-            real = getattr(larkagentx, name)
-            setattr(larkagentx, name, fake)
-            self.addCleanup(setattr, larkagentx, name, real)
+        """with_mentions on the fake packet (a dict; the real one: the smoke test)."""
+        real = larkagentx.with_mentions
+        larkagentx.with_mentions = lambda pkt, text, people: dict(pkt, mentions=list(people))
+        self.addCleanup(setattr, larkagentx, "with_mentions", real)
 
-    def test_a_new_message_in_a_thread_first_group_opens_a_topic(self):
+    def refusal(self, code=5801):
+        """Feishu's 400 (its answer: a message, then the code as field 2) as the fake requests raises it."""
+        words = b"Unable to send chat messages as message type has been switched to topic."
+        body = b"\x0a" + bytes([len(words)]) + words + (b"\x10" + bytes([code & 0x7F | 0x80, code >> 7]) if code else b"")
+        return R.HTTPError("400", response=R.Response(400, body))
+
+    def test_a_group_in_topic_mode(self):
         b = self.b
         self.patch_packets()
-        S.chats.update({"503": {"id": "503", "type": 3}, "504": {"id": "504", "type": 2, "chatMode": 3},
-                        "505": {"id": "505", "type": 2, "chatMode": 1}})
-        for chat, why in (("502", "a topic group (its chat mode)"), ("503", "a topic group (its type)"),
-                          ("504", "an ordinary group in topic mode")):
-            b.send(chat, "新话题")
-            self.assertTrue(self.last().get("new_topic"), why)
-            self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("", False), why)
-        for chat, why in (("500", "an ordinary group"), ("505", "an ordinary group, said outright"),
-                          ("501", "a direct chat")):
-            b.send(chat, "普通消息")
-            self.assertNotIn("new_topic", self.last(), why)
-        b.send("504", "回到话题里", reply_to="60", root="60")
-        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"], self.last().get("new_topic")),
-                         ("60", False, None), "a reply in a topic-mode group: into the topic, no new one")
-        b.send("504", "回复话题第一条", reply_to="61")
-        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"], self.last().get("new_topic")),
-                         ("61", False, None), "a reply to a topic's first message goes into that topic")
-
-    def test_a_plain_message_refused_with_400_goes_again_as_a_topic(self):
-        b = self.b
-        self.patch_packets()
-        S.post_answers = [R.HTTPError("400", response=R.Response(400))]
-        self.assertTrue(b.send("500", "新话题", mentions=[("7001", "张三")]))
+        S.chats.update({"507": {"id": "507", "type": 2, "chatMode": 1}, "508": {"id": "508", "type": 2, "chatMode": 1},
+                        "509": {"id": "509", "type": 2, "chatMode": 1}})
+        # a new message there cannot be posted: said in words, known from then on, never sent again
+        S.post_answers = [self.refusal()]
+        with self.assertRaises(SendRejected) as e:
+            b.send("507", "新话题", mentions=[("7001", "张三")])
+        self.assertIn("只能回复群里已有的话题", e.exception.message)
+        self.assertEqual(len(S.posts), 1)
+        self.assertTrue(b.topic_mode("507"))
+        # a quote there goes into the quoted message's topic, the thread way (once more after the refusal)
+        S.post_answers = [self.refusal()]
+        self.assertTrue(b.send("508", "回复", reply_to="61", mentions=[("7001", "张三")]))
         first, again = S.posts[-2], S.posts[-1]
-        self.assertNotIn("new_topic", first)
-        self.assertTrue(again.get("new_topic"), "a group thread-first in a way its record does not say")
-        self.assertEqual((again["text"], again["mentions"]), ("新话题", [("7001", "张三")]), "the same message")
+        self.assertEqual((first["root"], first["reply_in_thread"]), ("61", False), "a quote, as before")
+        self.assertEqual((again["root"], again["reply_in_thread"], again["mentions"]), ("61", True, [("7001", "张三")]))
         self.assertNotEqual(first["request"], again["request"], "a new request id")
-        S.post_answers = [R.HTTPError("400", response=R.Response(400)), R.HTTPError("400", response=R.Response(400))]
-        with self.assertRaises(SendRejected):
-            b.send("500", "还是不行")
+        self.assertTrue(b.topic_mode("508"))
         n = len(S.posts)
-        for answer, args, why in ((R.HTTPError("403", response=R.Response(403)), ("500", "x"), "another refusal"),
-                                  (R.HTTPError("400", response=R.Response(400)), ("500", "x", "85"), "a reply"),
-                                  (R.HTTPError("400", response=R.Response(400)), ("501", "x"), "a direct chat"),
-                                  (R.HTTPError("400", response=R.Response(400)), ("502", "x"), "already a topic")):
-            S.post_answers = [answer]
-            with self.assertRaises(SendRejected, msg=why):
-                b.send(*args)
-            self.assertEqual(len(S.posts), n + 1, why + ": never sent again")
+        b.send("508", "再回复", reply_to="62")
+        self.assertEqual((len(S.posts), self.last()["root"], self.last()["reply_in_thread"]), (n + 1, "62", True),
+                         "known: straight into the topic")
+        b.send("508", "话题里回复", reply_to="63", root="60")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("60", True), "a reply in a topic")
+        # other refusals: nothing learnt, nothing sent again
+        for answer, args in ((self.refusal(code=0), ("509", "x")), (self.refusal(code=0), ("509", "x", "85")),
+                             (R.HTTPError("403", response=R.Response(403)), ("509", "x", "85")),
+                             (self.refusal(), ("501", "私聊", "70")), (self.refusal(), ("500", "进话题", "97", "90"))):
             n = len(S.posts)
-        S.post_answers = [R.HTTPError("400", response=R.Response(400)), R.ReadTimeout("r")]
+            S.post_answers = [answer]
+            with self.assertRaises(SendRejected, msg=repr(args)):
+                b.send(*args)
+            self.assertEqual(len(S.posts), n + 1, repr(args))
+        self.assertFalse(b.topic_mode("509") or b.topic_mode("501") or b.topic_mode("500"))
+        S.post_answers = [self.refusal(), R.ReadTimeout("r")]
         with self.assertRaises(BackendError) as e:
-            b.send("500", "不确定")
+            b.send("509", "不确定", reply_to="64")
         self.assertNotIsInstance(e.exception, SendRejected, "the second try may have gone out")
 
-    def test_a_group_switched_to_topic_mode_is_read_so_by_its_push(self):
+    def test_a_topic_group_keeps_its_own_way(self):
         b = self.b
-        self.patch_packets()
-        client, me = b._signed_in()
-        S.chats["506"] = {"id": "506", "type": 2, "chatMode": 1, "name": "改成话题模式的群"}
-        self.assertFalse(b.chat_info("506").topic)
-        with b._groups_mu:
-            b._groups_owner = me.id
-            b._groups = [larkagentx.Chat(id="506", kind="group", name="改成话题模式的群", members=3)]
-        S.chats["506"]["chatMode"] = 3
-        with b._groups_mu:
-            b._apply_chats_locked({"506": {"id": "506", "name": "新名字"}}, [], me)
-        self.assertFalse(b.group_candidates(10)[0].topic, "a push without a chat mode keeps the kind")
-        with b._groups_mu:
-            b._apply_chats_locked({"506": {"id": "506", "chatMode": 3}}, [], me)
-        self.assertTrue(b.group_candidates(10)[0].topic, "switched to topic mode")
-        self.assertNotIn("506", b._chats, "the chat read before is dropped: read again when asked")
-        b.send("506", "新话题")
-        self.assertTrue(self.last().get("new_topic"), "sent as a topic now")
-        S.chats["506"]["chatMode"] = 1
-        with b._groups_mu:
-            b._apply_chats_locked({"506": {"id": "506", "chatMode": 1}}, [], me)
-        self.assertFalse(b.group_candidates(10)[0].topic, "and back")
-        b.send("506", "普通消息")
-        self.assertNotIn("new_topic", self.last())
+        S.post_answers = [self.refusal()]
+        with self.assertRaises(SendRejected):  # (never seen there: a topic group takes a new message as a topic)
+            b.send("502", "新话题")
+        self.assertEqual(len(S.posts), 1, "a new message to a topic group goes plain, once")
+        self.assertEqual((S.posts[-1]["root"], S.posts[-1]["reply_in_thread"]), ("", False))
+        b.send("502", "回复", reply_to="60", root="60")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("60", False))
 
     def test_real_mentions(self):
         b = self.b
@@ -920,7 +899,7 @@ class SendTest(Base):
         b.send("500", "没有 @")
         self.assertNotIn("mentions", self.last())
         b.send("502", "话题群里 @张三", mentions=[("7001", "张三")])
-        self.assertTrue(self.last().get("new_topic") and self.last().get("mentions"), "a new topic with an @")
+        self.assertEqual(self.last()["mentions"], [("7001", "张三")], "a new topic with an @")
         n = len(S.posts)
         for bad in ([("not-a-user", "某人")], [("7%03d" % i, "人") for i in range(21)]):
             with self.assertRaises(SendRejected):

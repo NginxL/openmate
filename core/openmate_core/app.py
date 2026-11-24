@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -1554,7 +1555,8 @@ class ConnectorApp:
                 result = send()
             except SendRejected as e:
                 self.store.send_release(key)
-                log.info("a %s send was refused, nothing went out: %s", kind, e.message)  # the reason, never the text
+                status = re.search(r"HTTP (\d{3})", e.message or "")  # only a status: a reason may quote the text
+                log.info("a %s send was refused, nothing went out%s", kind, " (HTTP %s)" % status.group(1) if status else "")
                 raise RPCError("没有发出去：%s" % e.message)
             except RPCError:
                 self.store.send_release(key)

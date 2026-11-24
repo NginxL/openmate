@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from . import views
 from .backend import BackendError
-from .textutil import clip, local_stamp, one_line
+from .textutil import clip, local_stamp, one_line, with_mention_names
 from .wire import RPCError
 
 log = logging.getLogger("openmate.tools")
@@ -110,8 +110,8 @@ def write_tools(app) -> List[dict]:
                       "description": "要 @ 的人的用户 id（%s_search 或消息里给出），可选。正文里写到的「@名字」会变成真正的 @，"
                                      "没写到的放在最前面；只在正文里手写 @名字 不会提醒到人" % c}
         what += "要提醒谁就把他放进 at。"
-    if p == "飞书":
-        what += "话题群（或开了话题模式的群）里不给 reply_to 会开一个新话题，给 reply_to 就回复到那条所在的话题。"
+    if getattr(app.backend, "topic_groups", False):
+        what += "话题群里不给 reply_to 会开一个新话题，给 reply_to 就回复到那条所在的话题；开了话题模式的群只能回复已有话题（要给 reply_to）。"
     return [
         {"name": c + "_send", "description": what, "input_schema": _obj(send, ["chat", "text"])},
         {"name": c + "_send_dm", "description": "以我的身份私聊一个%s用户（没有私聊会话时先建一个）。每次都要我在手机上确认全文和发给谁。" % p,
@@ -499,13 +499,17 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
         raw = [raw]
     if not isinstance(raw, list):
         raise RPCError("at 要写成用户 id 的列表")
-    out: List[tuple] = []
+    ids: List[str] = []
     for v in raw:
         uid = str(v or "").strip() if isinstance(v, (str, int)) else ""
         if not _USER_ID.fullmatch(uid):
             raise RPCError("at 里的 %r 不是用户 id（先用 %s_search 查）" % (str(v)[:40], app.cid))
-        if uid in {u for u, _ in out}:
-            continue
+        if uid not in ids:
+            ids.append(uid)
+    if len(ids) > MENTIONS_MOST:  # before any name is looked up
+        raise RPCError("一条消息最多 @ %d 个人" % MENTIONS_MOST)
+    out: List[tuple] = []
+    for uid in ids:
         name = app.store.name(uid) if app.store is not None else ""
         if not name:
             try:
@@ -515,14 +519,24 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
         if not name or name == uid:
             raise RPCError("不认识用户 %s，没法 @ 他（先用 %s_search 查到他）" % (uid, app.cid))
         out.append((uid, name))
-    if len(out) > MENTIONS_MOST:
-        raise RPCError("一条消息最多 @ %d 个人" % MENTIONS_MOST)
     return out
+
+
+def _topic_mode(app, chat_id: str) -> bool:
+    """Whether the backend knows the group shows its messages as topics though it is no topic group (no new message
+    can be posted there, only replies into its topics)."""
+    check = getattr(app.backend, "topic_mode", None)
+    try:
+        return bool(check(chat_id)) if callable(check) else False
+    except Exception:
+        return False
 
 
 def _opens_topic(app, chat_id: str) -> bool:
     """Whether a new message (no reply) opens a topic there: a thread-first group, as the service says now (the store
-    keeps what a chat was when first seen)."""
+    keeps what a chat was when first seen). Asked only of a backend that has such groups (topic_groups)."""
+    if not getattr(app.backend, "topic_groups", False):
+        return False
     try:
         return bool(app.backend.chat_info(chat_id).topic)
     except Exception:
@@ -534,8 +548,12 @@ def _send_card(app, a: dict) -> tuple:
     text = _check_text(_need(a, "text", "消息内容"))
     reply_to = str(a.get("reply_to") or "").strip()
     mentions = _mentions(app, a, chat_id)
+    if mentions:  # the text as it will read: one not written goes in front (the card, the send and its echo agree)
+        text = _check_text(with_mention_names(text, mentions))
     p = app.platform.name
     chat = app.store.get_chat(chat_id) if app.store is not None else None
+    if not reply_to and (chat or {}).get("kind") != "dm" and _topic_mode(app, chat_id):
+        raise RPCError("这个群的消息以话题形式展示，OpenMate 只能回复群里已有的话题（给 reply_to），开不了新话题")
     me = getattr(app, "account", None)
     ref = "会话 id %s" % chat_id  # beside the name, to check it by
     if chat is None:
@@ -622,6 +640,9 @@ def do(app, params: dict) -> dict:
             raise RPCError("刚换了%s账号，没有发出：请在新账号下重新操作" % p)
 
     if name == c + "_send":
+        if app.store.send_get(key) is not None:
+            # this request went out (or may have) before: its result, never a card made again (names may be gone)
+            return _result(app.send_once(key, name, lambda: {}))
         chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
         root = None
         if reply_to:

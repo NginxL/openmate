@@ -151,10 +151,9 @@ out["also_to_chat"] = [lr.chatId, lr.rootId, lr.parentId, lr.isReplyInThread, lr
 pkt = larkagentx.also_to_chat(b.lx.builders.build_send_message_packet("旧标记", "900", "rid", root_id="80"), "83", "send")
 lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
 out["also_to_chat_send"] = [lr.parentId, lr.syncToChat, lr.sendToChat]
-pkt = larkagentx.new_topic(b.lx.builders.build_send_message_packet("新话题", "900", "rid"))
-lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
-pr = P.PutMessageRequest(); pr.ParseFromString(pkt.payload)
-out["new_topic"] = [lr.chatId, lr.rootId, lr.isThreadGroupTopic, lr.isReplyInThread, pr.content.richText.innerText, pkt.cmd]
+docs = {"elementIds": ["d"], "elements": {"dictionary": {"d": {"tag": 22, "property": b"", "childIds": ["p"]},
+        "p": {"tag": 3, "property": b"", "childIds": ["t"]}, "t": {"tag": 1, "property": tp.SerializeToString()}}}}
+out["docs_block"] = [larkagentx.rich_text(docs, b.lx.P), larkagentx.rich_after_mentions(docs, b.lx.P)]
 text = "请 @张三 看"
 pkt = b.lx.builders.build_send_message_packet(text, "900", "rid", root_id="80", thread_chat=True)
 pkt = larkagentx.with_mentions(pkt, text, [("7001", "张三"), ("7002", "李四")])
@@ -231,7 +230,7 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
                          "into the thread, also to the chat, quoting the request")
         self.assertEqual(out["also_to_chat_send"], ["83", False, True])
-        self.assertEqual(out["new_topic"], ["900", "", True, False, "新话题", 5], "a message that opens a topic")
+        self.assertEqual(out["docs_block"], [" /stop", "/stop"], "a DOCS block is no document: no [文档] in front")
         self.assertEqual(out["mentions"], [
             [["at", "7002", "@李四"], ["text", " "], ["text", "请 "], ["at", "7001", "@张三"], ["text", " 看"]],
             [5, 5], [7001, 7002], "@李四 请 @张三 看", "@李四 请 @张三 看",
