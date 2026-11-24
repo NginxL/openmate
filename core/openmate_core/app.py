@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import tools as toolmod
 from . import views
@@ -1554,6 +1554,7 @@ class ConnectorApp:
                 result = send()
             except SendRejected as e:
                 self.store.send_release(key)
+                log.info("a %s send was refused, nothing went out: %s", kind, e.message)  # the reason, never the text
                 raise RPCError("没有发出去：%s" % e.message)
             except RPCError:
                 self.store.send_release(key)
@@ -1575,19 +1576,25 @@ class ConnectorApp:
             raise SendRejected("正在换%s账号，这条没有发出，请稍后再发" % self.platform.name)
 
     def send_as_user(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-                     to_chat: bool = False) -> str:
+                     to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
+        """mentions [(user id, name)]: real @s, only where the backend can_mention (SendRejected else)."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
         self._not_handing_off()
         if self.link == "expired":
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
+        if mentions and not getattr(self.backend, "can_mention", False):
+            raise SendRejected("%s这里不能 @人" % self.platform.name)
         if self.channel is not None:
             self.channel.outgoing(chat_id, text)  # its echo in the 渠道's chat is no line of the user's
+        # only when set: a backend that never reads "thread_chat" or takes no @s need not know the words
+        extra: Dict[str, Any] = {}
+        if to_chat and root:
+            extra["to_chat"] = True
+        if mentions:
+            extra["mentions"] = list(mentions)
         try:
-            if to_chat and root:  # only then: a backend that never reads "thread_chat" need not know the word
-                mid = self.backend.send(chat_id, text, reply_to or None, root, to_chat=True)
-            else:
-                mid = self.backend.send(chat_id, text, reply_to or None, root or None)
+            mid = self.backend.send(chat_id, text, reply_to or None, root or None, **extra)
         except SendRejected:
             if self.channel is not None:
                 self.channel.outgoing(chat_id, text, failed=True)  # surely not sent: its text stands for nothing

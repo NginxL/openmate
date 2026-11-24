@@ -95,13 +95,25 @@ def _page_tools(app) -> dict:
     return out
 
 
+MENTIONS_MOST = 20  # people one message @-s at most
+_USER_ID = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")  # what a user id looks like on any platform (the backend checks its own)
+
+
 def write_tools(app) -> List[dict]:
     c, p = app.cid, app.platform.name
+    send = {"chat": {"type": "string", "description": "会话 id"},
+            "text": {"type": "string", "description": "完整内容（纯文本）"},
+            "reply_to": {"type": "string", "description": "要回复的消息 id，可选"}}
+    what = "以我的身份在%s会话（私聊或群）里发一条消息，可以回复某条消息。每次都要我在手机上确认全文和发给谁。" % p
+    if getattr(app.backend, "can_mention", False):
+        send["at"] = {"type": "array", "items": {"type": "string"}, "maxItems": MENTIONS_MOST,
+                      "description": "要 @ 的人的用户 id（%s_search 或消息里给出），可选。正文里写到的「@名字」会变成真正的 @，"
+                                     "没写到的放在最前面；只在正文里手写 @名字 不会提醒到人" % c}
+        what += "要提醒谁就把他放进 at。"
+    if p == "飞书":
+        what += "话题群（或开了话题模式的群）里不给 reply_to 会开一个新话题，给 reply_to 就回复到那条所在的话题。"
     return [
-        {"name": c + "_send", "description": "以我的身份在%s会话（私聊或群）里发一条消息，可以回复某条消息。每次都要我在手机上确认全文和发给谁。" % p,
-         "input_schema": _obj({"chat": {"type": "string", "description": "会话 id"},
-                               "text": {"type": "string", "description": "完整内容（纯文本）"},
-                               "reply_to": {"type": "string", "description": "要回复的消息 id，可选"}}, ["chat", "text"])},
+        {"name": c + "_send", "description": what, "input_schema": _obj(send, ["chat", "text"])},
         {"name": c + "_send_dm", "description": "以我的身份私聊一个%s用户（没有私聊会话时先建一个）。每次都要我在手机上确认全文和发给谁。" % p,
          "input_schema": _obj({"user": {"type": "string", "description": "对方的用户 id（%s_search 给出）" % c},
                                "text": {"type": "string", "description": "完整内容（纯文本）"}}, ["user", "text"])},
@@ -475,10 +487,53 @@ def _check_text(text: str) -> str:
     return text
 
 
+def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
+    """The send's at: [(user id, name)], each person once, named as the store or the service knows them (RPCError when
+    one is not a user id, is not known, or there are too many, or this platform cannot @)."""
+    raw = a.get("at")
+    if raw in (None, "", []):
+        return []
+    if not getattr(app.backend, "can_mention", False):
+        raise RPCError("%s这里不能 @人" % app.platform.name)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise RPCError("at 要写成用户 id 的列表")
+    out: List[tuple] = []
+    for v in raw:
+        uid = str(v or "").strip() if isinstance(v, (str, int)) else ""
+        if not _USER_ID.fullmatch(uid):
+            raise RPCError("at 里的 %r 不是用户 id（先用 %s_search 查）" % (str(v)[:40], app.cid))
+        if uid in {u for u, _ in out}:
+            continue
+        name = app.store.name(uid) if app.store is not None else ""
+        if not name:
+            try:
+                name = app.backend.user_name(uid, chat_id) or ""
+            except BackendError:
+                name = ""
+        if not name or name == uid:
+            raise RPCError("不认识用户 %s，没法 @ 他（先用 %s_search 查到他）" % (uid, app.cid))
+        out.append((uid, name))
+    if len(out) > MENTIONS_MOST:
+        raise RPCError("一条消息最多 @ %d 个人" % MENTIONS_MOST)
+    return out
+
+
+def _opens_topic(app, chat_id: str) -> bool:
+    """Whether a new message (no reply) opens a topic there: a thread-first group, as the service says now (the store
+    keeps what a chat was when first seen)."""
+    try:
+        return bool(app.backend.chat_info(chat_id).topic)
+    except Exception:
+        return False
+
+
 def _send_card(app, a: dict) -> tuple:
     chat_id = _need(a, "chat", "会话 id")
     text = _check_text(_need(a, "text", "消息内容"))
     reply_to = str(a.get("reply_to") or "").strip()
+    mentions = _mentions(app, a, chat_id)
     p = app.platform.name
     chat = app.store.get_chat(chat_id) if app.store is not None else None
     me = getattr(app, "account", None)
@@ -518,8 +573,12 @@ def _send_card(app, a: dict) -> tuple:
             lines.append("回复 %s：“%s”" % (views.sender_of(quoted, app.me_name()), one_line(views.text_of(quoted), 80)))
         else:
             lines.append("回复消息 %s" % reply_to)
+    elif (chat or {}).get("kind") != "dm" and _opens_topic(app, chat_id):
+        lines.append("在这个话题群里开一个新话题")
+    if mentions:
+        lines.append("会 @ 并提醒：" + "、".join("%s（%s）" % (n, u) for u, n in mentions))
     lines += ["——", text]
-    return chat_id, text, reply_to, visible, "\n".join(lines)
+    return chat_id, text, reply_to, visible, "\n".join(lines), mentions
 
 
 def _dm_card(app, a: dict) -> tuple:
@@ -538,7 +597,7 @@ def describe(app, params: dict) -> dict:
     a = _args(params)
     c = app.cid
     if name == c + "_send":
-        _, _, _, visible, summary = _send_card(app, a)
+        _, _, _, visible, summary, _ = _send_card(app, a)
         return {"action": {"name": name, "visible": visible}, "summary": summary}
     if name == c + "_send_dm":
         _, _, visible, summary = _dm_card(app, a)
@@ -563,7 +622,7 @@ def do(app, params: dict) -> dict:
             raise RPCError("刚换了%s账号，没有发出：请在新账号下重新操作" % p)
 
     if name == c + "_send":
-        chat_id, text, reply_to, visible, _ = _send_card(app, a)
+        chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
         root = None
         if reply_to:
             quoted = app.store.message(chat_id, reply_to)
@@ -572,7 +631,7 @@ def do(app, params: dict) -> dict:
 
         def send():
             as_asked()
-            mid = app.send_as_user(chat_id, text, reply_to or None, root)
+            mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None)
             return {"text": "已发送到%s" % visible, "message_ref": mid}
 
         return _result(app.send_once(key, name, send))

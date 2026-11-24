@@ -392,8 +392,12 @@ class Backend(abc.ABC):
         """Send text as the account and return the new message's id. reply_to: the message it answers (quoted);
         root: the thread to post in (reply_to == root with no thread yet: open a thread on that message). to_chat:
         into root's thread and also into the chat's main stream, quoting reply_to (the core passes it only when true,
-        and only for a message the backend read as "thread_chat"). Raise SendRejected only when it surely did not go
-        out."""
+        and only for a message the backend read as "thread_chat"). A backend with can_mention also takes mentions
+        [(user id, name)]: real @s of those people (the core passes it only when there are some). Raise SendRejected
+        only when it surely did not go out."""
+
+    #: Whether send takes mentions (real @s that tell those people); the send tool offers them only then
+    can_mention: bool = False
 
     @abc.abstractmethod
     def create_chat(self, user_id: str) -> str:

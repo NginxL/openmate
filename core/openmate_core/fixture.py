@@ -449,8 +449,10 @@ class FixtureBackend(Backend):
 
     # writes
 
+    can_mention = True
+
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             to_chat: bool = False) -> str:
+             to_chat: bool = False, mentions: Optional[list] = None) -> str:
         w = self.world
         if w.send_delay:
             time.sleep(w.send_delay)
@@ -466,7 +468,7 @@ class FixtureBackend(Backend):
         m = w.push(chat_id, "me", text, parent_id=reply_to or "", root_id=root or "")
         with w.lock:
             w.sent.append({"chat": chat_id, "text": text, "reply_to": reply_to, "root": root, "to_chat": to_chat,
-                           "id": m.id})
+                           "id": m.id, "mentions": list(mentions or [])})
         return m.id
 
     @property

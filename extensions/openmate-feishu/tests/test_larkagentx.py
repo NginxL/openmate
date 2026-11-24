@@ -468,8 +468,14 @@ class MappingTest(Base):
         marked = dict(alone, thread_type=2)  # its marks say a thread reply, it was not read as one: the old way
         self.assertEqual(self.m(msg_id="105", _placement=marked, content_data=t).placement, "")
         S.thread_chats.add("503")  # a thread-first group whose root was read as a plain message
+        S.chats["503"] = {"id": "503", "type": 2, "chatMode": 2}  # its record says so (asked for an own message)
         self.assertEqual(self.m(chat_id="503", msg_id="106", from_id=ME, content_data=t).placement, "", "asked: mine")
-        self.assertEqual(self.m(chat_id="503", msg_id="107", content_data=t).placement, "chat", "others' never ask")
+        self.assertEqual(self.m(chat_id="503", msg_id="110", content_data=t).placement, "", "known since: kept")
+        S.thread_chats.add("514")
+        S.chats["514"] = {"id": "514", "type": 2, "chatMode": 3}
+        n = len(S.chat_info_calls)
+        self.assertEqual(self.m(chat_id="514", msg_id="107", content_data=t).placement, "chat", "others' never ask")
+        self.assertEqual(len(S.chat_info_calls), n)
         copy = {"thread_type": 0, "send_to_chat": False, "sync_type": 1, "sync_related": "101", "sync_root": "90"}
         c = self.m(msg_id="108", _placement=copy, content_data=t)
         self.assertEqual((c.same_as, c.placement), ("101", "chat"), "the main stream's copy of a thread reply")
@@ -747,6 +753,34 @@ class SwitchTest(Base):
         self.assertEqual(b._session()[1].id, other.id, "a late restore took the other account's place")
 
 
+# ---------------------------------------------------------------- thread-first chats and @s
+
+
+class ThreadFirstAndMentionsTest(unittest.TestCase):
+    def test_thread_first_reads_numbers_and_names(self):
+        from larkx.proto import decoders as dec
+
+        for info, want in (({"type": 3}, True), ({"type": "TOPIC_GROUP"}, True), ({"type": 2, "chatMode": 2}, True),
+                           ({"type": 2, "chatMode": 3}, True), ({"type": 2, "chatMode": "THREAD_V2"}, True),
+                           ({"type": 2, "chatMode": "THREAD"}, True), ({"type": 2, "chatMode": 1}, False),
+                           ({"type": 2}, False), ({"type": 1}, False), ({}, False)):
+            self.assertEqual(larkagentx.thread_first(dec, info), want, info)
+
+    def test_mention_pieces(self):
+        P = larkagentx.mention_pieces
+        self.assertEqual(P("请 @张三 看，@李四 也看", [("1", "张三"), ("2", "李四")]),
+                         [("text", "请 "), ("at", "1"), ("text", " 看，"), ("at", "2"), ("text", " 也看")])
+        self.assertEqual(P("请看一下", [("1", "张三"), ("2", "李四")]),
+                         [("at", "1"), ("at", "2"), ("text", " "), ("text", "请看一下")], "not written: in front")
+        self.assertEqual(P(" 请看", [("1", "张三")]), [("at", "1"), ("text", " 请看")], "a space there already")
+        self.assertEqual(P("@张三丰 和 @张三", [("1", "张三丰"), ("2", "张三")]),
+                         [("at", "1"), ("text", " 和 "), ("at", "2")], "a longer name first: each its own")
+        self.assertEqual(P("@张三 和 @张三丰", [("1", "张三"), ("2", "张三丰")]),
+                         [("at", "1"), ("text", " 和 "), ("at", "2")], "a shorter name never takes a longer one's place")
+        self.assertEqual(P("@张三 @张三", [("1", "张三")]), [("at", "1"), ("text", " @张三")], "the first place only")
+        self.assertEqual(P("x", [("1", "")]), [("at", "1"), ("text", " "), ("text", "x")], "no name: in front")
+
+
 # ---------------------------------------------------------------- sends
 
 
@@ -793,6 +827,77 @@ class SendTest(Base):
         larkagentx.also_to_chat = lambda pkt, parent, mark: 1 / 0
         with self.assertRaises(SendRejected):  # the packet could not be made: surely not sent
             b.send("500", "x", reply_to="97", root="90", to_chat=True)
+
+    def patch_packets(self):
+        """new_topic and with_mentions on the fake packet (a dict; the real ones: the smoke test)."""
+        for name, fake in (("new_topic", lambda pkt: dict(pkt, new_topic=True)),
+                           ("with_mentions", lambda pkt, text, people: dict(pkt, mentions=list(people)))):
+            real = getattr(larkagentx, name)
+            setattr(larkagentx, name, fake)
+            self.addCleanup(setattr, larkagentx, name, real)
+
+    def test_a_new_message_in_a_thread_first_group_opens_a_topic(self):
+        b = self.b
+        self.patch_packets()
+        S.chats.update({"503": {"id": "503", "type": 3}, "504": {"id": "504", "type": 2, "chatMode": 3},
+                        "505": {"id": "505", "type": 2, "chatMode": 1}})
+        for chat, why in (("502", "a topic group (its chat mode)"), ("503", "a topic group (its type)"),
+                          ("504", "an ordinary group in topic mode")):
+            b.send(chat, "新话题")
+            self.assertTrue(self.last().get("new_topic"), why)
+            self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("", False), why)
+        for chat, why in (("500", "an ordinary group"), ("505", "an ordinary group, said outright"),
+                          ("501", "a direct chat")):
+            b.send(chat, "普通消息")
+            self.assertNotIn("new_topic", self.last(), why)
+        b.send("504", "回到话题里", reply_to="60", root="60")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"], self.last().get("new_topic")),
+                         ("60", False, None), "a reply in a topic-mode group: into the topic, no new one")
+        b.send("504", "回复话题第一条", reply_to="61")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"], self.last().get("new_topic")),
+                         ("61", False, None), "a reply to a topic's first message goes into that topic")
+
+    def test_a_group_switched_to_topic_mode_is_read_so_by_its_push(self):
+        b = self.b
+        self.patch_packets()
+        client, me = b._signed_in()
+        S.chats["506"] = {"id": "506", "type": 2, "chatMode": 1, "name": "改成话题模式的群"}
+        self.assertFalse(b.chat_info("506").topic)
+        with b._groups_mu:
+            b._groups_owner = me.id
+            b._groups = [larkagentx.Chat(id="506", kind="group", name="改成话题模式的群", members=3)]
+        S.chats["506"]["chatMode"] = 3
+        with b._groups_mu:
+            b._apply_chats_locked({"506": {"id": "506", "name": "新名字"}}, [], me)
+        self.assertFalse(b.group_candidates(10)[0].topic, "a push without a chat mode keeps the kind")
+        with b._groups_mu:
+            b._apply_chats_locked({"506": {"id": "506", "chatMode": 3}}, [], me)
+        self.assertTrue(b.group_candidates(10)[0].topic, "switched to topic mode")
+        self.assertNotIn("506", b._chats, "the chat read before is dropped: read again when asked")
+        b.send("506", "新话题")
+        self.assertTrue(self.last().get("new_topic"), "sent as a topic now")
+        S.chats["506"]["chatMode"] = 1
+        with b._groups_mu:
+            b._apply_chats_locked({"506": {"id": "506", "chatMode": 1}}, [], me)
+        self.assertFalse(b.group_candidates(10)[0].topic, "and back")
+        b.send("506", "普通消息")
+        self.assertNotIn("new_topic", self.last())
+
+    def test_real_mentions(self):
+        b = self.b
+        self.patch_packets()
+        b.send("500", "请 @张三 看", mentions=[("7001", "张三"), ["7002", "李四"], ("7001", "张三")])
+        self.assertEqual(self.last()["mentions"], [("7001", "张三"), ("7002", "李四")], "each person once")
+        self.assertEqual(self.last()["text"], "请 @张三 看", "the text itself as written")
+        b.send("500", "没有 @")
+        self.assertNotIn("mentions", self.last())
+        b.send("502", "话题群里 @张三", mentions=[("7001", "张三")])
+        self.assertTrue(self.last().get("new_topic") and self.last().get("mentions"), "a new topic with an @")
+        n = len(S.posts)
+        for bad in ([("not-a-user", "某人")], [("7%03d" % i, "人") for i in range(21)]):
+            with self.assertRaises(SendRejected):
+                b.send("500", "x", mentions=bad)
+        self.assertEqual(len(S.posts), n, "refused before anything went out")
 
     def test_surely_not_sent(self):
         b = self.b

@@ -100,6 +100,11 @@ GROUPS_INFO_MOST = 50  # groups per PullChatsByIdsRequest
 GROUPS_EVERY = 3600.0  # every group is read again this often while the link is up (pushes say the changes between)
 GROUPS_SPACING = 60.0  # and never more often than this
 CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
+TOPIC_GROUP_TYPES = (3, "TOPIC_GROUP")  # entities.Chat.Type of a topic group (话题群)
+# entities.Chat.ChatMode of a thread-first chat: THREAD (a topic group) and THREAD_V2 (taken as an ordinary group set to
+# show its messages as topics, 话题模式); every message there opens a topic or replies in one
+THREAD_CHAT_MODES = (2, 3, "THREAD", "THREAD_V2")
+MENTIONS_MOST = 20  # people one message @-s at most
 CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
 
@@ -380,6 +385,107 @@ def also_to_chat(pkt, parent_id: str, mark: str):
     return pkt
 
 
+def thread_first(dec, info: dict) -> bool:
+    """Whether a chat's record (enums as numbers or names) says it is thread-first: a topic group, or a group in topic
+    mode. LarkAgentX's own check first; a name it does not read, too."""
+    try:
+        if dec.is_thread_chat(info):
+            return True
+    except Exception:
+        pass
+    return info.get("chatMode") in THREAD_CHAT_MODES or info.get("type") in TOPIC_GROUP_TYPES
+
+
+def new_topic(pkt):
+    """LarkAgentX's packet of a message to a chat (build_send_message_packet, no root), made to open a topic of its own:
+    what a thread-first group takes a new message as (isThreadGroupTopic)."""
+    from larkx.proto import lark_all_pb2
+
+    req = lark_all_pb2.messages.PutMessageRequest()
+    req.ParseFromString(pkt.payload)
+    req.isThreadGroupTopic = True
+    pkt.payload = req.SerializeToString()
+    return pkt
+
+
+def _element_id(taken: Set[str]) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    while True:
+        eid = "".join(secrets.choice(alphabet) for _ in range(10))
+        if eid not in taken:
+            taken.add(eid)
+            return eid
+
+
+def mention_pieces(text: str, mentions) -> List[Tuple[str, str]]:
+    """The text as pieces ("text", words) and ("at", user id) in order: where the text writes a mention's "@name" first,
+    that @ goes there; a mention it does not write goes in front, in the order given, a space after the last."""
+    spots: List[Tuple[int, int, str]] = []  # (start, end, user id) of each mention written in the text
+    front: List[str] = []
+    for uid, name in mentions:
+        word = "@" + name
+        at = -1
+        start = 0
+        while name:
+            at = text.find(word, start)
+            if at < 0 or not any(a < at + len(word) and at < b for a, b, _ in spots):
+                break  # not written, or written where no other mention is
+            start = at + 1
+        if at < 0 or not name:
+            front.append(uid)
+        else:
+            spots.append((at, at + len(word), uid))
+    out: List[Tuple[str, str]] = [("at", uid) for uid in front]
+    if front and text and not text[0].isspace():
+        out.append(("text", " "))
+    pos = 0
+    for a, b, uid in sorted(spots):
+        if a > pos:
+            out.append(("text", text[pos:a]))
+        out.append(("at", uid))
+        pos = b
+    if pos < len(text):
+        out.append(("text", text[pos:]))
+    return out
+
+
+def with_mentions(pkt, text: str, mentions):
+    """LarkAgentX's text packet (build_send_message_packet) with real @s: mentions [(user id, name)] become @ elements
+    of those people (mention_pieces says where), and the request lists who is @-ed (atUserIdList), so Feishu tells
+    them. The rest of the text stays as it was written."""
+    from larkx.proto import lark_all_pb2
+
+    E = lark_all_pb2.entities.RichTextElement
+    req = lark_all_pb2.messages.PutMessageRequest()
+    req.ParseFromString(pkt.payload)
+    names = {uid: name for uid, name in mentions}
+    rich = req.content.richText
+    del rich.elementIds[:]
+    del rich.atIds[:]
+    rich.elements.dictionary.clear()
+    taken: Set[str] = set()
+    words: List[str] = []
+    for kind, value in mention_pieces(text, mentions):
+        eid = _element_id(taken)
+        el = rich.elements.dictionary[eid]
+        if kind == "at":
+            el.tag = E.AT
+            el.property = E.AtProperty(userId=value, content="@" + (names.get(value) or value)).SerializeToString()
+            rich.atIds.append(eid)
+            words.append("@" + (names.get(value) or value))
+        else:
+            el.tag = E.TEXT
+            el.property = E.TextProperty(content=value).SerializeToString()
+            words.append(value)
+        rich.elementIds.append(eid)
+    rich.innerText = "".join(words)
+    del req.atUserIdList[:]
+    for uid in names:
+        req.atUserIdList.append(int(uid))
+    pkt.payload = req.SerializeToString()
+    return pkt
+
+
 def done_cards(cards, box=None, only: Optional[Set[str]] = None) -> Dict[str, float]:
     """{chat id: when it last changed (seconds, 0 when unknown)} of the chats' feed cards in 完成: by each card's
     feedType, else the push's own (box). Other cards (a thread's, a document's), cards on their way out and, with
@@ -556,6 +662,7 @@ class LarkXBackend(Backend):
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
+        self._kinds_said: Dict[str, tuple] = {}  # group id → how its record read when last logged (_say_kind)
         self._synced: Dict[str, str] = {}  # message id → how it also went to the main stream (synced_mark), the newest
         self.cli = None  # agenda.LarkCLI for a reply in a document's comment (create sets it)
         self._doc_feeds_heard = False
@@ -1200,7 +1307,15 @@ class LarkXBackend(Backend):
                     if isinstance(names, dict) and names:
                         name = str(names.get(self.region.locale.lower()) or next(iter(names.values())) or "") or old.name
                 members = _int(info.get("memberCount")) or _int(info.get("userCount")) or old.members
-                update[cid] = Chat(id=cid, kind="group", name=name, members=members, topic=old.topic)
+                # a push carries only what changed: a chat mode in it says the kind anew (switched to topic mode, or
+                # back), else the kind stays
+                topic = old.topic if info.get("chatMode") is None else thread_first(self.lx.decoders, info)
+                if topic != old.topic:
+                    log.info("group %s: chatMode=%s; now read as %s", cid, info.get("chatMode"),
+                             "thread-first" if topic else "ordinary")
+                    with self._lock:  # (taken inside _groups_mu: nothing takes _groups_mu inside _lock)
+                        self._chats.pop(cid, None)  # read again when asked
+                update[cid] = Chat(id=cid, kind="group", name=name, members=members, topic=topic)
             elif not ended and info.get("type") in CHAT_GROUP_TYPES:
                 soon = True  # made or joined: the next read lists it (with what the account is in it)
         self._groups = [update.get(g.id, g) for g in self._groups if g.id not in drop]
@@ -1484,8 +1599,8 @@ class LarkXBackend(Backend):
             return chat_id in self._peers or (hit is not None and hit[1].kind == "dm")
 
     def _topic_group(self, client, chat_id: str, ask: bool) -> bool:
-        """Whether the chat is a thread-first group: from the chats read (no request), or, with ask, LarkAgentX's
-        own check (it keeps the answer); False when it cannot tell."""
+        """Whether the chat is a thread-first group: from the chats read (no request), or, with ask, its record read
+        now (thread_first); False when it cannot tell."""
         with self._lock:
             hit = self._chats.get(chat_id)
         if hit is not None:
@@ -1493,9 +1608,18 @@ class LarkXBackend(Backend):
         if not ask or client is None:
             return False
         try:
-            return bool(client.is_thread_chat(chat_id))
+            return self._thread_first(client, chat_id)
         except Exception:
             return False
+
+    def _thread_first(self, client, chat_id: str) -> bool:
+        """Whether a chat is thread-first (a topic group, or a group in topic mode), as its record reads: the one read
+        (while fresh), else read now (and kept). Raises when it cannot be read."""
+        with self._lock:
+            hit = self._chats.get(chat_id)
+        if hit is not None and hit[0] > time.monotonic():
+            return bool(hit[1].topic)
+        return self._chat_read(client, chat_id)[1].topic
 
     def _plain_group(self, client, chat_id: str, chat_type, me_id: str) -> bool:
         """Whether the chat is known as an ordinary group (not thread-first), for the account me_id while it is the
@@ -1805,6 +1929,8 @@ class LarkXBackend(Backend):
             # only a status: the service did not answer (a chat's own status comes with the chat)
             raise BackendError("飞书暂时没有回答（读取会话信息时）", "unreachable")
         chat = self._chat_of(chat_id, info)
+        if chat.kind == "group":
+            self._say_kind(chat_id, info, chat.topic)
         with self._lock:
             if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
                 self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
@@ -1812,6 +1938,19 @@ class LarkXBackend(Backend):
                 if last > self._last_pos.get(chat_id, 0):
                     self._last_pos[chat_id] = last
         return info, chat
+
+    def _say_kind(self, chat_id: str, info: dict, topic: bool) -> None:
+        """Log once per group (while the backend runs) how its record reads: its type and chat mode (numbers, no
+        name), and whether that is thread-first. A group read as ordinary that turns out thread-first is found so."""
+        key = (str(info.get("type")), str(info.get("chatMode")), topic)
+        with self._lock:
+            if self._kinds_said.get(chat_id) == key:
+                return
+            self._kinds_said[chat_id] = key
+            while len(self._kinds_said) > SYNCED_KEEP:
+                del self._kinds_said[next(iter(self._kinds_said))]
+        log.info("group %s: type=%s chatMode=%s; read as %s", chat_id, key[0], key[1],
+                 "thread-first" if topic else "ordinary")
 
     def _chat_of(self, chat_id: str, info: dict) -> Chat:
         dec = self.lx.decoders
@@ -1821,10 +1960,7 @@ class LarkXBackend(Backend):
             names = info.get("i18nNames") or {}
             if isinstance(names, dict) and names:
                 name = str(names.get(self.region.locale.lower()) or names.get(self.region.locale) or next(iter(names.values())) or "")
-        try:
-            topic = bool(dec.is_thread_chat(info))
-        except Exception:
-            topic = False
+        topic = thread_first(dec, info)
         with self._lock:
             peer = self._peers.get(chat_id, "")
         if kind == "dm" and not name and not peer:
@@ -2115,8 +2251,13 @@ class LarkXBackend(Backend):
         except BackendError:
             return False  # not known: an ordinary group's way (a thread) is what the core asked for
 
+    #: send takes mentions: real @s, Feishu tells those people
+    can_mention = True
+
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             to_chat: bool = False) -> str:
+             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
+        """Backend.send. With neither root nor reply_to in a thread-first group (a topic group, a group in topic mode)
+        the message opens a topic of its own. mentions [(user id, name)]: real @s (with_mentions)."""
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -2126,6 +2267,7 @@ class LarkXBackend(Backend):
         for v in (reply_to, root):
             if v and not v.isdigit():
                 raise SendRejected("要回复的%s消息 id 不对" % self.region.label)
+        people = self._mention_list(mentions)
         client, _ = self._session()
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
@@ -2135,7 +2277,7 @@ class LarkXBackend(Backend):
             if root and not self._is_dm(client, chat_id):
                 # into the thread on root (LarkAgentX opens it when there is none yet); a thread-first group takes
                 # the reply into the topic without the reply-in-thread mark
-                topic = bool(client.is_thread_chat(chat_id))
+                topic = self._thread_first(client, chat_id)
                 pkt = b.build_send_message_packet(text, chat_id, rid, root_id=root, thread_chat=topic)
                 if to_chat and not topic:
                     # …and into the main stream too, quoting the request, marked the way the request itself was
@@ -2148,6 +2290,10 @@ class LarkXBackend(Backend):
                 pkt = b.build_send_message_packet(text, chat_id, rid, root_id=reply_to or root, thread_chat=True)
             else:
                 pkt = b.build_send_message_packet(text, chat_id, rid)
+                if not self._is_dm(client, chat_id) and self._thread_first(client, chat_id):
+                    pkt = new_topic(pkt)  # a thread-first group takes a new message only as a topic of its own
+            if people:
+                pkt = with_mentions(pkt, text, people)
         except Exception as e:
             raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
         try:
@@ -2161,6 +2307,20 @@ class LarkXBackend(Backend):
         if not msg_id:
             raise BackendError("%s的回答里没有消息 id，不确定是否发出" % self.region.label, "unknown")
         return msg_id
+
+    def _mention_list(self, mentions) -> List[Tuple[str, str]]:
+        """send's mentions checked: [(user id, name)], each person once, at most MENTIONS_MOST (SendRejected else)."""
+        out: List[Tuple[str, str]] = []
+        for m in mentions or ():
+            uid, name = (m[0], m[1]) if isinstance(m, (tuple, list)) and len(m) == 2 else (m, "")
+            uid = _id(uid)
+            if not uid.isdigit():
+                raise SendRejected("要 @ 的%s用户 id 不对" % self.region.label)
+            if uid not in {u for u, _ in out}:
+                out.append((uid, str(name or "").strip()))
+        if len(out) > MENTIONS_MOST:
+            raise SendRejected("一条消息最多 @ %d 个人" % MENTIONS_MOST)
+        return out
 
     def _send_error(self, e: Exception) -> BackendError:
         """What a failed send post means: SendRejected only when nothing can have reached the service."""

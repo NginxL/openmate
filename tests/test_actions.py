@@ -23,7 +23,9 @@ class ToolListTest(unittest.TestCase):
             self.assertTrue(t["description"])
             self.assertEqual(t["input_schema"]["type"], "object")
         send = actions[0]["input_schema"]["properties"]
-        self.assertTrue({"chat", "text", "reply_to"} <= set(send))
+        self.assertTrue({"chat", "text", "reply_to", "at"} <= set(send), "the example backend can @")
+        self.assertIn("at", actions[0]["description"])
+        self.assertIn("开一个新话题", actions[0]["description"])
         with open(os.path.join(ROOT, "extensions", "openmate-feishu", "persona-extension.json"), encoding="utf-8") as f:
             conn = json.load(f)["contributes"]["connectors"][0]
         self.assertEqual(conn["agent_tools"], names)  # every read tool and agent_reply; no write
@@ -225,6 +227,61 @@ class ActionTest(unittest.TestCase):
         again = self.h.c("actions.do", name=CID + "_send_dm", args=args, request_id="req-dm")
         self.assertEqual(res, again)
         self.assertEqual([s["chat"] for s in self.h.sent()], ["chat_example_dm_c"])
+
+    def test_real_mentions_are_on_the_card_and_go_to_the_backend(self):
+        args = {"chat": "chat_example_team", "text": "请 @示例同事甲 看一下，@示例同事乙 也看看",
+                "at": ["user_example_a", "user_example_b", "user_example_a"]}
+        d = self.h.c("actions.describe", name=CID + "_send", args=args)
+        self.assertIn("会 @ 并提醒：示例同事甲（user_example_a）、示例同事乙（user_example_b）", d["summary"])
+        self.assertTrue(d["summary"].endswith(args["text"]), "the text as it will read")
+        self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-at")
+        s = self.h.sent()[-1]
+        self.assertEqual(s["mentions"], [("user_example_a", "示例同事甲"), ("user_example_b", "示例同事乙")])
+        self.assertEqual(s["text"], args["text"])
+        self.h.c("actions.do", name=CID + "_send", args={"chat": "chat_example_team", "text": "没有 @"},
+                 request_id="req-no-at")
+        self.assertEqual(self.h.sent()[-1]["mentions"], [], "none asked: none passed")
+
+    def test_mentions_that_cannot_be_made_are_refused_before_anything(self):
+        base = {"chat": "chat_example_team", "text": "看一下"}
+        many = ["7000%02d" % i for i in range(21)]
+        for i, uid in enumerate(many):
+            self.h.app.store.put_name(uid, "某人%d" % i)
+        for at, words in ((["不是id"], "不是用户 id"), (["9999"], "不认识用户 9999"), ("user_example_a x", "不是用户 id"),
+                          ({"a": 1}, "列表"), ([{"id": 1}], "不是用户 id"), (many, "最多 @ 20 个人")):
+            with self.assertRaises(HubSideError, msg=repr(at)) as e:
+                self.h.c("actions.describe", name=CID + "_send", args=dict(base, at=at))
+            self.assertIn(words, e.exception.message)
+        d = self.h.c("actions.describe", name=CID + "_send", args=dict(base, at=many[:20]))
+        self.assertIn("某人19（700019）", d["summary"], "twenty is fine")
+        self.h.app.backend.can_mention = False  # a platform without @s: never offered, refused when asked
+        try:
+            names = [a["input_schema"]["properties"] for a in self.h.c("actions.list")["tools"]]
+            self.assertNotIn("at", names[0])
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("actions.do", name=CID + "_send", args=dict(base, at=["user_example_a"]), request_id="r-x")
+            self.assertIn("不能 @人", e.exception.message)
+            with self.assertRaises(Exception) as e:
+                self.h.app.send_as_user("chat_example_team", "x", mentions=[("user_example_a", "示例同事甲")])
+            self.assertIn("不能 @人", str(getattr(e.exception, "message", e.exception)))
+        finally:
+            self.h.app.backend.can_mention = True
+        self.assertEqual(self.h.sent(), [])
+
+    def test_the_card_says_a_new_message_opens_a_topic_in_a_topic_group(self):
+        d = self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "新话题"})
+        self.assertNotIn("新话题", d["summary"].split("——")[0], "an ordinary group")
+        with self.h.world.lock:
+            team = self.h.world.chats["chat_example_team"]
+            self.h.world.chats["chat_example_team"] = Chat(id=team.id, kind=team.kind, name=team.name, topic=True,
+                                                           members=team.members)
+        d = self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "新话题"})
+        self.assertIn("在这个话题群里开一个新话题", d["summary"], "as the service says now, not as first stored")
+        root = self.h.world.push("chat_example_team", "user_example_a", "话题开头")
+        wait_until(lambda: self.h.app.store.message("chat_example_team", root.id), what="stored")
+        d = self.h.c("actions.describe", name=CID + "_send",
+                     args={"chat": "chat_example_team", "text": "回答", "reply_to": root.id})
+        self.assertNotIn("开一个新话题", d["summary"], "a reply goes into its topic")
 
     def test_bad_args(self):
         with self.assertRaises(HubSideError):

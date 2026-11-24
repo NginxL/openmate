@@ -151,6 +151,28 @@ out["also_to_chat"] = [lr.chatId, lr.rootId, lr.parentId, lr.isReplyInThread, lr
 pkt = larkagentx.also_to_chat(b.lx.builders.build_send_message_packet("旧标记", "900", "rid", root_id="80"), "83", "send")
 lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
 out["also_to_chat_send"] = [lr.parentId, lr.syncToChat, lr.sendToChat]
+pkt = larkagentx.new_topic(b.lx.builders.build_send_message_packet("新话题", "900", "rid"))
+lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
+pr = P.PutMessageRequest(); pr.ParseFromString(pkt.payload)
+out["new_topic"] = [lr.chatId, lr.rootId, lr.isThreadGroupTopic, lr.isReplyInThread, pr.content.richText.innerText, pkt.cmd]
+text = "请 @张三 看"
+pkt = b.lx.builders.build_send_message_packet(text, "900", "rid", root_id="80", thread_chat=True)
+pkt = larkagentx.with_mentions(pkt, text, [("7001", "张三"), ("7002", "李四")])
+lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
+pr = P.PutMessageRequest(); pr.ParseFromString(pkt.payload)
+rt = lr.content.richText
+els = []
+for k in rt.elementIds:
+    el = rt.elements.dictionary[k]
+    if el.tag == E.AT:
+        ap = E.AtProperty(); ap.ParseFromString(el.property); els.append(["at", ap.userId, ap.content])
+    else:
+        tp = E.TextProperty(); tp.ParseFromString(el.property); els.append(["text", tp.content])
+back = {"elementIds": list(rt.elementIds), "elements": {"dictionary": {k: {"tag": rt.elements.dictionary[k].tag,
+        "property": rt.elements.dictionary[k].property} for k in rt.elementIds}}}
+out["mentions"] = [els, [rt.elements.dictionary[k].tag for k in rt.atIds], list(lr.atUserIdList), rt.innerText,
+                   pr.content.richText.innerText, larkagentx.rich_text(back, b.lx.P), lr.rootId, lr.isReplyInThread,
+                   len(set(rt.elementIds)) == len(rt.elementIds), pkt.cmd]
 cmd, req_cls, resp_cls = gateway.resolve_cmd("messages.DeleteMessageRequest")  # recall (the 渠道's ended questions)
 req = gateway.request_from_dict(req_cls, {"id": "101"})
 out["recall"] = [cmd, [f.name for f in req_cls.DESCRIPTOR.fields], req.id]
@@ -209,6 +231,11 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["also_to_chat"], ["900", "80", "81", True, True, False, "也发到群里", 5],
                          "into the thread, also to the chat, quoting the request")
         self.assertEqual(out["also_to_chat_send"], ["83", False, True])
+        self.assertEqual(out["new_topic"], ["900", "", True, False, "新话题", 5], "a message that opens a topic")
+        self.assertEqual(out["mentions"], [
+            [["at", "7002", "@李四"], ["text", " "], ["text", "请 "], ["at", "7001", "@张三"], ["text", " 看"]],
+            [5, 5], [7001, 7002], "@李四 请 @张三 看", "@李四 请 @张三 看",
+            "@李四 请 @张三 看", "80", False, True, 5], "real @s, read back by LarkAgentX's classes and our own reader")
         self.assertEqual(out["recall"], [9, ["id"], "101"], "the delete-message request: the message's id alone")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
