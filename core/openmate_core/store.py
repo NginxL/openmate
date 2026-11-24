@@ -96,6 +96,9 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS autoreply (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
     # groups the account left or deleted (Backend.on_chat_gone): out of every list until a newer message brings one back
     "CREATE TABLE IF NOT EXISTS gone (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)",
+    # a chat's picture (Chat.avatar: "" when the service said it has none) and when the service was last asked; a
+    # table of its own, so an older version opening the store (a rollback) finds every table as it knew it
+    "CREATE TABLE IF NOT EXISTS avatars (chat_id TEXT PRIMARY KEY, value TEXT NOT NULL, checked REAL NOT NULL)",
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
@@ -338,8 +341,30 @@ class Store:
                      updated = excluded.updated""",
                 (chat.id, chat.kind or "group", chat.name or "", chat.peer_id or "", int(bool(chat.topic)), int(chat.members or 0), int(bool(chat.muted)), now),
             )
+            avatar = getattr(chat, "avatar", None)
+            if avatar is not None:  # the service said (none is "": asked, and known to have none)
+                db.execute("INSERT INTO avatars (chat_id, value, checked) VALUES (?, ?, ?) "
+                           "ON CONFLICT(chat_id) DO UPDATE SET value = excluded.value, checked = excluded.checked",
+                           (chat.id, str(avatar), now))
 
         self._tx(run)
+
+    def set_avatar(self, chat_id: str, value: str, now: Optional[float] = None) -> None:
+        """A chat's picture as the service says it now ("": none), the chat's other fields left as they are."""
+        self._tx(lambda db: db.execute(
+            "INSERT INTO avatars (chat_id, value, checked) VALUES (?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET value = excluded.value, checked = excluded.checked",
+            (str(chat_id), str(value or ""), now or time.time())))
+
+    def avatars(self, ids: Iterable[str]) -> Dict[str, Tuple[str, float]]:
+        """{chat id: (picture, when it was asked)} of those of ids the service was asked about ("": it has none)."""
+        ids = sorted({str(i) for i in ids if i})
+        out: Dict[str, Tuple[str, float]] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            rows = self._all("SELECT chat_id, value, checked FROM avatars WHERE chat_id IN (%s)" % ",".join("?" * len(part)), part)
+            out.update({r["chat_id"]: (r["value"], float(r["checked"])) for r in rows})
+        return out
 
     def people_kinds(self, ids: Iterable[str]) -> Dict[str, str]:
         """{id: "bot" | "user"} of those of ids the service told about."""
@@ -1066,7 +1091,7 @@ class Store:
             runs = [r["id"] for r in db.execute("SELECT id FROM runs").fetchall()]
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
             for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone",
-                          "channel_msgs", "channel_asks"):
+                          "channel_msgs", "channel_asks", "avatars"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             # its history marks, and its name (the next one's is written next, when it has one)

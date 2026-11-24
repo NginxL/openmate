@@ -87,6 +87,9 @@ class FixtureWorld:
         self.send_fail: Optional[str] = None  # "rejected" | "uncertain" for the next send
         self.send_fail_always: Optional[str] = None
         self.images_ok = False  # the backend can send pictures (an /agent reply's image)
+        self.image_threads = False  # …where a text with the same reply_to and root would go (Backend.image_threads)
+        self.avatars_ok = False  # chat_info says a chat's picture (Backend.has_avatars)
+        self.info_asked: List[str] = []  # chat_info's calls, in order
         self.image_fail: Optional[str] = None  # "rejected" | "uncertain" for the next picture
         self.send_delay = 0.0
         self.create_fail = False
@@ -327,8 +330,13 @@ class FixtureBackend(Backend):
                     out.append(Person("group", c.id, c.name, "%d 人" % c.members if c.members else ""))
         return out[:limit]
 
+    @property
+    def has_avatars(self) -> bool:
+        return self.world.avatars_ok
+
     def chat_info(self, chat_id: str) -> Chat:
         with self.world.lock:
+            self.world.info_asked.append(chat_id)
             c = self.world.chats.get(chat_id)
         if c is None:
             raise BackendError("没有这个会话", "not_found")
@@ -481,7 +489,11 @@ class FixtureBackend(Backend):
     def can_send_images(self) -> bool:
         return self.world.images_ok
 
-    def send_image(self, chat_id: str, path: str) -> str:
+    @property
+    def image_threads(self) -> bool:
+        return self.world.image_threads
+
+    def send_image(self, chat_id: str, path: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
         w = self.world
         with w.lock:
             fail, w.image_fail = w.image_fail, None
@@ -493,9 +505,10 @@ class FixtureBackend(Backend):
             raise SendRejected("没有这个会话")
         with open(path, "rb") as f:
             data = f.read()
-        m = w.push(chat_id, "me", "[图片]")
+        m = w.push(chat_id, "me", "[图片]", type="IMAGE")  # its echo comes before its id is known, as Feishu's may
         with w.lock:
-            w.images.append({"chat": chat_id, "path": path, "size": len(data), "id": m.id})
+            w.images.append({"chat": chat_id, "path": path, "size": len(data), "id": m.id, "reply_to": reply_to,
+                             "root": root})
         return m.id
 
     def create_chat(self, user_id: str) -> str:

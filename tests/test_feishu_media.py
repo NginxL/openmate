@@ -6,6 +6,7 @@ try:  # first: every temporary directory of this run in one, removed at its end
     import _runtmp  # noqa: F401
 except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
     pass
+import base64
 import hashlib
 import json
 import os
@@ -16,14 +17,15 @@ from test_agent import agent, ask, started
 
 from openmate_core import views
 from openmate_core.backend import BackendError, Media
+from openmate_core.fixture import tiny_png
 
 DM = "chat_example_dm_a"
 TEAM = "chat_example_team"
 PNG = b"\x89PNG\r\n\x1a\n"
 
 
-def signed(test):
-    h = Harness(test)
+def signed(test, **kw):
+    h = Harness(test, **kw)
     from openmate_feishu import media as fm
 
     old = fm.BASE
@@ -97,6 +99,39 @@ class MediaToolTest(unittest.TestCase):
         # every call fetches again, as the account signed in now; the chat may be named
         self.assertIn(path, h.tool("media", message=row["id"], chat=DM))
         self.assertEqual(len(calls), 2)
+
+    def test_the_picture_itself_goes_to_the_model_when_the_hub_takes_pictures(self):
+        h = signed(self, hub_capabilities=["inbox_group", "tool_images"])
+        row = picture_row(h)
+        out = h.c("tools.call", name=CID + "_media", args={"message": row["id"]})
+        self.assertEqual(len(out["images"]), 1)
+        img = out["images"][0]
+        self.assertEqual(img["mime"], "image/png")
+        self.assertEqual(base64.b64decode(img["data"]), tiny_png(), "the picture's own bytes (within the limits)")
+        self.assertEqual(img["caption"], "消息 id=%s 的图片" % row["id"])
+        self.assertIn("这张图片已经直接附在这条结果里（第 1 张）", out["text"])
+        self.assertIn("本地文件：", out["text"], "the file is still there to read")
+        self.assertNotIn("img:example-1", json.dumps(out), "the ref (its resource key) is not printed")
+
+    def test_without_the_hubs_word_the_text_alone_as_before(self):
+        for caps in (None, ["inbox_group"]):
+            h = signed(self, hub_capabilities=caps)
+            out = h.c("tools.call", name=CID + "_media", args={"message": picture_row(h)["id"]})
+            self.assertNotIn("images", out)
+            self.assertIn("可以直接读这个文件看图", out["text"])
+            self.assertNotIn("直接附在", out["text"])
+
+    def test_a_picture_the_model_cannot_take_is_said_and_its_file_stays(self):
+        h = signed(self, hub_capabilities=["tool_images"])
+        from openmate_core import modelimages
+
+        for name in ("_pillow", "_sips"):
+            self.addCleanup(setattr, modelimages, name, getattr(modelimages, name))
+            setattr(modelimages, name, lambda data, side: None)  # no way to draw it smaller here
+        h.app.backend.media = lambda ref, most: ("image/gif", b"GIF89a" + b"\0" * 32)
+        out = h.c("tools.call", name=CID + "_media", args={"message": picture_row(h)["id"]})
+        self.assertNotIn("images", out)
+        self.assertIn("这张图片没法转成模型能看的格式，可以直接读这个文件看图", out["text"])
 
     def test_each_account_writes_its_own_and_fetches_as_itself(self):
         h = signed(self)

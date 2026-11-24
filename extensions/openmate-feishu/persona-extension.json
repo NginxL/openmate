@@ -36,8 +36,8 @@
         "kind": "im",
         "connector": "matefeishu",
         "bind": "qr",
-        "description": "把你指定的一个飞书会话（扩展设置里的「Persona 渠道会话」）当成你和 Persona 的对话：你在那里说的话都交给 Persona，回答以你的身份回到提问处；Agent 要你回答或批准的问题也发到那里，直接回复就是作答，在 App 里答了会自动撤回。没指定会话时什么都不收也不发。",
-        "capabilities": {"images_in": false, "files_in": false, "voice_in": false, "format": "plain", "max_text": 0,
+        "description": "把你指定的一个飞书会话（扩展设置里的「Persona 渠道会话」）当成你和 Persona 的对话：你在那里说的话都交给 Persona，回答（连同回答里的图片）以你的身份回到提问处；Agent 要你回答或批准的问题也发到那里，直接回复就是作答，在 App 里答了会自动撤回。没指定会话时什么都不收也不发。",
+        "capabilities": {"images_in": false, "images_out": true, "files_in": false, "voice_in": false, "format": "plain", "max_text": 0,
                          "asks": "text", "push": true, "typing": false, "progress": false, "threads": false}
       }
     ],

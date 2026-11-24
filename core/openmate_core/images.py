@@ -104,9 +104,18 @@ def take(path: str, data_dir: str) -> Tuple[str, str, str]:
         os.close(fd)
     if not data or len(data) > IMAGE_MOST:
         raise RPCError("图片文件的大小不对（读的时候还在变？）：%s" % path)
-    ext, _ = kind_of(data[:16])
-    if not ext:
+    if not kind_of(data[:16])[0]:
         raise RPCError("只能发 PNG 或 JPG 图片：%s 不是（SVG 要先渲染成 PNG）" % path)
+    dest, sha = keep(data, data_dir)
+    return dest, sha, os.path.basename(path)[:120]
+
+
+def keep(data: bytes, data_dir: str) -> Tuple[str, str]:
+    """(the copy's path, its SHA-256): a PNG or JPEG of at most IMAGE_MOST (RPCError else) written into the extension's
+    own data, named by its bytes, so what goes out is these checked bytes, the same on a retry."""
+    ext, _ = kind_of(bytes(data or b"")[:16])
+    if not ext or len(data) > IMAGE_MOST:
+        raise RPCError("只能发 %d MB 以内的 PNG 或 JPG 图片" % (IMAGE_MOST >> 20))
     sha = hashlib.sha256(data).hexdigest()
     folder = os.path.join(data_dir or tempfile.gettempdir(), "agent-images")
     os.makedirs(folder, mode=0o700, exist_ok=True)
@@ -126,7 +135,7 @@ def take(path: str, data_dir: str) -> Tuple[str, str, str]:
         except OSError:
             pass
         raise RPCError("图片没能存进扩展的目录（%s）" % (e.strerror or type(e).__name__))
-    return dest, sha, os.path.basename(path)[:120]
+    return dest, sha
 
 
 def _prune(folder: str) -> None:

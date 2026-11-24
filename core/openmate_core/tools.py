@@ -12,7 +12,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from . import views
+from . import modelimages, views
 from .backend import BackendError
 from .textutil import clip, local_stamp, mention_spans, one_line
 from .wire import RPCError
@@ -174,7 +174,14 @@ def call_tool(app, params: dict) -> dict:
     page_tool = _page_tools(app).get(name)
     if page_tool is None:
         raise RPCError("没有这个工具：%s" % name)
-    return {"text": page_tool[1](a)}
+    out = page_tool[1](a)
+    if not isinstance(out, dict):
+        return {"text": out}
+    # a platform tool's pictures for the model (modelimages): only to a hub that takes them, else the text alone
+    answer = {"text": str(out.get("text") or "")}
+    if out.get("images") and modelimages.CAPABILITY in getattr(app, "hub_capabilities", ()):
+        answer["images"] = list(out["images"])
+    return answer
 
 
 def _status(app, a: dict) -> str:

@@ -8,6 +8,7 @@ try:  # first: every temporary directory of this run in one, removed at its end
     import _runtmp  # noqa: F401
 except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
     pass
+import base64
 import json
 import os
 import sys
@@ -16,7 +17,7 @@ import unittest
 
 from harness import CID, ROOT, Harness, HubSideError, fast, wait_until
 from openmate_core.backend import Chat
-from openmate_core.fixture import FixtureWorld
+from openmate_core.fixture import FixtureWorld, tiny_png
 
 sys.path.insert(0, os.path.join(ROOT, "extensions", "openmate-wechat"))
 import openmate_wechat  # noqa: E402
@@ -79,6 +80,98 @@ def line_state(h, mid):
 def send(h, **params):
     params.setdefault("contribution", h.cid)
     return h.hub.request("channel.send", params)
+
+
+def png_b64(size=2):
+    return base64.b64encode(tiny_png(size=size)).decode("ascii")
+
+
+def pictured_channel(test, **kw):
+    """The 渠道 on a backend that sends pictures where a text would go (Feishu's)."""
+    world = FixtureWorld()
+    world.images_ok = world.image_threads = True
+    return channel(test, world=world, **kw)
+
+
+class PicturesOutTest(unittest.TestCase):
+    """images_out (#11986): the pictures of an answer follow its text, where it was asked, each once."""
+
+    def test_feishu_declares_images_out_and_wechat_does_not(self):
+        caps = {ext: manifest(ext)["contributes"]["channel"][0]["capabilities"]
+                for ext in ("openmate-feishu", "openmate-wechat")}
+        self.assertIs(caps["openmate-feishu"].get("images_out"), True)
+        self.assertNotIn("images_out", caps["openmate-wechat"], "WeChat's channel is as it was")
+
+    def test_after_the_text_where_it_was_asked_each_once(self):
+        h = pictured_channel(self)
+        m = say(h, "/agent 画个流程图")
+        received(h)
+        params = dict(ref="run1:0", text="流程图如下。", kind="answer", reply_to=m.id, images=[
+            {"mime": "image/png", "data": png_b64(2)}, {"mime": "image/png", "data": png_b64(3)}])
+        res = send(h, **params)
+        text = [s for s in h.sent() if s["chat"] == SOLO]
+        self.assertEqual(len(text), 1)
+        self.assertEqual(res["message_id"], text[0]["id"], "the text's id")
+        pics = list(h.world.images)
+        self.assertEqual([(p["chat"], p["reply_to"], p["root"]) for p in pics], [(SOLO, m.id, None)] * 2,
+                         "where the text went")
+        self.assertEqual(send(h, **params), res)
+        self.assertEqual((len(h.world.images), len([s for s in h.sent() if s["chat"] == SOLO])), (2, 1), "each once")
+        rec = wait_until(lambda: [r for r in h.hub.sent_records if r.get("setting") == "channel"] if len(
+            [r for r in h.hub.sent_records if r.get("setting") == "channel"]) >= 3 else None, what="the ledger")
+        self.assertEqual(sorted(r["text"] for r in rec)[:2], ["[图片]", "[图片]"])
+        time.sleep(0.2)
+        self.assertEqual(len(h.hub.received), 1, "the pictures' echoes are no request")
+
+    def test_in_a_thread_and_pictures_alone(self):
+        h = pictured_channel(self)
+        root = h.world.push(SOLO, "user_example_a", "这周的事")
+        m = say(h, "/agent 截个图", root_id=root.id, parent_id=root.id, placement="thread")
+        received(h)
+        res = send(h, ref="run2:1", text="", kind="answer", reply_to=m.id, images=[{"mime": "image/png", "data": png_b64()}])
+        self.assertEqual([(p["reply_to"], p["root"]) for p in h.world.images], [(m.id, root.id)])
+        self.assertEqual(res["message_id"], h.world.images[0]["id"])
+        self.assertEqual([s for s in h.sent() if s["chat"] == SOLO and s["text"].strip()], [], "no empty text sent")
+        push = send(h, ref="push1", text="", kind="push", images=[{"mime": "image/png", "data": png_b64()}])
+        self.assertEqual((h.world.images[-1]["reply_to"], h.world.images[-1]["root"]), (None, None), "into the chat")
+        self.assertEqual(push["message_id"], h.world.images[-1]["id"])
+
+    def test_a_refused_picture_goes_again_with_the_ref_and_the_text_does_not(self):
+        h = pictured_channel(self)
+        m = say(h, "/agent 画个图")
+        received(h)
+        params = dict(ref="run3:0", text="图在下面。", kind="answer", reply_to=m.id,
+                      images=[{"mime": "image/png", "data": png_b64()}])
+        h.world.image_fail = "rejected"
+        with self.assertRaises(HubSideError):
+            send(h, **params)
+        self.assertEqual((len(h.world.images), len([s for s in h.sent() if s["chat"] == SOLO])), (0, 1))
+        send(h, **params)
+        self.assertEqual((len(h.world.images), len([s for s in h.sent() if s["chat"] == SOLO])), (1, 1),
+                         "the picture this time, the text not again")
+        h.world.image_fail = "uncertain"
+        params.update(ref="run3:1", images=[{"mime": "image/png", "data": png_b64(4)}])
+        with self.assertRaises(HubSideError):
+            send(h, **params)
+        n = len(h.world.images)
+        with self.assertRaises(HubSideError):
+            send(h, **params)  # an outcome nobody knows: never sent again
+        self.assertEqual(len(h.world.images), n)
+
+    def test_what_is_no_png_or_jpeg_is_left_out_and_without_images_out_nothing_changes(self):
+        h = pictured_channel(self)
+        send(h, ref="p1", text="看图", kind="push", images=[{"mime": "image/gif", "data": base64.b64encode(
+            b"GIF89a" + b"\0" * 20).decode()}, {"mime": "image/png", "data": "不是 base64"}, {"data": png_b64()}])
+        self.assertEqual(len(h.world.images), 1, "only the PNG")
+        h.world.images_ok = False  # a backend that cannot send pictures now: the text alone
+        send(h, ref="p2", text="又一张", kind="push", images=[{"mime": "image/png", "data": png_b64()}])
+        self.assertEqual(len(h.world.images), 1)
+        self.assertEqual(send(h, ref="p3", text="", kind="push", images=[{"mime": "image/png", "data": png_b64()}]), {})
+        w = channel(self, platform=openmate_wechat.platform(), agent_reply_header=" ")
+        w.world.images_ok = True
+        send(w, ref="p4", text="微信", kind="push", images=[{"mime": "image/png", "data": png_b64()}])
+        self.assertEqual(w.world.images, [], "WeChat's channel takes no pictures (no images_out)")
+        self.assertEqual(len([s for s in w.sent() if s["text"].startswith("微信")]), 1)
 
 
 class DeclaredTest(unittest.TestCase):
@@ -458,6 +551,24 @@ class SendTest(unittest.TestCase):
             send(h, ref="x2", text="回答", kind="answer", reply_to=m.id)
         self.assertEqual(e.exception.code, "cannot_send")
         self.assertEqual([s for s in h.sent() if "回答" in s["text"]], [])
+
+    def test_an_answer_only_to_a_line_handed_over_not_to_any_line_of_the_users(self):
+        """larkx 0.2.1 (nwverse/persona-extensions#533): an answer goes only under a request that was handed to
+        Persona, never under any other line of the user's in the chat: not the answers sent there before, not the
+        echo of a tool's send, not a line another AI wrote, not a line not handed over."""
+        h = channel(self)
+        m = say(h, "/agent 帮我查一下")
+        received(h)
+        first = send(h, ref="r0", text="查到了。", kind="answer", reply_to=m.id)["message_id"]
+        tool = h.app.send_as_user(SOLO, "通过工具以你的身份发的一句")
+        ai = say(h, "🤖 AI · Assistant：这是别的 AI 写的")
+        time.sleep(0.3)
+        self.assertEqual(len(h.hub.received), 1, "neither of those was handed over")
+        for i, reply_to in enumerate((first, tool, ai.id)):
+            with self.assertRaises(HubSideError) as e:
+                send(h, ref="g%d" % i, text="回答", kind="answer", reply_to=reply_to)
+            self.assertEqual(e.exception.code, "cannot_send", reply_to)
+        self.assertEqual([s for s in h.sent() if s["text"].startswith("回答")], [])
 
     def test_not_signed_in_cannot_send(self):
         world = FixtureWorld()

@@ -544,8 +544,10 @@ class Harness:
     def __init__(self, test, config: Optional[dict] = None, timing: Optional[Timing] = None,
                  world: Optional[FixtureWorld] = None, http: Optional[FakeHubHTTP] = None, data_dir: Optional[str] = None,
                  secrets: Optional[Dict[str, str]] = None, hub_url: Optional[str] = None, initialize: bool = True,
-                 backend_factory=None, platform=None, env: Optional[Dict[str, str]] = None):
+                 backend_factory=None, platform=None, env: Optional[Dict[str, str]] = None,
+                 hub_capabilities: Optional[List[str]] = None):
         self.test = test
+        self.hub_capabilities = hub_capabilities  # initialize's hub.capabilities (None: an older hub sends none)
         self.platform = platform or openmate_feishu.platform()
         self.cid = self.platform.connector_id
         self.ext = self.platform.extension_id
@@ -603,6 +605,8 @@ class Harness:
             "granted": {},
             "active": {"connectors": [self.cid]},
         }
+        if self.hub_capabilities is not None:
+            params["hub"]["capabilities"] = list(self.hub_capabilities)
         params.update(over)
         res = self.hub.request("initialize", params)
         wait_until(self.app.ready.is_set, what="startup")

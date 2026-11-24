@@ -54,6 +54,8 @@ REF_PREFIX = "lx1"
 CORE_TYPES = {"MEDIA": "VIDEO", "SHARE_GROUP_CHAT": "SHARE_CHAT", "SHARE_USER_CARD": "SHARE_USER"}
 MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
+IMAGE = 5
+IMAGE_MOST = 10 << 20  # a picture sent (the core checks and copies it first: images.take)
 MERGE_FORWARD, CALENDAR, SHARE_CALENDAR_EVENT, GENERAL_CALENDAR = 11, 12, 16, 18
 # message types whose text an older version read poorly: their chats are read again once (core: render_version)
 RENDER_VERSION = "8"  # 7: a text whose content is empty takes the links of its preview hang points; 8: DLP marks
@@ -430,6 +432,29 @@ def also_to_chat(pkt, parent_id: str, mark: str):
     return pkt
 
 
+def as_image(pkt, token: str):
+    """LarkAgentX's text packet (build_send_message_packet, its place already decided: a thread, a topic, a quote)
+    made a picture: type IMAGE, its content only the uploaded picture's cryptoToken (what the web client sends)."""
+    from larkx.proto import lark_all_pb2
+
+    req = lark_all_pb2.messages.PutMessageRequest()
+    req.ParseFromString(pkt.payload)
+    req.type = IMAGE
+    req.ClearField("content")
+    req.content.cryptoToken = str(token)
+    pkt.payload = req.SerializeToString()
+    return pkt
+
+
+def image_token(body: bytes) -> str:
+    """The cryptoToken of the file host's answer to an uploaded picture (pan.PutImageResponse), "" when it has none."""
+    from larkx.proto import lark_all_pb2
+
+    resp = lark_all_pb2.pan.PutImageResponse()
+    resp.ParseFromString(bytes(body or b""))
+    return str(resp.cryptoToken or "").strip()
+
+
 def wire_varints(data: bytes) -> Optional[Dict[int, List[int]]]:
     """The top-level varint fields of a protobuf message, {field number: [values]}; None when it does not read to its
     end (cut off, or not a message)."""
@@ -643,6 +668,30 @@ def sniff_image(data: bytes) -> str:
     return ""
 
 
+_AVATAR_KEY = re.compile(r"[0-9A-Za-z_-]{1,200}")  # fullmatch: Feishu's picture keys (v3_…); nothing else is put in a URL
+
+
+def avatar_address(file_host: str, key: str) -> str:
+    """The https address of a Feishu picture by its key (a person's or a group's, "" for no key): the 240 px one the
+    clients draw. It names that key's bytes for good (a new picture is a new key), and Feishu serves it without the
+    session, so Persona fetches it itself (InboxThing.avatar, an address of the open internet)."""
+    key = str(key or "").strip()
+    host = str(file_host or "").rstrip("/")
+    if not _AVATAR_KEY.fullmatch(key) or not host.startswith("https://"):
+        return ""
+    return "%s/static-resource/v1/%s~?image_size=240x240&cut_type=&quality=&format=image&sticker_format=.webp" % (host, key)
+
+
+def image_key(v) -> str:
+    """The key of an Image or ImageSet the service answered (a chat's avatar, a person's), "" when it names none."""
+    if not isinstance(v, dict):
+        return ""
+    for k in (v.get("key"), v.get("imageKey"), (v.get("origin") or {}).get("key") if isinstance(v.get("origin"), dict) else ""):
+        if k and str(k).strip():
+            return str(k).strip()
+    return ""
+
+
 def media_ref(kind: str, chat_id: str, msg_id: str, key: str) -> str:
     """A ref that names the bytes for good: the message, its resource key, its chat (what the download needs)."""
     return ":".join([REF_PREFIX] + [quote(x, safe="") for x in (kind, chat_id, msg_id, key)])
@@ -668,6 +717,7 @@ class LarkXBackend(Backend):
     rerender_types = RERENDER_TYPES
     rerender_empty = RERENDER_EMPTY
     done_marks = True  # a chat's 完成
+    has_avatars = True  # chat_info's Chat carries the chat's picture (avatar_address)
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
     # timings (tests shorten them)
@@ -691,6 +741,7 @@ class LarkXBackend(Backend):
         self._qr: Dict[str, dict] = {}
         self._chats: Dict[str, Tuple[float, Chat]] = {}
         self._names: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        self._person_avatars: Dict[str, Tuple[float, str]] = {}  # person → (good till, their picture's key or "")
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
@@ -799,6 +850,7 @@ class LarkXBackend(Backend):
                 if self._me is not None and self._me.id != acct.id:
                     self._chats.clear()  # another account: what the one before was told is not this one's
                     self._names.clear()
+                    self._person_avatars.clear()
                     self._peers.clear()
                     self._doc_writer = None
                 self._auth, self._client, self._me, self._creds = auth, client, acct, creds
@@ -940,6 +992,7 @@ class LarkXBackend(Backend):
             self._own = None
             self._qr.clear()
             self._names.clear()
+            self._person_avatars.clear()
             self._chats.clear()
             self._peers.clear()
             self._doc_writer = None
@@ -1997,8 +2050,44 @@ class LarkXBackend(Backend):
         if kind == "dm" and not name and peer:
             name = self.user_name(peer)
         members = _int(info.get("memberCount")) or _int(info.get("userCount"))
+        # the picture: the group's own; a direct chat's is the other person's (the chat's, or else theirs)
+        key: Optional[str] = image_key(info.get("avatar"))
+        if not key and kind == "dm" and peer:
+            key = self._person_avatar(peer)
+        avatar = None if key is None else avatar_address(self.region.file_host, key)
         return Chat(id=chat_id, kind=kind, name=name, peer_id=peer if kind == "dm" else "", topic=topic and kind == "group",
-                    members=members if kind == "group" else 0)
+                    members=members if kind == "group" else 0, avatar=avatar)
+
+    def _person_avatar(self, user_id: str) -> Optional[str]:
+        """The key of a person's picture ("" when they have none), None when the service could not be asked."""
+        user_id = _id(user_id)
+        client, me = self._session()
+        if client is None or not user_id:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            hit = self._person_avatars.get(user_id)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        try:
+            resp = client.api("chatters.PullChattersByIdsRequest", {"chatterIds": [user_id]}) or {}
+        except Exception:
+            return None
+        chatters = resp.get("chatters") if isinstance(resp, dict) else None
+        if not isinstance(chatters, dict):
+            return None
+        c = chatters.get(user_id)
+        if c is None and len(chatters) == 1:  # keyed otherwise: the one answered, unless it says it is someone else
+            only = next(iter(chatters.values()))
+            if isinstance(only, dict) and _id(only.get("id") or user_id) == user_id:
+                c = only
+        if not isinstance(c, dict):
+            return None
+        key = image_key(c.get("avatar")) or image_key(c.get("avatarImage"))
+        with self._lock:
+            if self._still(me):
+                self._person_avatars[user_id] = (now + NAME_TTL, key)
+        return key
 
     def _own_chat(self) -> str:
         """The account's chat with itself, "" when unknown: Feishu's answer to opening a direct chat with oneself (it
@@ -2282,11 +2371,65 @@ class LarkXBackend(Backend):
     #: chats may be thread-first (a topic group, a group in topic mode): Chat.topic says which
     topic_groups = True
 
+    #: send_image: a picture, uploaded to the file host and sent where a text would go (reply_to, root)
+    can_send_images = True
+    image_threads = True
+
+    def send_image(self, chat_id: str, path: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+        """Backend.send_image: the picture at path (a PNG or JPEG the core checked) uploaded as the web client does
+        (the file host's /api/image, with the session's cookies), then sent as an IMAGE message in the place send()
+        gives a text with the same reply_to and root. SendRejected while nothing was sent: an upload that failed sends
+        nothing."""
+        try:
+            with open(path, "rb") as f:
+                data = f.read(IMAGE_MOST + 1)
+        except OSError as e:
+            raise SendRejected("读不到要发的图片（%s）" % (e.strerror or type(e).__name__))
+        if not data or len(data) > IMAGE_MOST:
+            raise SendRejected("图片是空的或超过 %d MB" % (IMAGE_MOST >> 20))
+        mime = sniff_image(data)
+        if mime not in ("image/png", "image/jpeg"):
+            raise SendRejected("只能发 PNG 或 JPEG 图片")
+        client, _ = self._session()
+        if client is None:
+            raise SendRejected("还没有登录%s" % self.region.label)
+        token = self._upload_image(client, data, mime)
+        return self.send(chat_id, "[图片]", reply_to, root, _image=token)
+
+    def _upload_image(self, client, data: bytes, mime: str) -> str:
+        """The cryptoToken of the picture uploaded to the file host (the web client's way: one multipart field
+        "image", the session's cookies); SendRejected when it was not taken (nothing is sent without it)."""
+        auth = client.auth
+        region = auth.region
+        R = self.lx.requests
+        headers = {"origin": region.web_origin, "referer": region.web_origin + "/", "x-source": "web",
+                   "x-appid": str(getattr(auth, "gateway_app_id", "") or ""), "locale": region.locale,
+                   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                                 "Chrome/150.0.0.0 Safari/537.36"}
+        try:
+            r = R.post(region.file_host + "/api/image", files={"image": ("image", data, mime)}, headers=headers,
+                       cookies=auth.cookies, timeout=60)
+        except R.exceptions.RequestException as e:
+            raise SendRejected("上传图片时连不上%s（%s）" % (self.region.label, type(e).__name__))
+        status = _int(getattr(r, "status_code", 0))
+        if status == 401:
+            raise SendRejected("%s登录已失效，图片没有发出" % self.region.label)
+        if status != 200:
+            raise SendRejected("%s没有收下这张图片（HTTP %d）" % (self.region.label, status))
+        try:
+            token = image_token(r.content)
+        except Exception:
+            token = ""
+        if not token:
+            raise SendRejected("%s收下了图片，但回答里没有图片的凭据，图片没有发出" % self.region.label)
+        return token
+
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
+             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None, _image: str = "") -> str:
         """Backend.send. mentions [(user id, name, offset)]: real @s (with_mentions). A group in topic mode
         (topic_mode) takes a reply only into its topic, the thread way, and a new message (a topic of its own) only
-        from a newer client: a new message it refused so goes once more that way (newer_post), and only that one."""
+        from a newer client: a new message it refused so goes once more that way (newer_post), and only that one.
+        _image: an uploaded picture's cryptoToken (send_image): the message is that picture, in the same place."""
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -2308,6 +2451,8 @@ class LarkXBackend(Backend):
                 pkt = b.build_send_message_packet(text, chat_id, rid, root_id=root_id, thread_chat=thread_chat)
             else:
                 pkt = b.build_send_message_packet(text, chat_id, rid)
+            if _image:
+                return as_image(pkt, _image)
             return with_mentions(pkt, text, people) if people else pkt
 
         new_in_group = False  # a new message to a group (one in topic mode takes it from a newer client only)

@@ -2119,5 +2119,106 @@ class CreateTest(Base):
         self.assertEqual(larkagentx.sniff_image(b"plain"), "")
 
 
+# ---------------------------------------------------------------- pictures sent, chats' pictures
+
+
+class _Upload:
+    def __init__(self, status=200, content=b"answer"):
+        self.status_code, self.content = status, content
+
+
+class PictureTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.b = self.signed_in()
+        S.chats.update({"500": {"id": "500", "type": 2, "name": "示例项目群"}, "501": {"id": "501", "type": 1},
+                        "502": {"id": "502", "type": 2, "chatMode": 2}})
+        S.thread_chats.add("502")
+        import requests
+
+        self.requests = requests
+        self.uploads = []
+        self.answer = _Upload()
+
+        def post(url, **kw):
+            self.uploads.append(dict(kw, url=url))
+            if isinstance(self.answer, BaseException):
+                raise self.answer
+            return self.answer
+
+        requests.post = post
+        self.addCleanup(delattr, requests, "post")
+        for name, fake in (("as_image", lambda pkt, token: dict(pkt, image=token)),  # real ones: the smoke test
+                           ("image_token", lambda body: {b"answer": "tok_example"}.get(body, ""))):
+            self.addCleanup(setattr, larkagentx, name, getattr(larkagentx, name))
+            setattr(larkagentx, name, fake)
+        self.png = os.path.join(self.data, "p.png")
+        with open(self.png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+    def test_uploaded_as_the_web_client_does_then_sent_where_a_text_would_go(self):
+        b = self.b
+        self.assertTrue(b.can_send_images and b.image_threads)
+        self.assertEqual(b.send_image("500", self.png), "9001")
+        up = self.uploads[-1]
+        self.assertEqual(up["url"], "https://files.feishu.example/api/image")
+        self.assertEqual(list(up["files"]), ["image"])
+        self.assertEqual(up["files"]["image"][0], "image")
+        self.assertTrue(up["files"]["image"][1].startswith(b"\x89PNG"))
+        self.assertEqual(up["files"]["image"][2], "image/png")
+        self.assertIs(up["cookies"], b._client.auth.cookies, "the session's own cookies")
+        self.assertEqual((up["headers"]["origin"], up["headers"]["x-source"]), ("https://web.feishu.example", "web"))
+        self.assertEqual((S.posts[-1]["image"], S.posts[-1]["root"], S.posts[-1]["reply_in_thread"]),
+                         ("tok_example", "", False), "a picture into the chat")
+        b.send_image("500", self.png, reply_to="90", root="90")
+        self.assertEqual((S.posts[-1]["image"], S.posts[-1]["root"], S.posts[-1]["reply_in_thread"]),
+                         ("tok_example", "90", True), "into the thread, as a text would")
+        b.send_image("502", self.png, reply_to="60", root="60")
+        self.assertEqual((S.posts[-1]["root"], S.posts[-1]["reply_in_thread"]), ("60", False), "a topic group's way")
+
+    def test_nothing_is_sent_when_the_upload_is_not_taken(self):
+        b = self.b
+        for answer, words in ((_Upload(500), "HTTP 500"), (_Upload(401), "登录已失效"), (_Upload(200, b"x"), "凭据"),
+                              (R.ConnectionError("down"), "连不上")):
+            self.answer = answer
+            with self.assertRaises(SendRejected) as e:  # surely not sent: the core may try again
+                b.send_image("500", self.png)
+            self.assertIn(words, e.exception.message)
+        self.assertEqual(S.posts, [], "no message without an uploaded picture")
+        gif = os.path.join(self.data, "p.gif")
+        with open(gif, "wb") as f:
+            f.write(b"GIF89a" + b"\x00" * 16)
+        n = len(self.uploads)
+        for path in (gif, os.path.join(self.data, "missing.png")):
+            with self.assertRaises(SendRejected):
+                b.send_image("500", path)
+        self.assertEqual(len(self.uploads), n, "not uploaded")
+
+    def test_a_groups_picture_and_a_direct_chats_other_persons(self):
+        b = self.b
+        S.chats["510"] = {"id": "510", "type": 2, "name": "有头像的群", "avatar": {"key": "v3_group_example"}}
+        group = b.chat_info("510")
+        self.assertEqual(group.avatar, "https://files.feishu.example/static-resource/v1/v3_group_example~?image_size="
+                                       "240x240&cut_type=&quality=&format=image&sticker_format=.webp")
+        self.assertEqual(b.chat_info("500").avatar, "", "a group without one: asked, it has none")
+        b._peers["501"] = "7003"
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {"7003": {
+            "id": "7003", "name": "示例同事", "avatar": {"key": "v3_person_example", "origin": {"key": "x"}}}}}
+        self.assertIn("/v3_person_example~?", b.chat_info("501").avatar, "the other person's, when the chat has none")
+        asked = len(S.api_calls)
+        b._chats.clear()
+        b.chat_info("501")
+        self.assertEqual(len(S.api_calls), asked, "a person's picture is kept a while")
+
+    def test_a_picture_not_known_says_none_and_a_key_that_is_no_key_is_not_put_in_an_address(self):
+        b = self.b
+        b._peers["501"] = "7003"
+        S.api_answers["chatters.PullChattersByIdsRequest"] = R.ConnectionError("down")
+        self.assertIsNone(b.chat_info("501").avatar, "the service could not be asked: not known (asked again later)")
+        S.chats["511"] = {"id": "511", "type": 2, "name": "怪 key", "avatar": {"key": "../x?y"}}
+        self.assertEqual(b.chat_info("511").avatar, "")
+        self.assertEqual(larkagentx.avatar_address("http://files.example", "v3_x"), "", "https only")
+
+
 if __name__ == "__main__":
     unittest.main()

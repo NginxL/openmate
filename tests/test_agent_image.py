@@ -92,6 +92,22 @@ class SendTest(Pictures):
         self.assertIn("只回复一次", str(e.exception))
         self.assertEqual((len(h.sent()), len(h.world.images)), (n, 1))
 
+    def test_where_the_text_went_when_the_backend_can_place_a_picture(self):
+        from test_agent import agent
+
+        h = agent(self)  # Feishu's: a group's /agent answer goes into the request's thread
+        h.world.images_ok = h.world.image_threads = True
+        msg = ask(h, "/agent 画一下上线流程")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="上线流程见图。", image=self.picture())
+        text = [s for s in h.sent() if s["text"].startswith("上线流程见图。")][-1]
+        self.assertEqual((h.world.images[-1]["reply_to"], h.world.images[-1]["root"]), (text["reply_to"], text["root"]))
+        self.assertEqual(text["reply_to"], msg.id)
+        h.world.image_threads = False  # a backend that cannot (WeChat's): into the chat, as before
+        run2 = running(h, ask(h, "/agent 再画一张"))
+        h.tool("agent_reply", request=run2["id"], text="第二张。", image=self.picture("c.png", PNG + b"c"))
+        self.assertEqual((h.world.images[-1]["reply_to"], h.world.images[-1]["root"]), (None, None))
+
     def test_the_same_answer_again_tells_the_picture_again_without_reading_it(self):
         h = wechat(self)
         h.world.images_ok = True

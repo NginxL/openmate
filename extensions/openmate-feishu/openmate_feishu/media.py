@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Dict, List, Tuple
 
-from openmate_core import views
+from openmate_core import modelimages, views
 from openmate_core.textutil import local_stamp
 from openmate_core.backend import BackendError
 
@@ -61,7 +61,7 @@ def media_tools(app) -> Dict:
     schema = {
         "name": MEDIA_TOOL,
         "description": "看一条飞书消息里的图片或文件（也包括表情、视频、语音）：以现在登录的账号下载到本机临时目录（%d MB 以内），"
-                       "返回本地文件路径、类型和大小，图片可以直接读这个文件看图。消息 id 来自 matefeishu_messages，或 /agent "
+                       "返回本地文件路径、类型和大小；图片会直接附在结果里给你看（Persona 支持时），也可以读这个文件看图。消息 id 来自 matefeishu_messages，或 /agent "
                        "上下文里「看图：matefeishu_media message=…」的提示。下载不了时说明原因（没有图片或文件、已撤回或过期、"
                        "超过大小上限、飞书没登录等），如实转告，不要猜内容。只读，不会发任何消息，也不改飞书里的任何东西；"
                        "不要用 lark-cli 去下载。" % (MEDIA_MOST >> 20),
@@ -71,7 +71,7 @@ def media_tools(app) -> Dict:
             "required": ["message"]},
     }
 
-    def run(a: Dict) -> str:
+    def run(a: Dict):
         from openmate_core.wire import RPCError
 
         try:
@@ -82,7 +82,9 @@ def media_tools(app) -> Dict:
     return {MEDIA_TOOL: (schema, run)}
 
 
-def fetch(app, mid: str, chat_id: str = "") -> str:
+def fetch(app, mid: str, chat_id: str = ""):
+    """The tool's answer: its text, or {"text", "images"} with the pictures themselves for the model when the hub takes
+    them (tool_images): then the model sees each picture without reading its file."""
     store = app.store
     if store is None:
         error = getattr(app, "setup_error", "")
@@ -123,6 +125,7 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
         raise MediaError(head + "\n" + not_ready)
     lines: List[str] = [head]
     got = 0
+    pictures = modelimages.Pictures() if modelimages.CAPABILITY in getattr(app, "hub_capabilities", ()) else None
     for i, m in enumerate(media):
         word = _word(m)
         if not m.get("ref"):
@@ -149,11 +152,29 @@ def fetch(app, mid: str, chat_id: str = "") -> str:
             bits.append("%d×%d" % (int(m["width"]), int(m["height"])))
         name = "「%s」" % str(m["name"])[:120] if m.get("name") else ""
         lines.append("%s%s 本地文件：%s（%s）" % (word, name, path, "，".join(bits)))
-        if mime.startswith("image/"):
-            lines.append("可以直接读这个文件看图（路径在运行飞书扩展的这台电脑上）。")
+        if not mime.startswith("image/"):
+            continue
+        why = ""
+        if pictures is not None:
+            why = pictures.add(_read(path), "消息 id=%s 的%s%s" % (mid, word, (" %d" % (i + 1)) if len(media) > 1 else ""))
+            if not why:
+                lines.append("这张%s已经直接附在这条结果里（第 %d 张），可以直接看。" % (word, len(pictures.images)))
+                continue
+        lines.append("%s可以直接读这个文件看图（路径在运行飞书扩展的这台电脑上）。" % (why + "，" if why else ""))
     if not got:
         raise MediaError("\n".join(lines))
+    if pictures is not None and pictures.images:
+        return {"text": "\n".join(lines), "images": pictures.images}
     return "\n".join(lines)
+
+
+def _read(path: str) -> bytes:
+    """The file just written (this user's own folder), at most MEDIA_MOST."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(MEDIA_MOST + 1)
+    except OSError:
+        return b""
 
 
 def _not_ready(app, account_known: bool) -> str:

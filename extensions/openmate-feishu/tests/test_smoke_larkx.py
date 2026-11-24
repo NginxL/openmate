@@ -206,6 +206,16 @@ out["newer_post"] = [headered, [p.decode() for p in posted], [h.get("x-command-v
 cmd, req_cls, resp_cls = gateway.resolve_cmd("messages.DeleteMessageRequest")  # recall (the 渠道's ended questions)
 req = gateway.request_from_dict(req_cls, {"id": "101"})
 out["recall"] = [cmd, [f.name for f in req_cls.DESCRIPTOR.fields], req.id]
+pkt = larkagentx.as_image(b.lx.builders.build_send_message_packet("[图片]", "900", "rid", root_id="80"), "tok_example")
+lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
+out["as_image"] = [lr.type, lr.content.cryptoToken, lr.content.HasField("richText"), lr.chatId, lr.rootId,
+                   lr.parentId, lr.isReplyInThread, pkt.cmd]
+token_answer = LA.pan.PutImageResponse(); token_answer.cryptoToken = "t" * 300  # a length of two bytes
+out["image_token"] = [larkagentx.image_token(token_answer.SerializeToString()) == "t" * 300,
+                      larkagentx.image_token(b"")]
+group = b._chat_of("910", {"type": 2, "name": "示例群", "avatar": {"key": "v3_example_group", "urls": []}})
+nopic = b._chat_of("911", {"type": 2, "name": "没头像的群"})
+out["avatars"] = [group.avatar, nopic.avatar, larkagentx.avatar_address(b.region.file_host, "bad key/..")]
 files = [f for _, _, fs in os.walk(data) for f in fs]
 out["files"] = files
 from loguru import logger
@@ -269,6 +279,13 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["recall"], [9, ["id"], "101"], "the delete-message request: the message's id alone")
         self.assertEqual(out["newer_post"], [True, ["ok", "ok", "ok"], ["5.7.0", "8.7.11", "5.7.0"], ["3.9.32"], ["5"]],
                          "LarkAgentX's own post, through the headered requests: a newer command version on that post only")
+        self.assertEqual(out["as_image"], [5, "tok_example", False, "900", "80", "80", True, 5],
+                         "a picture in the thread a text would go to: type IMAGE, only the upload's token")
+        self.assertEqual(out["image_token"], [True, ""], "the upload's answer read by its class (a long token too)")
+        self.assertEqual(out["avatars"], [
+            "https://internal-api-lark-file.feishu.cn/static-resource/v1/v3_example_group~?image_size=240x240"
+            "&cut_type=&quality=&format=image&sticker_format=.webp", "", ""],
+            "a group's picture from its record's key; none: \"\" (asked, it has none); a key that is no key: none")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

@@ -160,6 +160,8 @@ class ConnectorApp:
         self.agent: Optional[AgentRunner] = None
         self.channel: Optional[ChannelBridge] = None  # Persona's 渠道 (channel.py), made at the start with the agent
         self.people: Optional[People] = None  # who is a bot (made at the start, with the store)
+        self._avatars_by: Optional[threading.Thread] = None  # the round asking the service for chats' pictures
+        self._avatars_tried: Dict[str, float] = {}  # chat id → when its picture was last asked for (monotonic)
         self._methods = {
             "status": self.m_status,
             "tools.list": lambda p: {"tools": toolmod.read_tools(self)},
@@ -186,6 +188,7 @@ class ConnectorApp:
         self.today_api = None  # todayapi.TodayAPI, for a platform with today_api_callers and a socket from the host
         self.connector_on = True  # initialize's active.connectors names this connector (off: no link, no /agent)
         self.hub_role = "center"  # "member": another hub is primary, the chat-driven work (/agent, 代答) is its own
+        self.hub_capabilities: frozenset = frozenset()  # initialize's hub.capabilities
 
     # ------------------------------------------------------------------ the protocol
 
@@ -260,6 +263,8 @@ class ConnectorApp:
                     # its own is: no "connectors" key is this connector off. Only an older hub sends no active (on).
                     self.connector_on = self.cid in [str(c) for c in active.get("connectors") or []]
                 self.hub_role = str(hub.get("role") or "center")
+                caps = hub.get("capabilities")  # what this hub can do (tool_images: pictures in a tool's answer)
+                self.hub_capabilities = frozenset(str(c) for c in caps) if isinstance(caps, list) else frozenset()
                 self.initialized = True
                 self._start_today_api()  # /health answers from now on: the host checks it as soon as this returns
         out = {"protocol": PROTOCOL, "id": self.manifest["id"], "version": self.manifest["version"]}
@@ -1617,8 +1622,9 @@ class ConnectorApp:
             self.channel.outgoing(chat_id, text, str(mid or ""))  # known by its id from now on
         return mid
 
-    def send_image_as_user(self, chat_id: str, path: str) -> str:
-        """A picture (an /agent reply's, checked and copied by images.take) into the chat as the user."""
+    def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "") -> str:
+        """A picture (checked and copied by images.take) into the chat as the user; where its text went (reply_to,
+        root) when the backend can place a picture so (image_threads), else into the chat."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
         self._not_handing_off()
@@ -1626,9 +1632,19 @@ class ConnectorApp:
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if not getattr(self.backend, "can_send_images", False):
             raise SendRejected("%s这里现在不能发图片" % self.platform.name)
-        mid = self.backend.send_image(chat_id, path)
         if self.channel is not None:
-            self.channel.outgoing(chat_id, "", str(mid or ""))  # its echo in the 渠道's chat is no line of the user's
+            self.channel.outgoing(chat_id, "", picture=True)  # its echo in the 渠道's chat is no line of the user's
+        try:
+            if (reply_to or root) and getattr(self.backend, "image_threads", False):
+                mid = self.backend.send_image(chat_id, path, reply_to=reply_to or None, root=root or None)
+            else:
+                mid = self.backend.send_image(chat_id, path)
+        except SendRejected:
+            if self.channel is not None:
+                self.channel.outgoing(chat_id, "", failed=True, picture=True)  # surely not sent
+            raise
+        if self.channel is not None:
+            self.channel.outgoing(chat_id, "", str(mid or ""), picture=True)  # known by its id from now on
         return mid
 
     # ------------------------------------------------------------------ inbox
@@ -1646,7 +1662,68 @@ class ConnectorApp:
                                       can_reply=self.signed_in)
             if thing is not None:
                 things.append(thing)
+        if things and self.backend is not None and getattr(self.backend, "has_avatars", False):
+            known = self.store.avatars(th["thread"] for th in things)
+            for th in things:
+                value = known.get(th["thread"], ("", 0.0))[0]
+                if value:
+                    th["avatar"] = value
+            now = time.time()
+            self._ask_avatars([th["thread"] for th in things
+                               if th["thread"] not in known or known[th["thread"]][1] < now - t.avatar_ttl])
         return {"things": things}
+
+    def _ask_avatars(self, chat_ids: List[str]) -> None:
+        """Ask the service, in the background, for the pictures of these chats (none, or a day old), each at most once
+        per avatar_retry; when one changed, the Inbox is told (connector.changed) to read the rows again."""
+        t = self.timing
+        now = time.monotonic()
+        with self.lock:
+            if not chat_ids or self._avatars_by is not None or not self.signed_in or self.link != "up":
+                return
+            due = [c for c in chat_ids if self._avatars_tried.get(c, -1e18) <= now - t.avatar_retry][:t.avatar_batch]
+            if not due:
+                return
+            for c in due:
+                self._avatars_tried[c] = now
+            if len(self._avatars_tried) > 4 * t.inbox_most:  # the ones asked about longest ago go first
+                for c, _ in sorted(self._avatars_tried.items(), key=lambda kv: kv[1])[:len(self._avatars_tried) // 2]:
+                    del self._avatars_tried[c]
+            epoch = self.account_epoch()
+            self._avatars_by = threading.Thread(target=self._avatars_round, args=(due, epoch), name="openmate-avatars",
+                                                daemon=True)
+            self._avatars_by.start()
+
+    def _avatars_round(self, due: List[str], epoch: int) -> None:
+        changed = False
+        try:
+            before = self.store.avatars(due)
+            for chat_id in due:
+                if self.closing.is_set() or not self.owns(epoch):
+                    return
+                try:
+                    info = self.backend.chat_info(chat_id)
+                except BackendError as e:
+                    log.info("a chat's picture was not read: %s", e.kind)
+                    continue
+                except Exception:
+                    log.exception("chat_info failed (a chat's picture)")
+                    continue
+                if getattr(info, "avatar", None) is None or info.id != chat_id:
+                    continue
+                with self.owned(epoch) as ok:  # another account's sign-in meanwhile: its store is not written
+                    if not ok:
+                        return
+                    if self.store.get_chat(chat_id) is None:
+                        continue  # (gone meanwhile: nothing to draw it for)
+                    self.store.set_avatar(chat_id, info.avatar)  # only the picture: the rest is the chat's own
+                if info.avatar != before.get(chat_id, ("", 0.0))[0]:
+                    changed = True
+        finally:
+            with self.lock:
+                self._avatars_by = None
+            if changed and self.changed is not None:
+                self.changed.mark("inbox")
 
     def m_inbox_reply(self, params: dict) -> dict:
         if params.get("changes"):
@@ -1756,6 +1833,10 @@ class ConnectorApp:
         }
         if chat.get("members"):
             page["chat"]["members"] = int(chat["members"])
+        if getattr(self.backend, "has_avatars", False):
+            avatar = self.store.avatars([chat_id]).get(chat_id, ("", 0.0))[0]
+            if avatar:
+                page["chat"]["avatar"] = avatar
         if rows and not (len(rows) < limit and at_start):
             page["before"] = str(min(r["position"] for r in rows))
         if epoch != self.account_epoch():

@@ -67,7 +67,9 @@ class Platform:
     #: the extensions (X-Persona-Device "extension:<id>") that may read this one's chats for their 今天 through its own
     #: HTTP (todayapi; the manifest needs runtime.http). Empty: no HTTP at all
     today_api_callers: Tuple[str, ...] = ()
-    #: the platform's own read tools: app → {tool name: (schema, run(arguments) → text)} (WeChat's matewechat_media)
+    #: the platform's own read tools: app → {tool name: (schema, run(arguments) → text)} (WeChat's matewechat_media);
+    #: run may answer {"text", "images"} instead, its pictures for the model (modelimages.Pictures), which go only to a
+    #: hub that takes them (tool_images)
     tools: Optional[Callable[[Any], Dict[str, Any]]] = None
     #: the platform's read tool that fetches a message's pictures and files by its id (Feishu: matefeishu_media). The
     #: chat lines models read (the messages tool, /agent's context) name it after each message that has some; ""
@@ -111,4 +113,7 @@ class Timing:
     channel_retry: Tuple[float, ...] = (2.0, 5.0)  # waits before a line is handed to Persona again (channel.receive)
     channel_unseen: float = 60.0  # a question never seen waiting this long after it was sent is no longer followed
     channel_resolve: float = 600.0  # how long the channel chat named by its name is trusted before it is checked again
+    avatar_ttl: float = 86400.0  # a chat's picture (has_avatars) is asked of the service again when it is this old…
+    avatar_retry: float = 3600.0  # …or this long after asking failed…
+    avatar_batch: int = 30  # …at most this many chats per round, in the background (an Inbox read never waits for it)
     extra: Dict[str, float] = field(default_factory=dict)

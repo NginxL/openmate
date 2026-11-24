@@ -12,6 +12,10 @@ class Region:
     def file_host(self):
         return "https://files.%s" % self.domain
 
+    @property
+    def web_origin(self):
+        return "https://web.%s" % self.domain
+
 
 REGIONS = {"feishu": Region("feishu", "飞书", "feishu.example", "zh_CN"), "lark": Region("lark", "Lark", "lark.example", "en_US")}
 
