@@ -393,13 +393,13 @@ class ActionTest(unittest.TestCase):
                      args={"chat": "chat_example_team", "text": "回答", "reply_to": root.id})
         self.assertNotIn("开一个新话题", d["summary"], "a reply goes into its topic")
         with self.h.world.lock:
-            self.h.world.topic_mode_chats.add("chat_example_team")
-        with self.assertRaises(HubSideError) as e:  # a group in topic mode: refused before the phone is asked
-            self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "新话题"})
-        self.assertIn("只能回复群里已有的话题", e.exception.message)
+            self.h.world.chats["chat_example_team"] = team  # an ordinary group again, as its record says…
+            self.h.world.topic_mode_chats.add("chat_example_team")  # …though the backend learnt it shows topics
+        d = self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "新话题"})
+        self.assertIn("在这个话题群里开一个新话题", d["summary"], "a group in topic mode: a new message opens a topic")
         d = self.h.c("actions.describe", name=CID + "_send",
                      args={"chat": "chat_example_team", "text": "回答", "reply_to": root.id})
-        self.assertIn("回答", d["summary"], "a reply there is fine")
+        self.assertNotIn("开一个新话题", d["summary"], "a reply there goes into its topic")
         with self.h.world.lock:
             self.h.world.topic_mode_chats.discard("chat_example_team")
         backend = self.h.app.backend

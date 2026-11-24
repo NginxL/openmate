@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -854,6 +855,18 @@ class SendTest(Base):
         larkagentx.with_mentions = lambda pkt, text, people: dict(pkt, mentions=list(people))
         self.addCleanup(setattr, larkagentx, "with_mentions", real)
 
+    def as_sent(self, pkt):
+        """A post's answer: sent; it notes which headers it went with (newer_post's)."""
+        pkt["newer"] = dict(getattr(larkagentx._extra_headers, "value", None) or {})
+        return ("id:%d" % (9000 + len(S.posts))).encode()
+
+    def refused(self, code=5801):
+        """A post's answer: refused (refusal), noting which headers it went with."""
+        def answer(pkt):
+            pkt["newer"] = dict(getattr(larkagentx._extra_headers, "value", None) or {})
+            raise self.refusal(code)
+        return answer
+
     def refusal(self, code=5801):
         """Feishu's 400 (its answer: a message, then the code as field 2) as the fake requests raises it."""
         words = b"Unable to send chat messages as message type has been switched to topic."
@@ -865,13 +878,32 @@ class SendTest(Base):
         self.patch_packets()
         S.chats.update({"507": {"id": "507", "type": 2, "chatMode": 1}, "508": {"id": "508", "type": 2, "chatMode": 1},
                         "509": {"id": "509", "type": 2, "chatMode": 1}})
-        # a new message there cannot be posted: said in words, known from then on, never sent again
-        S.post_answers = [self.refusal()]
-        with self.assertRaises(SendRejected) as e:
-            b.send("507", "@张三 新话题", mentions=[("7001", "张三", 0)])
-        self.assertIn("只能回复群里已有的话题", e.exception.message)
-        self.assertEqual(len(S.posts), 1)
+        # a new message there: refused as LarkAgentX's client, once more as a newer one (a topic of its own)
+        S.post_answers = [self.refused(), self.as_sent]
+        self.assertTrue(b.send("507", "@张三 新话题", mentions=[("7001", "张三", 0)]))
+        first, again = S.posts[-2], S.posts[-1]
+        self.assertEqual((first["newer"], again["newer"]), ({}, {"x-command-version": larkagentx.NEWER_COMMAND_VERSION}))
+        self.assertEqual((again["root"], again["reply_in_thread"], again["mentions"]), ("", False, [("7001", "张三", 0)]))
+        self.assertNotEqual(first["request"], again["request"], "a new request id")
         self.assertTrue(b.topic_mode("507"))
+        self.assertEqual(getattr(larkagentx._extra_headers, "value", None), None, "the header is gone after the post")
+        n = len(S.posts)
+        S.post_answers = [self.as_sent]
+        b.send("507", "再开一个")
+        self.assertEqual((len(S.posts), S.posts[-1]["newer"]), (n + 1, {"x-command-version": larkagentx.NEWER_COMMAND_VERSION}),
+                         "known: as a newer client at once")
+        # refused as a newer client too: said in words, never sent a third time
+        S.post_answers = [self.refused()]
+        with self.assertRaises(SendRejected) as e:
+            b.send("507", "还是不行")
+        self.assertIn("要求更新的客户端", e.exception.message)
+        self.assertEqual(len(S.posts), n + 2)
+        S.chats["513"] = {"id": "513", "type": 2, "chatMode": 1}
+        S.post_answers = [self.refusal(), self.refusal()]
+        with self.assertRaises(SendRejected) as e:
+            b.send("513", "两次都被拒")
+        self.assertIn("要求更新的客户端", e.exception.message)
+        self.assertEqual(len(S.posts), n + 4, "the plain one, then the newer one: never a third")
         # a quote there goes into the quoted message's topic, the thread way (once more after the refusal)
         S.post_answers = [self.refusal()]
         self.assertTrue(b.send("508", "@张三 回复", reply_to="61", mentions=[("7001", "张三", 0)]))
@@ -946,12 +978,44 @@ class SendTest(Base):
         self.assertEqual(len(S.posts), 1, "never sent again with the old session")
         self.assertFalse(b.topic_mode("511"))
 
+    def test_newer_post_and_the_headered_requests(self):
+        seen = []
+
+        class Real:
+            exceptions = "the real one's"
+
+            @staticmethod
+            def post(url, headers=None, **kw):
+                seen.append(dict(headers or {}))
+                return "answer"
+
+        module = types.SimpleNamespace(requests=Real)
+        larkagentx._headered(module)
+        larkagentx._headered(module)  # (once: never a proxy of a proxy)
+        self.assertIsInstance(module.requests, larkagentx._HeaderedRequests)
+        self.assertIs(module.requests._real, Real)
+        self.assertEqual(module.requests.exceptions, "the real one's", "all else as requests")
+        client = types.SimpleNamespace(_gateway_post=lambda pkt: module.requests.post(
+            "u", headers={"x-command-version": "5.7.0", "x-web-version": "3.9.32"}))
+        self.assertEqual(client._gateway_post(None), "answer")
+        self.assertEqual(larkagentx.newer_post(client, None), "answer")
+        other = []
+        t = threading.Thread(target=lambda: other.append(client._gateway_post(None)))
+        larkagentx._extra_headers.value = {"x-command-version": "9"}
+        try:
+            t.start()
+            t.join()
+        finally:
+            larkagentx._extra_headers.value = None
+        self.assertEqual([h["x-command-version"] for h in seen],
+                         ["5.7.0", larkagentx.NEWER_COMMAND_VERSION, "5.7.0"], "only this post, only this thread")
+        self.assertEqual({h["x-web-version"] for h in seen}, {"3.9.32"}, "the other headers as LarkAgentX made them")
+
     def test_a_topic_group_keeps_its_own_way(self):
         b = self.b
-        S.post_answers = [self.refusal()]
-        with self.assertRaises(SendRejected):  # (never seen there: a topic group takes a new message as a topic)
-            b.send("502", "新话题")
-        self.assertEqual(len(S.posts), 1, "a new message to a topic group goes plain, once")
+        S.post_answers = [self.as_sent]
+        b.send("502", "新话题")
+        self.assertEqual((len(S.posts), S.posts[-1]["newer"]), (1, {}), "a topic group takes it plain, as before")
         self.assertEqual((S.posts[-1]["root"], S.posts[-1]["reply_in_thread"]), ("", False))
         b.send("502", "回复", reply_to="60", root="60")
         self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("60", False))

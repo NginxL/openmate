@@ -111,7 +111,7 @@ def write_tools(app) -> List[dict]:
                                      "没写到的放在最前面；只在正文里手写 @名字 不会提醒到人" % c}
         what += "要提醒谁就把他放进 at。"
     if getattr(app.backend, "topic_groups", False):
-        what += "话题群里不给 reply_to 会开一个新话题，给 reply_to 就回复到那条所在的话题；开了话题模式的群只能回复已有话题（要给 reply_to）。"
+        what += "话题群和开了话题模式的群里，不给 reply_to 会开一个新话题，给 reply_to 就回复到那条所在的话题。"
     return [
         {"name": c + "_send", "description": what, "input_schema": _obj(send, ["chat", "text"])},
         {"name": c + "_send_dm", "description": "以我的身份私聊一个%s用户（没有私聊会话时先建一个）。每次都要我在手机上确认全文和发给谁。" % p,
@@ -529,8 +529,8 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
 
 
 def _topic_mode(app, chat_id: str) -> bool:
-    """Whether the backend knows the group shows its messages as topics though it is no topic group (no new message
-    can be posted there, only replies into its topics)."""
+    """Whether the backend knows the group shows its messages as topics though its record does not say so (a group
+    switched to topic mode: a new message there opens a topic too)."""
     check = getattr(app.backend, "topic_mode", None)
     try:
         return bool(check(chat_id)) if callable(check) else False
@@ -543,6 +543,8 @@ def _opens_topic(app, chat_id: str) -> bool:
     keeps what a chat was when first seen). Asked only of a backend that has such groups (topic_groups)."""
     if not getattr(app.backend, "topic_groups", False):
         return False
+    if _topic_mode(app, chat_id):
+        return True
     try:
         return bool(app.backend.chat_info(chat_id).topic)
     except Exception:
@@ -560,8 +562,6 @@ def _send_card(app, a: dict) -> tuple:
         text = _check_text(text)
     p = app.platform.name
     chat = app.store.get_chat(chat_id) if app.store is not None else None
-    if not reply_to and (chat or {}).get("kind") != "dm" and _topic_mode(app, chat_id):
-        raise RPCError("这个群的消息以话题形式展示，OpenMate 只能回复群里已有的话题（给 reply_to），开不了新话题")
     me = getattr(app, "account", None)
     ref = "会话 id %s" % chat_id  # beside the name, to check it by
     if chat is None:

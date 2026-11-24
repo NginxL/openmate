@@ -177,6 +177,32 @@ back = {"elementIds": list(rt.elementIds), "elements": {"dictionary": {k: {"tag"
 out["mentions"] = [els, [rt.elements.dictionary[k].tag for k in rt.atIds], list(lr.atUserIdList), rt.innerText,
                    pr.content.richText.innerText, larkagentx.rich_text(back, b.lx.P), lr.rootId, lr.isReplyInThread,
                    len(set(rt.elementIds)) == len(rt.elementIds), pkt.cmd]
+import types
+from larkx import client as lxc
+sent_headers = []
+
+
+class _Answer:
+    content = b"ok"
+
+    def raise_for_status(self):
+        pass
+
+
+headered = isinstance(lxc.requests, larkagentx._HeaderedRequests)  # put in place when the backend loaded LarkAgentX
+real_requests = lxc.requests._real if headered else None
+if headered:
+    lxc.requests._real = types.SimpleNamespace(post=lambda url, headers=None, **kw: sent_headers.append(dict(headers)) or _Answer())
+fake_auth = types.SimpleNamespace(region=types.SimpleNamespace(gateway_url="https://gateway.invalid/", web_origin="https://web.invalid"),
+                                  cookies={}, gateway_app_id="1")
+fake_client = types.SimpleNamespace(auth=fake_auth)
+fake_client._gateway_post = lambda p: lxc.LarkClient._gateway_post(fake_client, p)
+pkt = b.lx.builders.build_send_message_packet("x", "900", "rid")
+posted = [fake_client._gateway_post(pkt), larkagentx.newer_post(fake_client, pkt), fake_client._gateway_post(pkt)]
+if headered:
+    lxc.requests._real = real_requests
+out["newer_post"] = [headered, [p.decode() for p in posted], [h.get("x-command-version") for h in sent_headers],
+                     sorted({h.get("x-web-version") for h in sent_headers}), sorted({h.get("x-command") for h in sent_headers})]
 cmd, req_cls, resp_cls = gateway.resolve_cmd("messages.DeleteMessageRequest")  # recall (the 渠道's ended questions)
 req = gateway.request_from_dict(req_cls, {"id": "101"})
 out["recall"] = [cmd, [f.name for f in req_cls.DESCRIPTOR.fields], req.id]
@@ -241,6 +267,8 @@ class RealLarkAgentXTest(unittest.TestCase):
             [5, 5], [7002, 7001], "@李四 请 @张三 看", "@李四 请 @张三 看",
             "@李四 请 @张三 看", "80", False, True, 5], "real @s, read back by LarkAgentX's classes and our own reader")
         self.assertEqual(out["recall"], [9, ["id"], "101"], "the delete-message request: the message's id alone")
+        self.assertEqual(out["newer_post"], [True, ["ok", "ok", "ok"], ["5.7.0", "8.7.11", "5.7.0"], ["3.9.32"], ["5"]],
+                         "LarkAgentX's own post, through the headered requests: a newer command version on that post only")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

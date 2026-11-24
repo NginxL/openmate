@@ -102,10 +102,15 @@ GROUPS_INFO_MOST = 50  # groups per PullChatsByIdsRequest
 GROUPS_EVERY = 3600.0  # every group is read again this often while the link is up (pushes say the changes between)
 GROUPS_SPACING = 60.0  # and never more often than this
 CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
-MENTIONS_MOST = 20
+MENTIONS_MOST = 20  # people one message @-s at most
 TOPIC_MODE_KEEP = 2000  # groups in topic mode remembered (_topic_mode)…
 TOPIC_MODE_TTL = 3600.0  # …this long (a group may be switched back; a refusal teaches it again)
-TOPIC_REFUSAL = 5801  # the error code of Feishu's refusal of a new message to a group in topic mode  # people one message @-s at most
+TOPIC_REFUSAL = 5801  # the error code of Feishu's refusal of a new message to a group in topic mode
+TOPIC_TOO_OLD = "这个群的消息以话题形式展示，飞书要求更新的客户端才能在里面开新话题，这次没有发出；回复群里已有的话题可以发"
+# A group in topic mode takes a new message (as a topic of its own) only from a client whose x-command-version is
+# newer than the one LarkAgentX names (5.7.0: refused with TOPIC_REFUSAL, "update to the latest version"); the same
+# packet with this one goes through (probed 2026-11-24, Feishu 8.7.x). Only that send carries it (newer_post).
+NEWER_COMMAND_VERSION = "8.7.11"
 CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
 
@@ -158,6 +163,44 @@ def _skip_dotenv() -> None:
     dotenv.load_dotenv = lambda *a, **k: False
 
 
+_extra_headers = threading.local()  # headers this thread's next gateway posts carry (newer_post), else none
+
+
+class _HeaderedRequests:
+    """What LarkAgentX's client module calls `requests`: the requests module itself, except that a post carries the
+    headers the calling thread set (newer_post) over the ones LarkAgentX made. Nothing else changes, and no other
+    module or thread sees it."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def post(self, *args, **kwargs):
+        extra = getattr(_extra_headers, "value", None)
+        if extra:
+            kwargs["headers"] = dict(kwargs.get("headers") or {}, **extra)
+        return self._real.post(*args, **kwargs)
+
+
+def _headered(client_module) -> None:
+    """Put _HeaderedRequests in place of LarkAgentX's client module's requests (once)."""
+    real = getattr(client_module, "requests", None)
+    if real is not None and not isinstance(real, _HeaderedRequests):
+        client_module.requests = _HeaderedRequests(real)
+
+
+def newer_post(client, pkt):
+    """client._gateway_post(pkt) as a newer client: x-command-version NEWER_COMMAND_VERSION on this post only."""
+    old = getattr(_extra_headers, "value", None)
+    _extra_headers.value = {"x-command-version": NEWER_COMMAND_VERSION}
+    try:
+        return client._gateway_post(pkt)
+    finally:
+        _extra_headers.value = old
+
+
 def load_larkx(data_dir: str, region: str) -> types.SimpleNamespace:
     """The parts of LarkAgentX this backend calls, imported in this interpreter."""
     os.environ["LARKX_HOME"] = os.path.join(data_dir, "larkx")
@@ -181,6 +224,7 @@ def load_larkx(data_dir: str, region: str) -> types.SimpleNamespace:
         logger.disable("larkx")
     except ImportError:
         pass
+    _headered(client)
     return types.SimpleNamespace(auth=auth, client=client, media=media, region=region_mod, builders=builders,
                                  decoders=decoders, ids=ids, P=proto_pb2, requests=requests, websockets=websockets)
 
@@ -2240,8 +2284,9 @@ class LarkXBackend(Backend):
 
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
              to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
-        """Backend.send. mentions [(user id, name)]: real @s (with_mentions). A group in topic mode (topic_mode) takes
-        a reply only into its topic, the thread way, and no new message (Feishu asks a newer client for that)."""
+        """Backend.send. mentions [(user id, name, offset)]: real @s (with_mentions). A group in topic mode
+        (topic_mode) takes a reply only into its topic, the thread way, and a new message (a topic of its own) only
+        from a newer client (newer_post): once it refused one so, the message goes once more that way."""
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -2265,7 +2310,8 @@ class LarkXBackend(Backend):
                 pkt = b.build_send_message_packet(text, chat_id, rid)
             return with_mentions(pkt, text, people) if people else pkt
 
-        new_in_group = False  # a new message to a group (none there in topic mode can be posted)
+        new_in_group = False  # a new message to a group (one in topic mode takes it from a newer client only)
+        newer = False  # posted as a newer client (newer_post)
         into_topic = ""  # a quote in a group: the message whose topic it goes into when the group shows topics
         try:
             if root and not self._is_dm(client, chat_id):
@@ -2290,10 +2336,11 @@ class LarkXBackend(Backend):
             else:
                 pkt = build()
                 new_in_group = not self._known_dm(chat_id)  # (known, no request; only a group refuses so anyway)
+                newer = new_in_group and self.topic_mode(chat_id)  # known in topic mode: as a newer client at once
         except Exception as e:
             raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
         try:
-            content = client._gateway_post(pkt)
+            content = newer_post(client, pkt) if newer else client._gateway_post(pkt)
         except Exception as e:
             err = self._send_error(e)
             if not (isinstance(err, SendRejected) and (new_in_group or into_topic) and self._topic_refusal(e)):
@@ -2307,7 +2354,9 @@ class LarkXBackend(Backend):
             # refused (surely not sent) as a group in topic mode refuses a message outside a topic: known from now on
             self._learn_topic_mode(chat_id, "it refused a message outside a topic")
             if new_in_group:
-                raise SendRejected("这个群的消息以话题形式展示，OpenMate 只能回复群里已有的话题，开不了新话题", 400)
+                if newer:  # refused as a newer client too: Feishu wants a newer one still
+                    raise SendRejected(TOPIC_TOO_OLD, 400)
+                return self._new_topic_again(client, chat_id, build)
             try:
                 pkt = build(into_topic, False)  # the quote, once more: into that message's topic, the thread way
             except Exception:
@@ -2323,6 +2372,33 @@ class LarkXBackend(Backend):
                 raise self._send_error(e2)
         try:
             msg_id = _id(b.decode_put_message_response(content))
+        except Exception:
+            raise BackendError("%s收下了这条消息，但回答看不懂，不确定是否发出" % self.region.label, "unknown")
+        if not msg_id:
+            raise BackendError("%s的回答里没有消息 id，不确定是否发出" % self.region.label, "unknown")
+        return msg_id
+
+    def _new_topic_again(self, client, chat_id: str, build) -> str:
+        """A new message a group in topic mode refused (surely not sent), once more as a newer client (a new request
+        id): it opens a topic of its own. Its new message's id; SendRejected when that is refused too."""
+        try:
+            pkt = build()
+        except Exception as e:
+            raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
+        with self._lock:
+            same = self._client is client  # right before it goes: signed out or another account meanwhile, not sent
+        if not same:
+            raise SendRejected("刚换了%s账号，这条没有发出" % self.region.label)
+        log.info("group %s: the new message goes once more as a newer client, a topic of its own", chat_id)
+        try:
+            content = newer_post(client, pkt)
+        except Exception as e:
+            err = self._send_error(e)
+            if isinstance(err, SendRejected) and self._topic_refusal(e):
+                raise SendRejected(TOPIC_TOO_OLD, 400)
+            raise err
+        try:
+            msg_id = _id(self.lx.builders.decode_put_message_response(content))
         except Exception:
             raise BackendError("%s收下了这条消息，但回答看不懂，不确定是否发出" % self.region.label, "unknown")
         if not msg_id:
