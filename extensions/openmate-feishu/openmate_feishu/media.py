@@ -86,6 +86,7 @@ def fetch(app, mid: str, chat_id: str = ""):
     """The tool's answer: its text, or {"text", "images"} with the pictures themselves for the model when the hub takes
     them (tool_images): then the model sees each picture without reading its file."""
     store = app.store
+    epoch = app.account_epoch() if hasattr(app, "account_epoch") else None  # whose these pictures are
     if store is None:
         error = getattr(app, "setup_error", "")
         raise MediaError("飞书扩展有问题：%s" % error if error else "扩展还在启动，请稍后再试")
@@ -133,7 +134,7 @@ def fetch(app, mid: str, chat_id: str = ""):
             continue
         stem = mid if i == 0 else "%s-%d" % (mid, i)
         try:
-            path, mime, size = _fetch_one(folder, stem, m, backend)
+            path, mime, size, data = _fetch_one(folder, stem, m, backend)
         except BackendError as e:
             link = getattr(app, "link", "")
             if e.kind == "expired" and link == "error" and getattr(app, "link_reason", ""):
@@ -156,25 +157,18 @@ def fetch(app, mid: str, chat_id: str = ""):
             continue
         why = ""
         if pictures is not None:
-            why = pictures.add(_read(path), "消息 id=%s 的%s%s" % (mid, word, (" %d" % (i + 1)) if len(media) > 1 else ""))
+            why = pictures.add(data, "消息 id=%s 的%s%s" % (mid, word, (" %d" % (i + 1)) if len(media) > 1 else ""))
             if not why:
                 lines.append("这张%s已经直接附在这条结果里（第 %d 张），可以直接看。" % (word, len(pictures.images)))
                 continue
         lines.append("%s可以直接读这个文件看图（路径在运行飞书扩展的这台电脑上）。" % (why + "，" if why else ""))
     if not got:
         raise MediaError("\n".join(lines))
+    if epoch is not None and app.account_epoch() != epoch:  # another account signed in meanwhile: none of it
+        raise MediaError("刚换了飞书账号，这次取到的内容不再给出，请重新读这条消息。")
     if pictures is not None and pictures.images:
         return {"text": "\n".join(lines), "images": pictures.images}
     return "\n".join(lines)
-
-
-def _read(path: str) -> bytes:
-    """The file just written (this user's own folder), at most MEDIA_MOST."""
-    try:
-        with open(path, "rb") as f:
-            return f.read(MEDIA_MOST + 1)
-    except OSError:
-        return b""
 
 
 def _not_ready(app, account_known: bool) -> str:
@@ -201,8 +195,9 @@ def _folder(app, account: str) -> str:
     return os.path.join(BASE or tempfile.gettempdir(), "%s-%d-%s" % (MEDIA_DIR, os.getuid(), ours), whose)
 
 
-def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]:
-    """(path, mime, size): the media fetched now and written in place of the one written for it before."""
+def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int, bytes]:
+    """(path, mime, size, bytes): the media fetched now and written in place of the one written for it before; the
+    bytes as they came (what the model is shown: never read back from the file, which others may replace)."""
     mime, data = backend.media(str(m["ref"]), MEDIA_MOST)
     data = bytes(data or b"")
     if len(data) > MEDIA_MOST:
@@ -221,7 +216,8 @@ def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int]
         mime = str(m["mime"]).split(";", 1)[0].strip().lower()  # what the message itself said it is
     mime = mime or "application/octet-stream"
     with _WRITING:
-        return _write(folder, stem, m, mime, data)
+        path, mime, size = _write(folder, stem, m, mime, data)
+    return path, mime, size, data
 
 
 def _write(folder: str, stem: str, m: dict, mime: str, data: bytes) -> Tuple[str, str, int]:

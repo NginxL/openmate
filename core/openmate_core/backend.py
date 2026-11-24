@@ -419,8 +419,8 @@ class Backend(abc.ABC):
     #: Whether send_image works now (an /agent reply may carry a picture then; the tool offers it only then)
     can_send_images: bool = False
 
-    #: Whether send_image also takes reply_to and root (the place send gives a text with them: a thread, a quote);
-    #: the core passes them only then
+    #: Whether send_image also takes reply_to, root and to_chat (the place send gives a text with them: a thread, a
+    #: quote, a thread and the chat); the core passes them only then
     image_threads: bool = False
 
     def send_image(self, chat_id: str, path: str) -> str:

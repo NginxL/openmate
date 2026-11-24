@@ -30,8 +30,9 @@ def webp_vp8x(w: int, h: int) -> bytes:
 class ModelImagesTest(unittest.TestCase):
     def setUp(self):
         self.drawn = []
-        for name in ("_pillow", "_sips"):
+        for name in ("_pillow", "_sips", "_pil"):
             self.addCleanup(setattr, mi, name, getattr(mi, name))
+        mi._pil = lambda: None  # no Pillow to check a picture with (the smoke test runs the real one)
         mi._pillow = lambda data, side: self.drawn.append(("pillow", side)) or jpeg_header(side, side // 2)
         mi._sips = lambda data, side: self.drawn.append(("sips", side)) or None
 
@@ -55,6 +56,15 @@ class ModelImagesTest(unittest.TestCase):
             mime, body, pixels = mi.fit(data)
             self.assertEqual((mime, mi.size_of(body), pixels), ("image/jpeg", (1568, 784), 1568 * 784))
             self.assertEqual(self.drawn, [("pillow", 1568)])
+
+    def test_one_that_does_not_decode_whole_is_drawn_again_and_a_huge_one_is_not_drawn(self):
+        self.addCleanup(setattr, mi, "_whole", mi._whole)
+        mi._whole = lambda data: False  # (Pillow says: cut off, several frames, or turned by EXIF)
+        self.assertEqual(mi.fit(tiny_png(size=4))[0], "image/jpeg")
+        self.assertEqual(self.drawn, [("pillow", 1568)])
+        self.drawn.clear()
+        self.assertIsNone(mi.fit(jpeg_header(10000, 5000)), "its raster alone would be hundreds of MB")
+        self.assertEqual(self.drawn, [])
 
     def test_sips_when_pillow_cannot_and_none_when_neither(self):
         mi._pillow = lambda data, side: None

@@ -2200,7 +2200,9 @@ class PictureTest(Base):
         group = b.chat_info("510")
         self.assertEqual(group.avatar, "https://files.feishu.example/static-resource/v1/v3_group_example~?image_size="
                                        "240x240&cut_type=&quality=&format=image&sticker_format=.webp")
-        self.assertEqual(b.chat_info("500").avatar, "", "a group without one: asked, it has none")
+        self.assertIsNone(b.chat_info("500").avatar, "a record without the field says nothing")
+        S.chats["512"] = {"id": "512", "type": 2, "name": "没有头像的群", "avatar": {}}
+        self.assertEqual(b.chat_info("512").avatar, "", "a group without one: asked, it has none")
         b._peers["501"] = "7003"
         S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {"7003": {
             "id": "7003", "name": "示例同事", "avatar": {"key": "v3_person_example", "origin": {"key": "x"}}}}}
@@ -2209,6 +2211,40 @@ class PictureTest(Base):
         b._chats.clear()
         b.chat_info("501")
         self.assertEqual(len(S.api_calls), asked, "a person's picture is kept a while")
+
+    def test_another_accounts_sign_in_during_the_upload_sends_nothing(self):
+        b = self.b
+        answer = self.answer
+
+        def switched(url, **kw):
+            b._client = types.SimpleNamespace(auth=b._client.auth)  # another session took over meanwhile
+            return answer
+
+        self.requests.post = switched
+        with self.assertRaises(SendRejected) as e:
+            b.send_image("500", self.png)
+        self.assertIn("换了", e.exception.message)
+        self.assertEqual(S.posts, [], "the picture is not posted by the session after")
+
+    def test_into_the_thread_and_also_the_chat_as_its_text(self):
+        b = self.b
+        real = larkagentx.also_to_chat
+        larkagentx.also_to_chat = lambda pkt, parent, mark: dict(pkt, parent=parent, mark=mark)  # real: smoke test
+        self.addCleanup(setattr, larkagentx, "also_to_chat", real)
+        b.send_image("500", self.png, reply_to="97", root="90", to_chat=True)
+        self.assertEqual((S.posts[-1]["image"], S.posts[-1]["root"], S.posts[-1]["parent"], S.posts[-1]["mark"]),
+                         ("tok_example", "90", "97", "sync"))
+
+    def test_a_list_row_asks_nothing_and_does_not_unsay_a_known_picture(self):
+        b = self.b
+        b._peers["501"] = "7003"
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {"7003": {"id": "7003", "avatar": {"key": "v3_p"}}}}
+        asked = len(S.api_calls)
+        row = {"id": "501", "type": 1, "name": "示例同事"}  # (named: the name's own lookup is not this test's)
+        self.assertIsNone(b._chat_of("501", row).avatar, "a list's row: not known, not asked")
+        self.assertEqual(S.api_calls[asked:], [], "asked: %r" % (S.api_calls[asked:],))
+        self.assertIn("/v3_p~?", b.chat_info("501").avatar)
+        self.assertIn("/v3_p~?", b._chat_of("501", row).avatar, "known now: taken")
 
     def test_a_picture_not_known_says_none_and_a_key_that_is_no_key_is_not_put_in_an_address(self):
         b = self.b

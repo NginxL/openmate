@@ -2020,6 +2020,10 @@ class LarkXBackend(Backend):
             # only a status: the service did not answer (a chat's own status comes with the chat)
             raise BackendError("飞书暂时没有回答（读取会话信息时）", "unreachable")
         chat = self._chat_of(chat_id, info)
+        if chat.kind == "dm" and chat.avatar is None and chat.peer_id:
+            # a chat's own read: the other person's picture may be asked for (a list's row takes a known one only)
+            key = self._person_avatar(chat.peer_id)
+            chat.avatar = None if key is None else avatar_address(self.region.file_host, key)
         with self._lock:
             if self._still(me) or (me is None and self._client is client):  # still the account it was asked for
                 self._chats[chat_id] = (time.monotonic() + CHAT_TTL, chat)
@@ -2029,6 +2033,8 @@ class LarkXBackend(Backend):
         return info, chat
 
     def _chat_of(self, chat_id: str, info: dict) -> Chat:
+        """Its picture: the record's own; a direct chat without one, the other person's when it is known already
+        (_chat_read asks for it), else not known (avatar None)."""
         dec = self.lx.decoders
         kind = "dm" if dec.enum_to_int(info.get("type")) == CHAT_P2P else "group"
         name = str(info.get("name") or "")
@@ -2050,16 +2056,18 @@ class LarkXBackend(Backend):
         if kind == "dm" and not name and peer:
             name = self.user_name(peer)
         members = _int(info.get("memberCount")) or _int(info.get("userCount"))
-        # the picture: the group's own; a direct chat's is the other person's (the chat's, or else theirs)
-        key: Optional[str] = image_key(info.get("avatar"))
-        if not key and kind == "dm" and peer:
-            key = self._person_avatar(peer)
+        # the picture: the group's own; a direct chat's is the other person's (the chat's, or else theirs). A record
+        # that does not carry the field, or a direct chat whose other person is not known, says nothing (None)
+        key: Optional[str] = image_key(info.get("avatar")) if isinstance(info.get("avatar"), dict) else None
+        if not key and kind == "dm":
+            key = self._person_avatar(peer, ask=False) if peer else None
         avatar = None if key is None else avatar_address(self.region.file_host, key)
         return Chat(id=chat_id, kind=kind, name=name, peer_id=peer if kind == "dm" else "", topic=topic and kind == "group",
                     members=members if kind == "group" else 0, avatar=avatar)
 
-    def _person_avatar(self, user_id: str) -> Optional[str]:
-        """The key of a person's picture ("" when they have none), None when the service could not be asked."""
+    def _person_avatar(self, user_id: str, ask: bool = True) -> Optional[str]:
+        """The key of a person's picture ("" when they have none), None when the service could not be asked (or,
+        without ask, when it is not known already)."""
         user_id = _id(user_id)
         client, me = self._session()
         if client is None or not user_id:
@@ -2069,6 +2077,8 @@ class LarkXBackend(Backend):
             hit = self._person_avatars.get(user_id)
         if hit is not None and hit[0] > now:
             return hit[1]
+        if not ask:
+            return None
         try:
             resp = client.api("chatters.PullChattersByIdsRequest", {"chatterIds": [user_id]}) or {}
         except Exception:
@@ -2375,7 +2385,8 @@ class LarkXBackend(Backend):
     can_send_images = True
     image_threads = True
 
-    def send_image(self, chat_id: str, path: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def send_image(self, chat_id: str, path: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+                   to_chat: bool = False) -> str:
         """Backend.send_image: the picture at path (a PNG or JPEG the core checked) uploaded as the web client does
         (the file host's /api/image, with the session's cookies), then sent as an IMAGE message in the place send()
         gives a text with the same reply_to and root. SendRejected while nothing was sent: an upload that failed sends
@@ -2394,7 +2405,8 @@ class LarkXBackend(Backend):
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
         token = self._upload_image(client, data, mime)
-        return self.send(chat_id, "[图片]", reply_to, root, _image=token)
+        # posted by the session that uploaded it, or not at all (another account's sign-in meanwhile)
+        return self.send(chat_id, "[图片]", reply_to, root, to_chat=to_chat, _image=token, _client=client)
 
     def _upload_image(self, client, data: bytes, mime: str) -> str:
         """The cryptoToken of the picture uploaded to the file host (the web client's way: one multipart field
@@ -2425,11 +2437,13 @@ class LarkXBackend(Backend):
         return token
 
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None, _image: str = "") -> str:
+             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None, _image: str = "",
+             _client=None) -> str:
         """Backend.send. mentions [(user id, name, offset)]: real @s (with_mentions). A group in topic mode
         (topic_mode) takes a reply only into its topic, the thread way, and a new message (a topic of its own) only
         from a newer client: a new message it refused so goes once more that way (newer_post), and only that one.
-        _image: an uploaded picture's cryptoToken (send_image): the message is that picture, in the same place."""
+        _image: an uploaded picture's cryptoToken (send_image): the message is that picture, in the same place, sent
+        only by _client, the session that uploaded it."""
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -2443,6 +2457,8 @@ class LarkXBackend(Backend):
         client, _ = self._session()
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
+        if _client is not None and client is not _client:
+            raise SendRejected("刚换了%s账号，这张图片没有发出" % self.region.label)
         b = self.lx.builders
 
         def build(root_id: str = "", thread_chat: bool = False):
@@ -2482,6 +2498,11 @@ class LarkXBackend(Backend):
                 new_in_group = not self._known_dm(chat_id)  # (known, no request; only a group refuses so anyway)
         except Exception as e:
             raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
+        if _client is not None:
+            with self._lock:
+                same = self._client is client  # right before it goes: the uploading session is still the one
+            if not same:
+                raise SendRejected("刚换了%s账号，这张图片没有发出" % self.region.label)
         try:
             content = client._gateway_post(pkt)
         except Exception as e:

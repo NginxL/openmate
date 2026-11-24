@@ -1622,7 +1622,8 @@ class ConnectorApp:
             self.channel.outgoing(chat_id, text, str(mid or ""))  # known by its id from now on
         return mid
 
-    def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "") -> str:
+    def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "",
+                           to_chat: bool = False) -> str:
         """A picture (checked and copied by images.take) into the chat as the user; where its text went (reply_to,
         root) when the backend can place a picture so (image_threads), else into the chat."""
         if not self.signed_in:
@@ -1633,15 +1634,17 @@ class ConnectorApp:
         if not getattr(self.backend, "can_send_images", False):
             raise SendRejected("%s这里现在不能发图片" % self.platform.name)
         if self.channel is not None:
-            self.channel.outgoing(chat_id, "", picture=True)  # its echo in the 渠道's chat is no line of the user's
+            # its echo in the 渠道's chat (it may come before its id is known) is no line of the user's
+            self.channel.outgoing(chat_id, "", picture=True)
         try:
             if (reply_to or root) and getattr(self.backend, "image_threads", False):
-                mid = self.backend.send_image(chat_id, path, reply_to=reply_to or None, root=root or None)
+                mid = self.backend.send_image(chat_id, path, reply_to=reply_to or None, root=root or None,
+                                              to_chat=bool(to_chat))
             else:
                 mid = self.backend.send_image(chat_id, path)
-        except SendRejected:
+        except BaseException:
             if self.channel is not None:
-                self.channel.outgoing(chat_id, "", failed=True, picture=True)  # surely not sent
+                self.channel.outgoing(chat_id, "", failed=True, picture=True)  # the send is over: no picture stands
             raise
         if self.channel is not None:
             self.channel.outgoing(chat_id, "", str(mid or ""), picture=True)  # known by its id from now on

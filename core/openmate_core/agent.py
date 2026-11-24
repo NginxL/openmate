@@ -2223,7 +2223,7 @@ class AgentRunner:
         def go() -> dict:
             self._still_ours(run)
             w = self._where(run)  # where its text went (a backend that cannot place a picture: into the chat)
-            mid = self.app.send_image_as_user(run["chat_id"], path, w["reply_to"], w["root"])
+            mid = self.app.send_image_as_user(run["chat_id"], path, w["reply_to"], w["root"], w["to_chat"])
             chat = self.store.get_chat(run["chat_id"])
             self.app.record_sent(run["chat_id"], "[图片] %s" % name, str(mid or ""),
                                  session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "",

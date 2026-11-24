@@ -158,6 +158,49 @@ class PicturesOutTest(unittest.TestCase):
             send(h, **params)  # an outcome nobody knows: never sent again
         self.assertEqual(len(h.world.images), n)
 
+    def test_the_rest_of_a_ref_goes_only_to_the_chat_its_first_part_went_to(self):
+        h = pictured_channel(self)
+        h.world.image_fail = "rejected"
+        params = dict(ref="push9", text="报告见图。", kind="push", images=[{"mime": "image/png", "data": png_b64()}])
+        with self.assertRaises(HubSideError):
+            send(h, **params)
+        h.app.channel.setting = TEAM  # the user named another chat meanwhile (a restart with a new setting)
+        with self.assertRaises(HubSideError) as e:
+            send(h, **params)
+        self.assertEqual(e.exception.code, "cannot_send")
+        self.assertEqual(h.world.images, [], "the picture is not sent to another chat than its text's")
+
+    def test_a_ref_never_shares_a_journal_key_and_a_replay_answers_the_same_id(self):
+        h = pictured_channel(self)
+        two = [{"mime": "image/png", "data": png_b64(2)}, {"mime": "image/png", "data": png_b64(3)}]
+        first = send(h, ref="r", text="", kind="push", images=two)
+        self.assertEqual(first["message_id"], h.world.images[0]["id"])
+        self.assertEqual(send(h, ref="r", text="", kind="push", images=two), first, "the same id again")
+        send(h, ref="r:image:0", text="另一条", kind="push")
+        send(h, ref="channel-picture:%s:0:r" % h.cid, text="又一条", kind="push")
+        self.assertEqual(len([s for s in h.sent() if s["text"].startswith(("另一条", "又一条"))]), 2,
+                         "a text whose ref looks like a picture's key still goes")
+
+    def test_nothing_to_send_is_said_and_a_picture_goes_where_its_text_does_also_to_the_chat(self):
+        h = pictured_channel(self)
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="bad", text="", kind="push", images=[{"mime": "image/gif", "data": base64.b64encode(
+                b"GIF89a" + b"\0" * 20).decode()}])
+        self.assertEqual(e.exception.code, "invalid_params")
+        root = h.world.push(SOLO, "user_example_a", "这周的事")
+        m = say(h, "/agent 画个图", root_id=root.id, parent_id=root.id, placement="thread_chat")
+        received(h)
+        send(h, ref="tc", text="图：", kind="answer", reply_to=m.id, images=[{"mime": "image/png", "data": png_b64()}])
+        text = [s for s in h.sent() if s["text"].startswith("图：")][-1]
+        img = h.world.images[-1]
+        self.assertEqual((img["reply_to"], img["root"], img["to_chat"]), (text["reply_to"], text["root"], True))
+
+    def test_a_wechat_picture_marks_nothing(self):
+        w = channel(self, platform=openmate_wechat.platform(), agent_reply_header=" ")
+        w.world.images_ok = True
+        w.app.channel.outgoing(SOLO, "", picture=True)
+        self.assertEqual(w.app.channel._outs, {}, "WeChat's channel sends no pictures: a user's picture is theirs")
+
     def test_what_is_no_png_or_jpeg_is_left_out_and_without_images_out_nothing_changes(self):
         h = pictured_channel(self)
         send(h, ref="p1", text="看图", kind="push", images=[{"mime": "image/gif", "data": base64.b64encode(
@@ -569,6 +612,15 @@ class SendTest(unittest.TestCase):
                 send(h, ref="g%d" % i, text="回答", kind="answer", reply_to=reply_to)
             self.assertEqual(e.exception.code, "cannot_send", reply_to)
         self.assertEqual([s for s in h.sent() if s["text"].startswith("回答")], [])
+
+    def test_no_answer_to_a_line_persona_refused(self):
+        h = channel(self)
+        h.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("invalid_params", "not taken"))
+        m = say(h, "/agent 你好")
+        self.assertEqual(line_state(h, m.id), "failed")
+        with self.assertRaises(HubSideError) as e:
+            send(h, ref="rf", text="回答", kind="answer", reply_to=m.id)
+        self.assertEqual(e.exception.code, "cannot_send")
 
     def test_not_signed_in_cannot_send(self):
         world = FixtureWorld()

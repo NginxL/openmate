@@ -214,8 +214,22 @@ token_answer = LA.pan.PutImageResponse(); token_answer.cryptoToken = "t" * 300  
 out["image_token"] = [larkagentx.image_token(token_answer.SerializeToString()) == "t" * 300,
                       larkagentx.image_token(b"")]
 group = b._chat_of("910", {"type": 2, "name": "示例群", "avatar": {"key": "v3_example_group", "urls": []}})
-nopic = b._chat_of("911", {"type": 2, "name": "没头像的群"})
-out["avatars"] = [group.avatar, nopic.avatar, larkagentx.avatar_address(b.region.file_host, "bad key/..")]
+nopic = b._chat_of("911", {"type": 2, "name": "没头像的群", "avatar": {}})
+unsaid = b._chat_of("912", {"type": 2, "name": "记录里没有这个字段"})
+out["avatars"] = [group.avatar, nopic.avatar, unsaid.avatar, larkagentx.avatar_address(b.region.file_host, "bad key/..")]
+import io
+from PIL import Image
+from openmate_core import modelimages as mi
+def jpeg(w, h, turn=1):
+    buf = io.BytesIO(); im = Image.new("RGB", (w, h), (200, 30, 30)); ex = im.getexif(); ex[0x0112] = turn
+    im.save(buf, "JPEG", exif=ex.tobytes()); return buf.getvalue()
+frames = io.BytesIO()
+Image.new("RGB", (40, 40), (0, 0, 0)).save(frames, "WEBP", save_all=True,
+                                           append_images=[Image.new("RGB", (40, 40), (255, 255, 255))])
+small = jpeg(100, 60)
+out["pictures"] = [mi.fit(small)[1] == small, mi.size_of(mi.fit(jpeg(3000, 1000, turn=6))[1]),
+                   mi.fit(small[:len(small) // 2]), mi.fit(frames.getvalue())[0],
+                   mi.size_of(mi.fit(jpeg(2400, 1200))[1])]
 files = [f for _, _, fs in os.walk(data) for f in fs]
 out["files"] = files
 from loguru import logger
@@ -284,8 +298,12 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["image_token"], [True, ""], "the upload's answer read by its class (a long token too)")
         self.assertEqual(out["avatars"], [
             "https://internal-api-lark-file.feishu.cn/static-resource/v1/v3_example_group~?image_size=240x240"
-            "&cut_type=&quality=&format=image&sticker_format=.webp", "", ""],
-            "a group's picture from its record's key; none: \"\" (asked, it has none); a key that is no key: none")
+            "&cut_type=&quality=&format=image&sticker_format=.webp", "", None, ""],
+            "a group's picture from its record's key; none: \"\" (asked, it has none); a record without the field says"
+            " nothing (None: a known picture stays); a key that is no key: none")
+        self.assertEqual(out["pictures"], [True, [523, 1568], None, "image/jpeg", [1568, 784]],
+                         "with the real Pillow: a whole small one as it is, a phone's portrait upright, a cut-off one"
+                         " left out (the hub would drop it), an animated sticker drawn again, a big one drawn smaller")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

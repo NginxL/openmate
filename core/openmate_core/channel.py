@@ -126,11 +126,14 @@ class ChannelBridge:
         return self.item is not None
 
     @property
+    def declares_images_out(self) -> bool:
+        """The channel declares images_out: channel.send's images are pictures to send after the text."""
+        return bool(((self.item or {}).get("capabilities") or {}).get("images_out"))
+
+    @property
     def images_out(self) -> bool:
-        """The channel declares images_out (channel.send's images are pictures to send after the text) and the
-        backend can send a picture."""
-        caps = (self.item or {}).get("capabilities") or {}
-        return bool(caps.get("images_out")) and bool(getattr(self.app.backend, "can_send_images", False))
+        """It declares images_out and the backend can send a picture now."""
+        return self.declares_images_out and bool(getattr(self.app.backend, "can_send_images", False))
 
     def _pictures(self, given) -> List[bytes]:
         """channel.send's images (only with images_out): each a PNG or JPEG of at most images.IMAGE_MOST, at most
@@ -230,6 +233,8 @@ class ChannelBridge:
         reply_to = str(params.get("reply_to") or "")
         app = self.app
         pictures = self._pictures(params.get("images"))
+        if self.images_out and params.get("images") and not pictures and not text.strip():
+            raise RPCError("channel.send 的图片都不是 PNG 或 JPEG，又没有文字：什么都发不了", "invalid_params")
         # whose it is, taken before anything is looked up (the generation read on both sides of the owner: one moving in
         # between is a switch, and nothing is sent)
         epoch = app.account_epoch()
@@ -246,11 +251,15 @@ class ChannelBridge:
                     return _answer(done["result"])  # the same ref: the same message, sent once
             elif done is not None:  # an outcome nobody knows (it may be in the chat): the journal says so, never again
                 return app.send_once(key, "channel", _never)
+            gone_to = ""  # the chat what of this ref went out already went to: the rest goes there or nowhere
             if pictures:
                 # the text and each picture once each (their own keys): a ref sent again sends only what did not go
-                sent = [app.store.send_get(_picture_key(key, i)) for i in range(len(pictures))]
+                sent = [app.store.send_get(_picture_key(self.id, ref, i)) for i in range(len(pictures))]
                 if all(r is not None and r["state"] == "done" for r in sent) and (done is not None or not text.strip()):
-                    return _answer(done["result"] if done is not None else sent[-1]["result"])
+                    return _answer(done["result"] if done is not None else sent[0]["result"])
+                for r in [done] + sent:
+                    if r is not None and r["state"] == "done" and isinstance(r["result"], dict) and r["result"].get("chat"):
+                        gone_to = str(r["result"]["chat"])
             if moved:
                 raise RPCError("正在换%s账号，这条不再发出" % app.platform.name, "cannot_send")
             bind = key.split("#", 1)[0] if _ASK_REF.match(ref) else key  # every piece of a question: one account
@@ -262,12 +271,14 @@ class ChannelBridge:
                                else "还没有设置「Persona 渠道会话」，或者找不到这个会话", "cannot_send")
             if not app.signed_in or app.link == "expired":
                 raise RPCError("%s还没有登录" % app.platform.name, "cannot_send")
+            if gone_to and gone_to != chat:
+                raise RPCError("这条的一部分已经发到之前的「Persona 渠道会话」，其余的不发到别的会话", "cannot_send")
             if not text.strip() and not pictures:
                 return {}
             where = MAIN
             if reply_to:
                 m = app.store.channel_msg(chat, reply_to)
-                if m is None or m["dir"] != "in" or m["state"] == "dropped":
+                if m is None or m["dir"] != "in" or m["state"] in ("dropped", "failed"):
                     # an answer to a line of another chat (the setting changed), another account's, or one never handed
                     # over (one given up on may have reached Persona all the same: its answer is taken)
                     raise RPCError("这条回复对应的消息不在现在的「Persona 渠道会话」里", "cannot_send")
@@ -279,7 +290,7 @@ class ChannelBridge:
                     self._deliver(chat, key, text, where, "Persona 渠道把%s以你的身份发到" % what, epoch, owner)
                 self._track(epoch, res, ref, kind)
             for i, data in enumerate(pictures):
-                got = self._deliver_picture(chat, _picture_key(key, i), data, where,
+                got = self._deliver_picture(chat, _picture_key(self.id, ref, i), data, where,
                                             "Persona 渠道把%s里的一张图片以你的身份发到" % what, epoch, owner)
                 self._track(epoch, got, ref, "answer" if kind == "ask" else kind)  # (the question is its text)
                 res = res or got
@@ -317,7 +328,7 @@ class ChannelBridge:
             if not app.owns(epoch, owner=owner):
                 raise RPCError("换了%s账号，这张图片不再以你的身份发出" % app.platform.name, "cannot_send")
             at = time.time()
-            mid = app.send_image_as_user(chat, path, where["reply_to"], where["root"])
+            mid = app.send_image_as_user(chat, path, where["reply_to"], where["root"], where["to_chat"])
             app.record_sent(chat, "[图片]", str(mid or ""), reply_to=where["reply_to"], root=where["root"],
                             setting="channel",
                             summary=summary + views.where(app.platform.name, app.store.get_chat(chat), chat))
@@ -353,8 +364,8 @@ class ChannelBridge:
         with its id (known by that from then on; without one the text stands for it a while), or failed (surely not
         sent: the text stands for nothing). picture: a picture, whose echo (a line of type IMAGE, which may come
         before its id is known) a picture being sent stands for."""
-        if not self.declared or chat_id != self.chat():
-            return  # only the channel chat's lines are read as the user's
+        if not self.declared or chat_id != self.chat() or (picture and not self.declares_images_out):
+            return  # only the channel chat's lines are read as the user's (a picture: only where the channel sends some)
         if message_id and self.app.store is not None:  # known by its id first, then the text stands for it no more
             self.app.store.channel_msg_put(chat_id, message_id, "echo", owner=getattr(self.app, "_owner", ""))
         key = (chat_id, PICTURE if picture else (text or "").strip())
@@ -365,8 +376,8 @@ class ChannelBridge:
             sends = self._outs.setdefault(key, [])
             if message_id is None and not failed:
                 sends.append(now)  # one more send of it under way
-            elif (failed or message_id) and sends:
-                sends.pop(0)  # that send is done: known by its id, or surely not sent
+            elif (failed or message_id or picture) and sends:
+                sends.pop(0)  # that send is done: known by its id, or surely not sent (a picture: over, either way)
             if not sends:
                 self._outs.pop(key, None)
 
@@ -732,9 +743,10 @@ class _NoLock:
 _NO_LOCK = _NoLock()
 
 
-def _picture_key(key: str, i: int) -> str:
-    """The send journal's key of a channel.send's i-th picture (its text's is key itself)."""
-    return "%s:image:%d" % (key, i)
+def _picture_key(channel: str, ref: str, i: int) -> str:
+    """The send journal's key of a channel.send's i-th picture: a namespace of its own, apart from every text's
+    ("channel:<id>:<ref>"), whatever the ref is."""
+    return "channel-picture:%s:%d:%s" % (channel, i, ref)
 
 
 def _never() -> dict:

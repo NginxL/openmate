@@ -24,6 +24,8 @@ COUNT_MOST = 16
 TOTAL_MOST = 4 << 20
 PIXELS_MOST = 8_000_000
 SIDE_DRAWN = 1568  # a picture drawn again: what Claude looks at without scaling it down itself (2.5 million pixels)
+INPUT_PIXELS_MOST = 40_000_000  # a picture bigger than this (by its header) is not drawn again here: its raster
+# alone would take hundreds of MB
 TYPES = ("image/jpeg", "image/png", "image/webp")
 
 
@@ -87,16 +89,43 @@ def _within(data: bytes) -> Optional[Tuple[str, Tuple[int, int]]]:
     return kind, size
 
 
-def _pillow(data: bytes, side: int) -> Optional[bytes]:
+def _pil():
     try:
-        from PIL import Image  # the interpreter's own, when it has it (LarkAgentX's has)
+        from PIL import Image, ImageOps  # the interpreter's own, when it has it (LarkAgentX's has)
+        return Image, ImageOps
     except Exception:
         return None
+
+
+def _whole(data: bytes) -> bool:
+    """Whether a picture within the limits goes as it is: with Pillow, only one that decodes in full, has a single
+    frame and no EXIF turn (the hub decodes it in full, and draws what the bytes say); without, its header is all."""
+    pil = _pil()
+    if pil is None:
+        return True
+    try:
+        with pil[0].open(io.BytesIO(data)) as im:
+            if getattr(im, "n_frames", 1) != 1 or im.getexif().get(0x0112, 1) not in (0, 1):
+                return False
+            im.load()
+            return True
+    except Exception:
+        return False
+
+
+def _pillow(data: bytes, side: int) -> Optional[bytes]:
+    pil = _pil()
+    if pil is None:
+        return None
+    Image, ImageOps = pil
     try:
         with Image.open(io.BytesIO(data)) as im:
+            if im.size[0] * im.size[1] > INPUT_PIXELS_MOST:
+                return None
             im.seek(0)  # an animated sticker: its first frame
             im.draft("RGB", (side, side))  # a big JPEG: decoded at a fraction of its size to begin with
-            frame = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P", "PA") else im.convert("RGB")
+            turned = ImageOps.exif_transpose(im) or im  # a phone's portrait photo stays upright
+            frame = turned.convert("RGBA") if turned.mode in ("RGBA", "LA", "P", "PA") else turned.convert("RGB")
             frame.thumbnail((side, side))
             if frame.mode == "RGBA":  # a transparent picture on white, as a chat shows it
                 back = Image.new("RGB", frame.size, (255, 255, 255))
@@ -132,8 +161,11 @@ def fit(data: bytes) -> Optional[Tuple[str, bytes, int]]:
     again smaller; None when it cannot be (not a picture these tools read, or no way to draw it here)."""
     data = bytes(data or b"")
     got = _within(data)
-    if got is not None:
+    if got is not None and _whole(data):
         return got[0], data, got[1][0] * got[1][1]
+    size = size_of(data)
+    if size is not None and size[0] * size[1] > INPUT_PIXELS_MOST:
+        return None
     for side in (SIDE_DRAWN, 1024, 768):
         for draw in (_pillow, _sips):
             out = draw(data, side)

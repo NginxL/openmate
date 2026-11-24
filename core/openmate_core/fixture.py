@@ -493,7 +493,8 @@ class FixtureBackend(Backend):
     def image_threads(self) -> bool:
         return self.world.image_threads
 
-    def send_image(self, chat_id: str, path: str, reply_to: Optional[str] = None, root: Optional[str] = None) -> str:
+    def send_image(self, chat_id: str, path: str, reply_to: Optional[str] = None, root: Optional[str] = None,
+                   to_chat: bool = False) -> str:
         w = self.world
         with w.lock:
             fail, w.image_fail = w.image_fail, None
@@ -508,7 +509,7 @@ class FixtureBackend(Backend):
         m = w.push(chat_id, "me", "[图片]", type="IMAGE")  # its echo comes before its id is known, as Feishu's may
         with w.lock:
             w.images.append({"chat": chat_id, "path": path, "size": len(data), "id": m.id, "reply_to": reply_to,
-                             "root": root})
+                             "root": root, "to_chat": to_chat})
         return m.id
 
     def create_chat(self, user_id: str) -> str:

@@ -133,6 +133,21 @@ class MediaToolTest(unittest.TestCase):
         self.assertNotIn("images", out)
         self.assertIn("这张图片没法转成模型能看的格式，可以直接读这个文件看图", out["text"])
 
+    def test_what_was_fetched_while_another_account_signed_in_is_not_given(self):
+        h = signed(self, hub_capabilities=["tool_images"])
+        real = h.app.backend.media
+
+        def switched(ref, most):
+            got = real(ref, most)
+            with h.app.lock:
+                h.app._account_epoch += 1  # another account's sign-in took the store meanwhile
+            return got
+
+        h.app.backend.media = switched
+        with self.assertRaises(HubSideError) as e:
+            h.c("tools.call", name=CID + "_media", args={"message": picture_row(h)["id"]})
+        self.assertIn("刚换了飞书账号", e.exception.message)
+
     def test_each_account_writes_its_own_and_fetches_as_itself(self):
         h = signed(self)
         row = picture_row(h)
