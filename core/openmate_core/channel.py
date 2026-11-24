@@ -44,7 +44,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from . import views
-from .agent import STOP_WORDS, _where, match_prefix
+from .agent import _where, match_prefix, only_stop
 from .backend import BackendError
 from .hub import HubError
 from .textutil import rfc3339
@@ -335,7 +335,7 @@ class ChannelBridge:
             # words standing for it ("[图片]") are not the user's
             text, unsupported = "", "%s（这个渠道还转交不了，请在 App 里发）" % _KIND_WORDS.get(
                 (row.get("type") or "").upper(), "附件")
-        if text.lower() in STOP_WORDS:
+        if only_stop(row, text):
             if self._stops_old(chat, row, epoch):
                 return True
             text = "/stop"

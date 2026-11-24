@@ -43,7 +43,9 @@ def make_backend(config: Dict, data_dir: str) -> Backend:
     if which == "fixture":
         from openmate_core.fixture import FixtureBackend
 
-        return FixtureBackend()
+        b = FixtureBackend()
+        b.can_mention = b.topic_groups = False  # standing in for WeChat: no @s by id, no topic groups
+        return b
     if which != "native":
         raise BackendError("OPENMATE_BACKEND=%s 不认识：只有 native 和 fixture" % which, "config")
     from .backend import WeChatBackend

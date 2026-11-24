@@ -236,7 +236,9 @@ class ActionTest(unittest.TestCase):
         self.assertTrue(d["summary"].endswith(args["text"]), "the text as it will read")
         self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-at")
         s = self.h.sent()[-1]
-        self.assertEqual(s["mentions"], [("user_example_a", "示例同事甲"), ("user_example_b", "示例同事乙")])
+        self.assertEqual([(u, n) for u, n, _ in s["mentions"]],
+                         [("user_example_a", "示例同事甲"), ("user_example_b", "示例同事乙")])
+        self.assertTrue(all(s["text"].startswith("@" + n, at) for _, n, at in s["mentions"]), "each at its place")
         self.assertEqual(s["text"], args["text"])
         self.h.c("actions.do", name=CID + "_send", args={"chat": "chat_example_team", "text": "没有 @"},
                  request_id="req-no-at")
@@ -283,6 +285,28 @@ class ActionTest(unittest.TestCase):
         res = self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-rr")
         self.assertIn("已发送", res["text"])
         self.assertEqual([s["text"] for s in self.h.sent()], ["被拒后重发"], "really sent, once")
+
+    def test_an_uncertain_request_still_says_so_when_its_names_are_gone(self):
+        args = {"chat": "chat_example_team", "text": "@示例同事甲 看一下", "at": ["user_example_a"]}
+        self.h.world.send_fail = "uncertain"
+        with self.assertRaises(HubSideError):
+            self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-unc")
+        backend = self.h.app.backend
+        real_name, real_store = backend.user_name, self.h.app.store.name
+        backend.user_name = lambda *a, **k: ""
+        self.h.app.store.name = lambda *a, **k: ""
+        try:
+            with self.assertRaises(HubSideError) as e:
+                self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-unc")
+        finally:
+            backend.user_name, self.h.app.store.name = real_name, real_store
+        self.assertIn("不确定", e.exception.message, "the journal speaks first, not the names")
+
+    def test_a_number_id_with_a_leading_zero_is_no_id(self):
+        with self.assertRaises(HubSideError) as e:
+            self.h.c("actions.describe", name=CID + "_send",
+                     args={"chat": "chat_example_team", "text": "x", "at": ["07001"]})
+        self.assertIn("不是用户 id", e.exception.message)
 
     def test_too_many_mentions_are_refused_before_any_name_is_looked_up(self):
         calls = []
@@ -367,10 +391,6 @@ class ActionTest(unittest.TestCase):
         self.assertEqual(self.h.sent(), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FilteredMessagesTest(unittest.TestCase):
     """matefeishu_messages with since / until / query: the reads the assistant used to script with lark-cli loops."""
 
@@ -429,3 +449,19 @@ class FilteredMessagesTest(unittest.TestCase):
         with self.assertRaises(HubSideError) as e:
             self.h.tool("messages", chat="chat_long", since="上周三")
         self.assertIn("时间看不懂", e.exception.message)
+
+
+class OnlyStopTest(unittest.TestCase):
+    def test_a_stop_is_the_whole_content(self):
+        from openmate_core.agent import only_stop
+
+        self.assertTrue(only_stop({}, "/stop"))
+        self.assertTrue(only_stop({"text_after_mentions": "/stop"}, "/stop"))
+        self.assertTrue(only_stop({"text_after_mentions": " /停 "}, "/停"))
+        self.assertFalse(only_stop({"text_after_mentions": "/stop\nSELECT 1"}, "/stop"), "a code block after it")
+        self.assertFalse(only_stop({}, "/stop now"))
+        self.assertFalse(only_stop({"text_after_mentions": "/stop"}, "/agent"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -14,7 +14,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -1555,8 +1554,8 @@ class ConnectorApp:
                 result = send()
             except SendRejected as e:
                 self.store.send_release(key)
-                status = re.search(r"HTTP (\d{3})", e.message or "")  # only a status: a reason may quote the text
-                log.info("a %s send was refused, nothing went out%s", kind, " (HTTP %s)" % status.group(1) if status else "")
+                status = getattr(e, "status", 0)  # only a status: a reason may quote the text
+                log.info("a %s send was refused, nothing went out%s", kind, " (HTTP %d)" % status if status else "")
                 raise RPCError("没有发出去：%s" % e.message)
             except RPCError:
                 self.store.send_release(key)
@@ -1578,8 +1577,9 @@ class ConnectorApp:
             raise SendRejected("正在换%s账号，这条没有发出，请稍后再发" % self.platform.name)
 
     def send_as_user(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-                     to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
-        """mentions [(user id, name)]: real @s, only where the backend can_mention (SendRejected else)."""
+                     to_chat: bool = False, mentions: Optional[List[Tuple[str, str, int]]] = None) -> str:
+        """mentions [(user id, name, offset)] (textutil.mention_spans): real @s, each "@name" at offset in text, only
+        where the backend can_mention (SendRejected else)."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
         self._not_handing_off()

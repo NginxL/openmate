@@ -82,6 +82,16 @@ def ai_marked(text: str, marks) -> bool:
     return any(m and (first.startswith(m) or last.startswith(m)) for m in marks)
 PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
+
+
+def only_stop(row: dict, words: str) -> bool:
+    """Whether words are a stop and the message says nothing more: its whole content after its leading @s, code blocks
+    kept (text_after_mentions, where the backend read one), is the stop alone ("@我 /stop" + a code block is no stop,
+    though the message's text leaves the code out)."""
+    if (words or "").strip().lower() not in STOP_WORDS:
+        return False
+    whole = row.get("text_after_mentions")
+    return whole is None or whole.strip().lower() in STOP_WORDS
 FORWARDED_NOTE = "已转给正在做这件事的 Agent"
 NOTE_RETRY = 60.0  # seconds between tries of a note that surely did not go out
 HELD_NOTE = "；它那台电脑上有个确认还没处理，处理后它才会看到这条"
@@ -504,7 +514,7 @@ class AgentRunner:
             return
         if self._echo(text) or not self.enabled:
             return
-        if body.lower() in STOP_WORDS:
+        if only_stop(row, body):
             self._take_stop(row, epoch)
             return
         req = match_prefix(body, self.prefix)

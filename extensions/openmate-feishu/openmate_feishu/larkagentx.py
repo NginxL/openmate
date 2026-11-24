@@ -37,7 +37,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, DocMention, LoginDone, LoginQR,
                                    Media, Message, Person, SendRejected)
-from openmate_core.textutil import mention_pieces
+from openmate_core.textutil import mention_spans, span_pieces
 
 from . import DLP_BLOCKED_TEXT, launch, pin  # DLP_BLOCKED_TEXT: a blocked message's note (Message.blocked)
 
@@ -400,14 +400,18 @@ def wire_varints(data: bytes) -> Optional[Dict[int, List[int]]]:
             i += 1
             v |= (c & 0x7F) << shift
             if not c & 0x80:
+                if v >> 64:
+                    raise ValueError("over 64 bits")
                 return v
             shift += 7
-        raise ValueError("cut off")
+        raise ValueError("cut off or too long")
 
     try:
         while i < n:
             key = varint()
             field, kind = key >> 3, key & 7
+            if field < 1:
+                return None
             if kind == 0:
                 out.setdefault(field, []).append(varint())
             elif kind == 2:
@@ -434,22 +438,22 @@ def _element_id(taken: Set[str]) -> str:
 
 
 def with_mentions(pkt, text: str, mentions):
-    """LarkAgentX's text packet (build_send_message_packet) with real @s: mentions [(user id, name)] become @ elements
-    of those people (mention_pieces says where), and the request lists who is @-ed (atUserIdList), so Feishu tells
-    them. The rest of the text stays as it was written."""
+    """LarkAgentX's text packet (build_send_message_packet) with real @s: mentions [(user id, name, offset)], each
+    "@name" at offset in text, become @ elements of those people, and the request lists who is @-ed (atUserIdList),
+    so Feishu tells them. The rest of the text stays as it was written."""
     from larkx.proto import lark_all_pb2
 
     E = lark_all_pb2.entities.RichTextElement
     req = lark_all_pb2.messages.PutMessageRequest()
     req.ParseFromString(pkt.payload)
-    names = {uid: name for uid, name in mentions}
+    names = {uid: name for uid, name, _ in mentions}
     rich = req.content.richText
     del rich.elementIds[:]
     del rich.atIds[:]
     rich.elements.dictionary.clear()
     taken: Set[str] = set()
     words: List[str] = []
-    for kind, value in mention_pieces(text, mentions):  # (the core's: the text there writes every mention)
+    for kind, value in span_pieces(text, mentions):
         eid = _element_id(taken)
         el = rich.elements.dictionary[eid]
         if kind == "at":
@@ -464,7 +468,7 @@ def with_mentions(pkt, text: str, mentions):
         rich.elementIds.append(eid)
     rich.innerText = "".join(words)
     del req.atUserIdList[:]
-    for uid in names:
+    for uid in dict.fromkeys(uid for uid, _, _ in mentions):
         req.atUserIdList.append(int(uid))
     pkt.payload = req.SerializeToString()
     return pkt
@@ -2247,7 +2251,7 @@ class LarkXBackend(Backend):
         for v in (reply_to, root):
             if v and not v.isdigit():
                 raise SendRejected("要回复的%s消息 id 不对" % self.region.label)
-        people = self._mention_list(mentions)
+        text, people = self._mention_list(text, mentions)
         client, _ = self._session()
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
@@ -2301,10 +2305,14 @@ class LarkXBackend(Backend):
             # refused (surely not sent) as a group in topic mode refuses a message outside a topic: known from now on
             self._learn_topic_mode(chat_id, "it refused a message outside a topic")
             if new_in_group:
-                raise SendRejected("这个群的消息以话题形式展示，OpenMate 只能回复群里已有的话题，开不了新话题")
+                raise SendRejected("这个群的消息以话题形式展示，OpenMate 只能回复群里已有的话题，开不了新话题", 400)
             try:
                 pkt = build(into_topic, False)  # the quote, once more: into that message's topic, the thread way
             except Exception:
+                raise err
+            with self._lock:
+                same = self._client is client  # (again, right before it goes: the packet took a moment)
+            if not same:
                 raise err
             log.info("group %s: the quote goes into the topic instead", chat_id)
             try:
@@ -2319,19 +2327,32 @@ class LarkXBackend(Backend):
             raise BackendError("%s的回答里没有消息 id，不确定是否发出" % self.region.label, "unknown")
         return msg_id
 
-    def _mention_list(self, mentions) -> List[Tuple[str, str]]:
-        """send's mentions checked: [(user id, name)], each person once, at most MENTIONS_MOST (SendRejected else)."""
-        out: List[Tuple[str, str]] = []
+    def _mention_list(self, text: str, mentions) -> Tuple[str, List[Tuple[str, str, int]]]:
+        """send's text and mentions checked: [(user id, name, offset)] where the text writes "@name" at offset (the
+        core's, mention_spans), or [(user id, name)] placed here the same way; each user id canonical, at most
+        MENTIONS_MOST people (SendRejected else)."""
+        spans: List[Tuple[str, str, int]] = []
+        pairs: List[Tuple[str, str]] = []
         for m in mentions or ():
-            uid, name = (m[0], m[1]) if isinstance(m, (tuple, list)) and len(m) == 2 else (m, "")
-            uid = _id(uid)
-            if not uid.isdigit():
+            if not isinstance(m, (tuple, list)) or len(m) not in (2, 3):
+                raise SendRejected("要 @ 的人不对")
+            uid, name = _id(m[0]), str(m[1] or "").strip()
+            if not uid.isdigit() or str(int(uid)) != uid:
                 raise SendRejected("要 @ 的%s用户 id 不对" % self.region.label)
-            if uid not in {u for u, _ in out}:
-                out.append((uid, str(name or "").strip()))
-        if len(out) > MENTIONS_MOST:
+            if len(m) == 3:
+                at = m[2]
+                if not isinstance(at, int) or at < 0 or not name or not text.startswith("@" + name, at):
+                    raise SendRejected("要 @ 的人在正文里的位置不对")
+                spans.append((uid, name, at))
+            elif uid not in {u for u, _ in pairs}:
+                pairs.append((uid, name))
+        if pairs:
+            if spans:
+                raise SendRejected("要 @ 的人不对")
+            text, spans = mention_spans(text, pairs)
+        if len({uid for uid, _, _ in spans}) > MENTIONS_MOST:
             raise SendRejected("一条消息最多 @ %d 个人" % MENTIONS_MOST)
-        return out
+        return text, spans
 
     def _topic_refusal(self, e: Exception) -> bool:
         """Whether a refused post is Feishu's refusal of a message outside a topic in a group in topic mode (HTTP 400
@@ -2363,7 +2384,7 @@ class LarkXBackend(Backend):
         if isinstance(e, R.HTTPError):
             status = _int(getattr(getattr(e, "response", None), "status_code", 0))
             if 400 <= status < 500:
-                return SendRejected("%s拒绝了这条消息（HTTP %d）" % (label, status))
+                return SendRejected("%s拒绝了这条消息（HTTP %d）" % (label, status), status)
             return BackendError("%s出错了（HTTP %d），不确定消息是否发出" % (label, status), "unknown")
         return BackendError("发送时和%s的连接出错，不确定消息是否发出" % label, "unreachable")
 

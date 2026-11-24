@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from . import views
 from .backend import BackendError
-from .textutil import clip, local_stamp, one_line, with_mention_names
+from .textutil import clip, local_stamp, mention_spans, one_line
 from .wire import RPCError
 
 log = logging.getLogger("openmate.tools")
@@ -502,7 +502,7 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
     ids: List[str] = []
     for v in raw:
         uid = str(v or "").strip() if isinstance(v, (str, int)) else ""
-        if not _USER_ID.fullmatch(uid):
+        if not _USER_ID.fullmatch(uid) or (uid.isdigit() and str(int(uid)) != uid):  # "07001" is no other id
             raise RPCError("at 里的 %r 不是用户 id（先用 %s_search 查）" % (str(v)[:40], app.cid))
         if uid not in ids:
             ids.append(uid)
@@ -554,8 +554,10 @@ def _send_card(app, a: dict) -> tuple:
     text = _check_text(_need(a, "text", "消息内容"))
     reply_to = str(a.get("reply_to") or "").strip()
     mentions = _mentions(app, a, chat_id)
+    spans: List[tuple] = []
     if mentions:  # the text as it will read: one not written goes in front (the card, the send and its echo agree)
-        text = _check_text(with_mention_names(text, mentions))
+        text, spans = mention_spans(text, mentions)
+        text = _check_text(text)
     p = app.platform.name
     chat = app.store.get_chat(chat_id) if app.store is not None else None
     if not reply_to and (chat or {}).get("kind") != "dm" and _topic_mode(app, chat_id):
@@ -602,7 +604,7 @@ def _send_card(app, a: dict) -> tuple:
     if mentions:
         lines.append("会 @ 并提醒：" + "、".join("%s（%s）" % (n, u) for u, n in mentions))
     lines += ["——", text]
-    return chat_id, text, reply_to, visible, "\n".join(lines), mentions
+    return chat_id, text, reply_to, visible, "\n".join(lines), spans
 
 
 def _dm_card(app, a: dict) -> tuple:
@@ -646,17 +648,15 @@ def do(app, params: dict) -> dict:
             raise RPCError("刚换了%s账号，没有发出：请在新账号下重新操作" % p)
 
     if name == c + "_send":
-        earlier = app.store.send_get(key)
-        if earlier is not None and earlier["state"] == "done":
-            return _result(earlier["result"])  # went out before: its result, no card made again (names may be gone)
-        chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
-        root = None
-        if reply_to:
-            quoted = app.store.message(chat_id, reply_to)
-            if quoted is not None and quoted.get("root_id"):
-                root = quoted["root_id"]
-
         def send():
+            # the card's reading inside the journal's claim: a request seen before answers from the journal first
+            # (went out, or may have), whatever its names read now; a card that cannot be made frees the request id
+            chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
+            root = None
+            if reply_to:
+                quoted = app.store.message(chat_id, reply_to)
+                if quoted is not None and quoted.get("root_id"):
+                    root = quoted["root_id"]
             as_asked()
             mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None)
             return {"text": "已发送到%s" % visible, "message_ref": mid}

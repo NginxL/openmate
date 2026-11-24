@@ -766,8 +766,15 @@ class SwitchTest(Base):
 
 
 class ThreadFirstAndMentionsTest(unittest.TestCase):
+    def test_wire_varints(self):
+        V = larkagentx.wire_varints
+        self.assertEqual(V(b"\x10\xa9\x2d"), {2: [5801]})
+        for bad in (b"\x00\x00\x10\xa9\x2d", b"\x10" + b"\xff" * 10 + b"\x01", b"\x10\xa9", b"\x0a\x05ab"):
+            self.assertIsNone(V(bad), bad)
+
     def test_mention_pieces(self):
-        P = larkagentx.mention_pieces
+        from openmate_core.textutil import mention_pieces as P, mention_spans, span_pieces
+
         self.assertEqual(P("请 @张三 看，@李四 也看", [("1", "张三"), ("2", "李四")]),
                          [("text", "请 "), ("at", "1"), ("text", " 看，"), ("at", "2"), ("text", " 也看")])
         self.assertEqual(P("请看一下", [("1", "张三"), ("2", "李四")]),
@@ -781,6 +788,12 @@ class ThreadFirstAndMentionsTest(unittest.TestCase):
         self.assertEqual(P("@张三 @张三", [("1", "张三")]), [("at", "1"), ("text", " @张三")], "the first place only")
         self.assertEqual(P("See @Annette and @Ann", [("1", "Ann"), ("2", "Annette")]),
                          [("text", "See "), ("at", "2"), ("text", " and "), ("at", "1")], "the longest name at a place")
+        self.assertEqual(P("@Annette, @Annette, @Ann", [("2", "Annette"), ("1", "Ann")]),
+                         [("at", "2"), ("text", ", @Annette, "), ("at", "1")], "never Ann's + 'ette'")
+        text, spans = mention_spans("Lee asked @Ann Lee to reply", [("1", "Ann"), ("2", "Ann Lee")])
+        self.assertEqual((text, spans), ("@Ann Lee asked @Ann Lee to reply", [("1", "Ann", 0), ("2", "Ann Lee", 15)]))
+        self.assertEqual(span_pieces(text, spans), [("at", "1"), ("text", " Lee asked "), ("at", "2"), ("text", " to reply")],
+                         "built from the places, never searched again (no swap)")
         self.assertEqual(P("x", [("1", "")]), [("at", "1"), ("text", " "), ("text", "x")], "no name: in front")
 
 
@@ -851,16 +864,16 @@ class SendTest(Base):
         # a new message there cannot be posted: said in words, known from then on, never sent again
         S.post_answers = [self.refusal()]
         with self.assertRaises(SendRejected) as e:
-            b.send("507", "新话题", mentions=[("7001", "张三")])
+            b.send("507", "@张三 新话题", mentions=[("7001", "张三", 0)])
         self.assertIn("只能回复群里已有的话题", e.exception.message)
         self.assertEqual(len(S.posts), 1)
         self.assertTrue(b.topic_mode("507"))
         # a quote there goes into the quoted message's topic, the thread way (once more after the refusal)
         S.post_answers = [self.refusal()]
-        self.assertTrue(b.send("508", "回复", reply_to="61", mentions=[("7001", "张三")]))
+        self.assertTrue(b.send("508", "@张三 回复", reply_to="61", mentions=[("7001", "张三", 0)]))
         first, again = S.posts[-2], S.posts[-1]
         self.assertEqual((first["root"], first["reply_in_thread"]), ("61", False), "a quote, as before")
-        self.assertEqual((again["root"], again["reply_in_thread"], again["mentions"]), ("61", True, [("7001", "张三")]))
+        self.assertEqual((again["root"], again["reply_in_thread"], again["mentions"]), ("61", True, [("7001", "张三", 0)]))
         self.assertNotEqual(first["request"], again["request"], "a new request id")
         self.assertTrue(b.topic_mode("508"))
         n = len(S.posts)
@@ -935,14 +948,18 @@ class SendTest(Base):
         b = self.b
         self.patch_packets()
         b.send("500", "请 @张三 看", mentions=[("7001", "张三"), ["7002", "李四"], ("7001", "张三")])
-        self.assertEqual(self.last()["mentions"], [("7001", "张三"), ("7002", "李四")], "each person once")
-        self.assertEqual(self.last()["text"], "请 @张三 看", "the text itself as written")
+        self.assertEqual(self.last()["mentions"], [("7002", "李四", 0), ("7001", "张三", 6)], "each person once")
+        self.assertEqual(self.last()["text"], "@李四 请 @张三 看", "one not written: in front")
+        b.send("500", "请 @张三 看", mentions=[("7001", "张三", 2)])
+        self.assertEqual((self.last()["text"], self.last()["mentions"]), ("请 @张三 看", [("7001", "张三", 2)]),
+                         "the core's places: taken as they are, the text untouched")
         b.send("500", "没有 @")
         self.assertNotIn("mentions", self.last())
         b.send("502", "话题群里 @张三", mentions=[("7001", "张三")])
-        self.assertEqual(self.last()["mentions"], [("7001", "张三")], "a new topic with an @")
+        self.assertEqual(self.last()["mentions"], [("7001", "张三", 5)], "a new topic with an @")
         n = len(S.posts)
-        for bad in ([("not-a-user", "某人")], [("7%03d" % i, "人") for i in range(21)]):
+        for bad in ([("not-a-user", "某人")], [("7%03d" % i, "人") for i in range(21)], [("07001", "张三")],
+                    [("7001", "张三", 0)], [("7001", "张三", 99)], [("7001", "张三", 2), ("7002", "李四")], ["7001"]):
             with self.assertRaises(SendRejected):
                 b.send("500", "x", mentions=bad)
         self.assertEqual(len(S.posts), n, "refused before anything went out")

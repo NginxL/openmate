@@ -154,9 +154,10 @@ out["also_to_chat_send"] = [lr.parentId, lr.syncToChat, lr.sendToChat]
 docs = {"elementIds": ["d"], "elements": {"dictionary": {"d": {"tag": 22, "property": b"", "childIds": ["p"]},
         "p": {"tag": 3, "property": b"", "childIds": ["t"]}, "t": {"tag": 1, "property": tp.SerializeToString()}}}}
 out["docs_block"] = [larkagentx.rich_text(docs, b.lx.P), larkagentx.rich_after_mentions(docs, b.lx.P)]
-text = "请 @张三 看"
+from openmate_core.textutil import mention_spans
+text, spans = mention_spans("请 @张三 看", [("7001", "张三"), ("7002", "李四")])
 pkt = b.lx.builders.build_send_message_packet(text, "900", "rid", root_id="80", thread_chat=True)
-pkt = larkagentx.with_mentions(pkt, text, [("7001", "张三"), ("7002", "李四")])
+pkt = larkagentx.with_mentions(pkt, text, spans)
 lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
 pr = P.PutMessageRequest(); pr.ParseFromString(pkt.payload)
 rt = lr.content.richText
@@ -232,8 +233,8 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["also_to_chat_send"], ["83", False, True])
         self.assertEqual(out["docs_block"], [" /stop", "/stop"], "a DOCS block is no document: no [文档] in front")
         self.assertEqual(out["mentions"], [
-            [["at", "7002", "@李四"], ["text", " "], ["text", "请 "], ["at", "7001", "@张三"], ["text", " 看"]],
-            [5, 5], [7001, 7002], "@李四 请 @张三 看", "@李四 请 @张三 看",
+            [["at", "7002", "@李四"], ["text", " 请 "], ["at", "7001", "@张三"], ["text", " 看"]],
+            [5, 5], [7002, 7001], "@李四 请 @张三 看", "@李四 请 @张三 看",
             "@李四 请 @张三 看", "80", False, True, 5], "real @s, read back by LarkAgentX's classes and our own reader")
         self.assertEqual(out["recall"], [9, ["id"], "101"], "the delete-message request: the message's id alone")
         self.assertEqual(out["files"], [], "nothing written to the data directory")

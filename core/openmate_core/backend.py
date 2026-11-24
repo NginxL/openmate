@@ -175,8 +175,9 @@ class SendRejected(BackendError):
     """A send that certainly did not go out (refused before anything was transmitted, or refused by the service). Any
     other exception from send() is taken as "it may have gone out", and the core will never send it again."""
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, status: int = 0):
         super().__init__(message, "rejected")
+        self.status = status  # the service's HTTP status when it refused (0: none), for the log
 
 
 # ---- the interface ----
@@ -393,8 +394,8 @@ class Backend(abc.ABC):
         root: the thread to post in (reply_to == root with no thread yet: open a thread on that message). to_chat:
         into root's thread and also into the chat's main stream, quoting reply_to (the core passes it only when true,
         and only for a message the backend read as "thread_chat"). A backend with can_mention also takes mentions
-        [(user id, name)]: real @s of those people (the core passes it only when there are some). Raise SendRejected
-        only when it surely did not go out."""
+        [(user id, name, offset)]: real @s of those people, each "@name" at offset in text (textutil.mention_spans;
+        the core passes it only when there are some). Raise SendRejected only when it surely did not go out."""
 
     #: Whether send takes mentions (real @s that tell those people); the send tool offers them only then
     can_mention: bool = False
