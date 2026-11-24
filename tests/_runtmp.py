@@ -5,8 +5,8 @@ imports this first, the extensions' tests through their own _runtmp.py.
 
 Without it, a run started straight left its directories in $TMPDIR: on 2026-11-24 a few such runs left 317 of them
 (and 62 empty media folders, one per test data directory). Like scripts/test.sh, the directory goes under the first
-of $TMPDIR ($TEMP, $TMP), /tmp and /var/tmp that is an absolute path of at most 60 bytes where it can be made (some
-tests bind Unix sockets in their temporary directories, and macOS caps socket paths at 104 bytes). The environment's TMPDIR points there too, so the
+of $TMPDIR, /tmp and /var/tmp that is an absolute path of at most 60 bytes where it can be made (some tests bind
+Unix sockets in their temporary directories, and macOS caps socket paths at 104 bytes), else Python's own default. The environment's TMPDIR points there too, so the
 programs the tests start use it as well. A run killed outright (SIGKILL) still leaves it behind."""
 
 import atexit
@@ -18,8 +18,7 @@ ENV = "OPENMATE_TEST_TMP"
 
 
 def _bases():
-    for name in ("TMPDIR", "TEMP", "TMP"):
-        yield os.environ.get(name) or ""
+    yield os.environ.get("TMPDIR") or ""  # (as scripts/test.sh: TEMP and TMP are no candidates)
     yield "/tmp"
     yield "/var/tmp"
 
@@ -59,7 +58,11 @@ def _setup() -> None:
             pass
         break
     if not run:
-        return  # nowhere to make one: as before
+        try:
+            run = tempfile.mkdtemp(prefix="om.")  # none of those: Python's own temporary directory
+        except OSError:
+            return  # nowhere to make one: as before
+    run = os.path.realpath(run)  # removed by what it is, whatever a link on the way points at later
     os.environ[ENV] = run
     os.environ["TMPDIR"] = run
     tempfile.tempdir = run
