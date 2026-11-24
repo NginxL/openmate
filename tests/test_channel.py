@@ -195,11 +195,25 @@ class PicturesOutTest(unittest.TestCase):
         img = h.world.images[-1]
         self.assertEqual((img["reply_to"], img["root"], img["to_chat"]), (text["reply_to"], text["root"], True))
 
-    def test_a_wechat_picture_marks_nothing(self):
+    def test_a_wechat_picture_marks_nothing_but_its_id_as_before(self):
         w = channel(self, platform=openmate_wechat.platform(), agent_reply_header=" ")
         w.world.images_ok = True
         w.app.channel.outgoing(SOLO, "", picture=True)
         self.assertEqual(w.app.channel._outs, {}, "WeChat's channel sends no pictures: a user's picture is theirs")
+        w.app.channel.outgoing(SOLO, "", "msg_example_pic", picture=True)
+        self.assertEqual(w.app.store.channel_msg(SOLO, "msg_example_pic")["dir"], "echo", "known by its id, as before")
+
+    def test_a_push_in_a_topic_group_keeps_its_pictures_in_its_topic(self):
+        h = pictured_channel(self)
+        h.app.store.upsert_chat(Chat(SOLO, "group", SOLO_NAME, topic=True, members=1))
+        send(h, ref="tp", text="日报见图。", kind="push", images=[{"mime": "image/png", "data": png_b64()}])
+        text = [s for s in h.sent() if s["text"].startswith("日报见图。")][-1]
+        self.assertEqual((text["reply_to"], text["root"]), (None, None), "the text opens the topic")
+        self.assertEqual((h.world.images[-1]["reply_to"], h.world.images[-1]["root"]), (text["id"], text["id"]))
+        send(h, ref="tp2", text="", kind="push", images=[{"mime": "image/png", "data": png_b64(2)},
+                                                          {"mime": "image/png", "data": png_b64(3)}])
+        first, second = h.world.images[-2:]
+        self.assertEqual((first["root"], second["root"]), (None, first["id"]), "pictures alone: in the first's topic")
 
     def test_what_is_no_png_or_jpeg_is_left_out_and_without_images_out_nothing_changes(self):
         h = pictured_channel(self)
@@ -612,15 +626,6 @@ class SendTest(unittest.TestCase):
                 send(h, ref="g%d" % i, text="回答", kind="answer", reply_to=reply_to)
             self.assertEqual(e.exception.code, "cannot_send", reply_to)
         self.assertEqual([s for s in h.sent() if s["text"].startswith("回答")], [])
-
-    def test_no_answer_to_a_line_persona_refused(self):
-        h = channel(self)
-        h.hub.receive_answer = lambda p: (_ for _ in ()).throw(HubSideError("invalid_params", "not taken"))
-        m = say(h, "/agent 你好")
-        self.assertEqual(line_state(h, m.id), "failed")
-        with self.assertRaises(HubSideError) as e:
-            send(h, ref="rf", text="回答", kind="answer", reply_to=m.id)
-        self.assertEqual(e.exception.code, "cannot_send")
 
     def test_not_signed_in_cannot_send(self):
         world = FixtureWorld()

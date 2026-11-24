@@ -1642,9 +1642,9 @@ class ConnectorApp:
                                               to_chat=bool(to_chat))
             else:
                 mid = self.backend.send_image(chat_id, path)
-        except BaseException:
+        except SendRejected:
             if self.channel is not None:
-                self.channel.outgoing(chat_id, "", failed=True, picture=True)  # the send is over: no picture stands
+                self.channel.outgoing(chat_id, "", failed=True, picture=True)  # surely not sent: no picture stands
             raise
         if self.channel is not None:
             self.channel.outgoing(chat_id, "", str(mid or ""), picture=True)  # known by its id from now on
@@ -1837,9 +1837,11 @@ class ConnectorApp:
         if chat.get("members"):
             page["chat"]["members"] = int(chat["members"])
         if getattr(self.backend, "has_avatars", False):
-            avatar = self.store.avatars([chat_id]).get(chat_id, ("", 0.0))[0]
-            if avatar:
-                page["chat"]["avatar"] = avatar
+            known = self.store.avatars([chat_id]).get(chat_id)
+            if known is not None and known[0]:
+                page["chat"]["avatar"] = known[0]
+            if known is None or known[1] < time.time() - self.timing.avatar_ttl:
+                self._ask_avatars([chat_id])  # (a chat outside the Inbox's days too: in the background)
         if rows and not (len(rows) < limit and at_start):
             page["before"] = str(min(r["position"] for r in rows))
         if epoch != self.account_epoch():

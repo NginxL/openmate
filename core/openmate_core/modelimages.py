@@ -97,6 +97,18 @@ def _pil():
         return None
 
 
+def _pil_size(data: bytes) -> Optional[Tuple[int, int]]:
+    """(width, height) as Pillow reads them from the header (a GIF, a TIFF…), None without Pillow or when it cannot."""
+    pil = _pil()
+    if pil is None:
+        return None
+    try:
+        with pil[0].open(io.BytesIO(data)) as im:
+            return im.size
+    except Exception:
+        return None
+
+
 def _whole(data: bytes) -> bool:
     """Whether a picture within the limits goes as it is: with Pillow, only one that decodes in full, has a single
     frame and no EXIF turn (the hub decodes it in full, and draws what the bytes say); without, its header is all."""
@@ -163,7 +175,7 @@ def fit(data: bytes) -> Optional[Tuple[str, bytes, int]]:
     got = _within(data)
     if got is not None and _whole(data):
         return got[0], data, got[1][0] * got[1][1]
-    size = size_of(data)
+    size = size_of(data) or _pil_size(data)
     if size is not None and size[0] * size[1] > INPUT_PIXELS_MOST:
         return None
     for side in (SIDE_DRAWN, 1024, 768):

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import logging
 import re
 import threading
@@ -254,7 +255,7 @@ class ChannelBridge:
             gone_to = ""  # the chat what of this ref went out already went to: the rest goes there or nowhere
             if pictures:
                 # the text and each picture once each (their own keys): a ref sent again sends only what did not go
-                sent = [app.store.send_get(_picture_key(self.id, ref, i)) for i in range(len(pictures))]
+                sent = [app.store.send_get(_picture_key(self.id, ref, data)) for data in pictures]
                 if all(r is not None and r["state"] == "done" for r in sent) and (done is not None or not text.strip()):
                     return _answer(done["result"] if done is not None else sent[0]["result"])
                 for r in [done] + sent:
@@ -278,7 +279,7 @@ class ChannelBridge:
             where = MAIN
             if reply_to:
                 m = app.store.channel_msg(chat, reply_to)
-                if m is None or m["dir"] != "in" or m["state"] in ("dropped", "failed"):
+                if m is None or m["dir"] != "in" or m["state"] == "dropped":
                     # an answer to a line of another chat (the setting changed), another account's, or one never handed
                     # over (one given up on may have reached Persona all the same: its answer is taken)
                     raise RPCError("这条回复对应的消息不在现在的「Persona 渠道会话」里", "cannot_send")
@@ -289,8 +290,10 @@ class ChannelBridge:
                 res = done["result"] if done is not None else \
                     self._deliver(chat, key, text, where, "Persona 渠道把%s以你的身份发到" % what, epoch, owner)
                 self._track(epoch, res, ref, kind)
-            for i, data in enumerate(pictures):
-                got = self._deliver_picture(chat, _picture_key(self.id, ref, i), data, where,
+            for data in pictures:
+                if where == MAIN and res and res.get("message_ref"):
+                    where = self._under(chat, str(res["message_ref"]))  # a topic group: in the first part's topic
+                got = self._deliver_picture(chat, _picture_key(self.id, ref, data), data, where,
                                             "Persona 渠道把%s里的一张图片以你的身份发到" % what, epoch, owner)
                 self._track(epoch, got, ref, "answer" if kind == "ask" else kind)  # (the question is its text)
                 res = res or got
@@ -316,6 +319,17 @@ class ChannelBridge:
             return {"text": "已发送", "message_ref": mid, "chat": chat, "owner": owner, "at": at}
 
         return app.send_once(key, "channel", go)
+
+    def _under(self, chat: str, first: str) -> dict:
+        """Where the rest of a send with nothing to answer goes once its first part is in chat: in a group that shows
+        topics, into the topic that part opened (each new message would open one of its own); elsewhere, the chat."""
+        row = self.app.store.get_chat(chat) or {}
+        if row.get("topic"):
+            return {"reply_to": first, "root": first, "to_chat": False}
+        topic_mode = getattr(self.app.backend, "topic_mode", None)
+        if row.get("kind") != "dm" and callable(topic_mode) and topic_mode(chat):
+            return {"reply_to": first, "root": "", "to_chat": False}  # (a group switched to topics: a quote goes in)
+        return MAIN
 
     def _deliver_picture(self, chat: str, key: str, data: bytes, where: dict, summary: str, epoch: int,
                          owner: str) -> dict:
@@ -364,10 +378,12 @@ class ChannelBridge:
         with its id (known by that from then on; without one the text stands for it a while), or failed (surely not
         sent: the text stands for nothing). picture: a picture, whose echo (a line of type IMAGE, which may come
         before its id is known) a picture being sent stands for."""
-        if not self.declared or chat_id != self.chat() or (picture and not self.declares_images_out):
-            return  # only the channel chat's lines are read as the user's (a picture: only where the channel sends some)
+        if not self.declared or chat_id != self.chat():
+            return  # only the channel chat's lines are read as the user's
         if message_id and self.app.store is not None:  # known by its id first, then the text stands for it no more
             self.app.store.channel_msg_put(chat_id, message_id, "echo", owner=getattr(self.app, "_owner", ""))
+        if picture and not self.declares_images_out:
+            return  # a picture stands for its echo only where the channel sends some (WeChat's: by its id, as before)
         key = (chat_id, PICTURE if picture else (text or "").strip())
         now = time.monotonic()
         with self._mu:
@@ -743,10 +759,11 @@ class _NoLock:
 _NO_LOCK = _NoLock()
 
 
-def _picture_key(channel: str, ref: str, i: int) -> str:
-    """The send journal's key of a channel.send's i-th picture: a namespace of its own, apart from every text's
+def _picture_key(channel: str, ref: str, data: bytes) -> str:
+    """The send journal's key of a picture of a channel.send: by its bytes (Persona may give a ref's pictures again
+    in another order, or with one it could not fetch before), in a namespace of its own, apart from every text's
     ("channel:<id>:<ref>"), whatever the ref is."""
-    return "channel-picture:%s:%d:%s" % (channel, i, ref)
+    return "channel-picture:%s:%s:%s" % (channel, hashlib.sha256(data).hexdigest()[:32], ref)
 
 
 def _never() -> dict:

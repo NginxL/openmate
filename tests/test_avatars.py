@@ -120,6 +120,15 @@ class AvatarTest(unittest.TestCase):
         after = h.app.store.get_chat(TEAM)
         self.assertEqual((after["muted"], after["name"], after["kind"]), (True, "列表里的名字", team["kind"]))
 
+    def test_a_page_opened_asks_for_its_picture_too(self):
+        world = pictured(FixtureWorld())
+        h = signed(self, world)
+        with h.app.store._lock:  # (a chat outside the Inbox's days: no row asked it)
+            h.app.store._db.execute("DELETE FROM avatars")
+        self.assertNotIn("avatar", h.c("thread.page", thread=DM)["chat"])
+        wait_until(lambda: h.app.store.avatars([DM]).get(DM, ("", 0))[0] == PIC_DM, what="asked in the background")
+        self.assertEqual(h.c("thread.page", thread=DM)["chat"]["avatar"], PIC_DM)
+
     def test_another_accounts_sign_in_forgets_them(self):
         world = pictured(FixtureWorld())
         h = signed(self, world)

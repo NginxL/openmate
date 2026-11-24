@@ -2193,7 +2193,12 @@ class LarkXBackend(Backend):
         with self._lock:
             hit = self._chats.get(chat_id)
         if hit is not None and hit[0] > time.monotonic():
-            return hit[1]
+            chat = hit[1]
+            if chat.kind == "dm" and chat.avatar is None and chat.peer_id:  # kept from a list's row: asked for now
+                key = self._person_avatar(chat.peer_id)
+                if key is not None:
+                    chat.avatar = avatar_address(self.region.file_host, key)
+            return chat
         client, me = self._signed_in()
         return self._chat_read(client, chat_id, me)[1]
 
@@ -2391,6 +2396,9 @@ class LarkXBackend(Backend):
         (the file host's /api/image, with the session's cookies), then sent as an IMAGE message in the place send()
         gives a text with the same reply_to and root. SendRejected while nothing was sent: an upload that failed sends
         nothing."""
+        client, _ = self._session()  # the session asked for it: it uploads and posts, or nothing goes
+        if client is None:
+            raise SendRejected("还没有登录%s" % self.region.label)
         try:
             with open(path, "rb") as f:
                 data = f.read(IMAGE_MOST + 1)
@@ -2401,9 +2409,6 @@ class LarkXBackend(Backend):
         mime = sniff_image(data)
         if mime not in ("image/png", "image/jpeg"):
             raise SendRejected("只能发 PNG 或 JPEG 图片")
-        client, _ = self._session()
-        if client is None:
-            raise SendRejected("还没有登录%s" % self.region.label)
         token = self._upload_image(client, data, mime)
         # posted by the session that uploaded it, or not at all (another account's sign-in meanwhile)
         return self.send(chat_id, "[图片]", reply_to, root, to_chat=to_chat, _image=token, _client=client)

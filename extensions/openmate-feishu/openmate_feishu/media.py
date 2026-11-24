@@ -134,7 +134,8 @@ def fetch(app, mid: str, chat_id: str = ""):
             continue
         stem = mid if i == 0 else "%s-%d" % (mid, i)
         try:
-            path, mime, size, data = _fetch_one(folder, stem, m, backend)
+            path, mime, size, data = _fetch_one(folder, stem, m, backend,
+                                                lambda: epoch is None or app.account_epoch() == epoch)
         except BackendError as e:
             link = getattr(app, "link", "")
             if e.kind == "expired" and link == "error" and getattr(app, "link_reason", ""):
@@ -195,7 +196,7 @@ def _folder(app, account: str) -> str:
     return os.path.join(BASE or tempfile.gettempdir(), "%s-%d-%s" % (MEDIA_DIR, os.getuid(), ours), whose)
 
 
-def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int, bytes]:
+def _fetch_one(folder: str, stem: str, m: dict, backend, still=lambda: True) -> Tuple[str, str, int, bytes]:
     """(path, mime, size, bytes): the media fetched now and written in place of the one written for it before; the
     bytes as they came (what the model is shown: never read back from the file, which others may replace)."""
     mime, data = backend.media(str(m["ref"]), MEDIA_MOST)
@@ -216,6 +217,8 @@ def _fetch_one(folder: str, stem: str, m: dict, backend) -> Tuple[str, str, int,
         mime = str(m["mime"]).split(";", 1)[0].strip().lower()  # what the message itself said it is
     mime = mime or "application/octet-stream"
     with _WRITING:
+        if not still():  # another account signed in while it came: its folder is not touched for this one
+            raise MediaError("刚换了飞书账号，这次取到的内容不再给出，请重新读这条消息。")
         path, mime, size = _write(folder, stem, m, mime, data)
     return path, mime, size, data
 

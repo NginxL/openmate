@@ -278,6 +278,21 @@ class ForwardTest(unittest.TestCase):
         h.tool("agent_reply", request=run1["id"], text="README 改好了")
         self.assertEqual(h.sent()[-1]["reply_to"], b.id)
 
+    def test_a_picture_asked_again_with_its_reply_is_not_sent_twice(self):
+        import os
+        import tempfile
+
+        h, first, run1, sid = dispatched(self)
+        h.world.images_ok = h.world.image_threads = True
+        b, run_b = forwarded(self, h, first, sid, "/agent 画个图")
+        d = os.path.realpath(tempfile.mkdtemp(prefix="openmate-forward-pic-"))
+        pic = os.path.join(d, "flow.png")
+        with open(pic, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        for _ in range(2):  # the same reply asked again (the Agent's retry)
+            h.tool("agent_reply", request=run1["id"], text="图在这里", image=pic)
+        self.assertEqual([(i["reply_to"]) for i in h.world.images], [b.id], "once, under the follow-up")
+
     def test_requests_reach_the_conversation_in_the_order_asked(self):
         """b is looked up (no Agent to hand it to: the to-do is closed) while c asks the conversation: c waits for b,
         so the conversation reads them as they were asked, and the turn's one answer is c's, posted once."""
