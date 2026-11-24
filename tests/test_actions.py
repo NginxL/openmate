@@ -262,6 +262,28 @@ class ActionTest(unittest.TestCase):
             backend.user_name, self.h.app.store.name = real_name, real_store
         self.assertEqual(len(self.h.sent()), 1)
 
+    def test_mentions_of_oneself_or_of_two_with_one_name_are_refused(self):
+        me = self.h.app.account.id
+        with self.assertRaises(HubSideError) as e:
+            self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "x", "at": [me]})
+        self.assertIn("不能有你自己", e.exception.message)
+        self.h.app.store.put_name("700100", "同名")
+        self.h.app.store.put_name("700101", "同名")
+        with self.assertRaises(HubSideError) as e:
+            self.h.c("actions.describe", name=CID + "_send",
+                     args={"chat": "chat_example_team", "text": "@同名 看", "at": ["700100", "700101"]})
+        self.assertIn("重名（同名）", e.exception.message)
+        self.assertEqual(self.h.sent(), [])
+
+    def test_a_request_refused_before_is_sent_anew_not_answered_from_the_journal(self):
+        args = {"chat": "chat_example_team", "text": "被拒后重发"}
+        self.h.world.send_fail = "rejected"
+        with self.assertRaises(HubSideError):
+            self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-rr")
+        res = self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-rr")
+        self.assertIn("已发送", res["text"])
+        self.assertEqual([s["text"] for s in self.h.sent()], ["被拒后重发"], "really sent, once")
+
     def test_too_many_mentions_are_refused_before_any_name_is_looked_up(self):
         calls = []
         backend = self.h.app.backend
@@ -327,14 +349,15 @@ class ActionTest(unittest.TestCase):
         with self.h.world.lock:
             self.h.world.topic_mode_chats.discard("chat_example_team")
         backend = self.h.app.backend
-        real = backend.chat_info
+        real, asked = backend.chat_info, []
         backend.topic_groups = False  # a platform without such groups (WeChat): its chat is never looked up for it
-        backend.chat_info = lambda *a: (_ for _ in ()).throw(AssertionError("asked"))
+        backend.chat_info = lambda *a: asked.append(a) or real(*a)
         try:
             d = self.h.c("actions.describe", name=CID + "_send", args={"chat": "chat_example_team", "text": "x"})
         finally:
             backend.topic_groups, backend.chat_info = True, real
         self.assertNotIn("开一个新话题", d["summary"])
+        self.assertEqual(asked, [])
 
     def test_bad_args(self):
         with self.assertRaises(HubSideError):

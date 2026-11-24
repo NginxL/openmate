@@ -123,6 +123,10 @@ class MappingTest(Base):
         self.assertTrue(m.text.startswith("/agent 总结"), m.text)
         self.assertIn("第二段", m.text)
         self.assertNotIn("[文档]", m.text_after_mentions or "")
+        dic = {"d": {"tag": 22, "property": b"", "childIds": ["t"]}, "t": {"tag": 1, "property": b"/st"},
+               "d2": {"tag": 22, "property": b"", "childIds": ["t2"]}, "t2": {"tag": 1, "property": b"op"}}
+        m = self.m(content_data={"richText": {"elementIds": ["d", "d2"], "elements": {"dictionary": dic}}})
+        self.assertEqual(m.text, "/st\nop", "two blocks never run into one word")
 
     def test_text_mentions_and_mine(self):
         from larkx._fake import text_data
@@ -178,7 +182,7 @@ class MappingTest(Base):
             "p2": {"tag": 3, "childIds": ["t2"]}, "t2": {"tag": 1, "property": "op".encode("utf-8")}}}}}
         m = self.m(from_id=ME, content_data=rich)
         self.assertEqual(m.text_after_mentions, "/st\nop", "two paragraphs: no /stop")
-        self.assertEqual(m.text, "@我/stop", "the message's text reads as before")
+        self.assertEqual(m.text, "@我/st\nop", "the message's text too: a paragraph starts a new line")
 
         def one_paragraph(*els):
             dic = {"p": {"tag": 3, "childIds": [k for k, _ in els]}}
@@ -879,6 +883,43 @@ class SendTest(Base):
         with self.assertRaises(BackendError) as e:
             b.send("509", "不确定", reply_to="64")
         self.assertNotIsInstance(e.exception, SendRejected, "the second try may have gone out")
+
+    def test_topic_mode_is_learnt_only_from_a_whole_refusal_and_not_for_long(self):
+        b = self.b
+        S.chats.update({"510": {"id": "510", "type": 2, "chatMode": 1}})
+        cut = self.refusal()
+        cut.response.content = cut.response.content[:-1]
+        twice = self.refusal()
+        twice.response.content += b"\x10\x01"  # the code once more, the last one counts
+        for answer in (cut, twice):
+            S.post_answers = [answer]
+            with self.assertRaises(SendRejected):
+                b.send("510", "x", reply_to="85")
+            self.assertFalse(b.topic_mode("510"))
+        S.post_answers = [self.refusal()]
+        b.send("510", "回复", reply_to="85")
+        self.assertTrue(b.topic_mode("510"))
+        with b._lock:
+            b._topic_mode["510"] -= larkagentx.TOPIC_MODE_TTL + 1  # long ago: the group may have been switched back
+        self.assertFalse(b.topic_mode("510"))
+        b.send("510", "普通引用", reply_to="86")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("86", False), "a quote again")
+
+    def test_no_retry_for_a_session_gone_meanwhile(self):
+        b = self.b
+        S.chats.update({"511": {"id": "511", "type": 2, "chatMode": 1}})
+        refusal = self.refusal()
+
+        def gone(pkt):
+            with b._lock:
+                b._client = None  # signed out while the first post was on its way
+            raise refusal
+
+        S.post_answers = [gone]
+        with self.assertRaises(SendRejected):
+            b.send("511", "x", reply_to="85")
+        self.assertEqual(len(S.posts), 1, "never sent again with the old session")
+        self.assertFalse(b.topic_mode("511"))
 
     def test_a_topic_group_keeps_its_own_way(self):
         b = self.b

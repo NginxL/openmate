@@ -508,6 +508,9 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
             ids.append(uid)
     if len(ids) > MENTIONS_MOST:  # before any name is looked up
         raise RPCError("一条消息最多 @ %d 个人" % MENTIONS_MOST)
+    me = getattr(app, "account", None)
+    if me is not None and me.id in ids:  # sent as you, an @ of you reads as an @自己 request
+        raise RPCError("at 里不能有你自己：以你的身份 @ 你自己，会被当成 @自己 的请求")
     out: List[tuple] = []
     for uid in ids:
         name = app.store.name(uid) if app.store is not None else ""
@@ -519,6 +522,9 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
         if not name or name == uid:
             raise RPCError("不认识用户 %s，没法 @ 他（先用 %s_search 查到他）" % (uid, app.cid))
         out.append((uid, name))
+    same = sorted({n for _, n in out if [m for _, m in out].count(n) > 1})
+    if same:  # "@name" in the text could not say which of them
+        raise RPCError("要 @ 的人里有重名（%s），分不清谁是谁，没有发" % "、".join(same))
     return out
 
 
@@ -640,9 +646,9 @@ def do(app, params: dict) -> dict:
             raise RPCError("刚换了%s账号，没有发出：请在新账号下重新操作" % p)
 
     if name == c + "_send":
-        if app.store.send_get(key) is not None:
-            # this request went out (or may have) before: its result, never a card made again (names may be gone)
-            return _result(app.send_once(key, name, lambda: {}))
+        earlier = app.store.send_get(key)
+        if earlier is not None and earlier["state"] == "done":
+            return _result(earlier["result"])  # went out before: its result, no card made again (names may be gone)
         chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
         root = None
         if reply_to:

@@ -103,7 +103,8 @@ GROUPS_EVERY = 3600.0  # every group is read again this often while the link is 
 GROUPS_SPACING = 60.0  # and never more often than this
 CHAT_GROUP_TYPES = (2, 3, "GROUP", "TOPIC_GROUP")  # entities.Chat.Type of a group
 MENTIONS_MOST = 20
-TOPIC_MODE_KEEP = 2000  # groups in topic mode remembered (_topic_mode)
+TOPIC_MODE_KEEP = 2000  # groups in topic mode remembered (_topic_mode)…
+TOPIC_MODE_TTL = 6 * 3600.0  # …this long (a group may be switched back; a refusal teaches it again)
 TOPIC_REFUSAL = 5801  # the error code of Feishu's refusal of a new message to a group in topic mode  # people one message @-s at most
 CHAT_NOT_MEMBER = (2, 3, "VISITOR", "THREAD_FOLLOWER")  # entities.Chat.Role of one who only looks in
 DOC_MENTION_TYPES = ("MENTION", "COMMENT", "REPLY", "1", "2", "3")  # DocMessage.Type
@@ -385,8 +386,9 @@ def also_to_chat(pkt, parent_id: str, mark: str):
     return pkt
 
 
-def wire_varints(data: bytes) -> Dict[int, List[int]]:
-    """The top-level varint fields of a protobuf message, {field number: [values]} (as far as it reads)."""
+def wire_varints(data: bytes) -> Optional[Dict[int, List[int]]]:
+    """The top-level varint fields of a protobuf message, {field number: [values]}; None when it does not read to its
+    end (cut off, or not a message)."""
     out: Dict[int, List[int]] = {}
     i, n = 0, len(data or b"")
 
@@ -416,10 +418,10 @@ def wire_varints(data: bytes) -> Dict[int, List[int]]:
             elif kind == 5:
                 i += 4
             else:
-                break
+                return None
     except ValueError:
-        pass
-    return out
+        return None
+    return out if i == n else None
 
 
 def _element_id(taken: Set[str]) -> str:
@@ -1590,9 +1592,14 @@ class LarkXBackend(Backend):
             return False
 
     def topic_mode(self, chat_id: str) -> bool:
-        """Whether the group shows its messages as topics though its record does not say so (_topic_mode)."""
+        """Whether the group shows its messages as topics though its record does not say so (_topic_mode), as
+        learnt within TOPIC_MODE_TTL."""
         with self._lock:
-            return str(chat_id) in self._topic_mode
+            at = self._topic_mode.get(str(chat_id))
+            if at is not None and time.time() - at > TOPIC_MODE_TTL:
+                del self._topic_mode[str(chat_id)]
+                at = None
+            return at is not None
 
     def _learn_topic_mode(self, chat_id: str, why: str) -> None:
         with self._lock:
@@ -2287,6 +2294,10 @@ class LarkXBackend(Backend):
             err = self._send_error(e)
             if not (isinstance(err, SendRejected) and (new_in_group or into_topic) and self._topic_refusal(e)):
                 raise err
+            with self._lock:
+                same = self._client is client  # signed out or another account meanwhile: nothing learnt or sent
+            if not same:
+                raise err
             # refused (surely not sent) as a group in topic mode refuses a message outside a topic: known from now on
             self._learn_topic_mode(chat_id, "it refused a message outside a topic")
             if new_in_group:
@@ -2328,7 +2339,8 @@ class LarkXBackend(Backend):
         if self._http_status(e) != 400:
             return False
         body = getattr(getattr(e, "response", None), "content", b"") or b""
-        return TOPIC_REFUSAL in wire_varints(body).get(2, [])
+        codes = wire_varints(body)
+        return codes is not None and codes.get(2, [None])[-1] == TOPIC_REFUSAL
 
     def _http_status(self, e: Exception) -> int:
         """The HTTP status of a refused post (0 when it is no HTTP answer)."""
@@ -2835,8 +2847,21 @@ def code_block_words(tag: int, prop: bytes) -> str:
 
 
 def rich_text(rich: dict, P) -> str:
-    """A rich text's words in order: text runs, @names, links (their words and address), placeholders."""
-    text = "".join(w for k, w in rich_pieces(rich, P) if k != "code")
+    """A rich text's words in order: text runs, @names, links (their words and address), placeholders; a block (a
+    paragraph, a DOCS block…) after words starts a new line, so two never run into one word ("/st" + "op")."""
+    out: List[str] = []
+    gap = False
+    for k, w in rich_pieces(rich, P):
+        if k == "code":
+            continue
+        if k == "break":
+            gap = bool(out)
+            continue
+        if gap and w:
+            out.append("\n")
+            gap = False
+        out.append(w)
+    text = "".join(out)
     return text if text.strip() else ""
 
 

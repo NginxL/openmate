@@ -564,7 +564,7 @@ class Harness:
         r1, w1 = os.pipe()
         r2, w2 = os.pipe()
         self._files = [os.fdopen(r1, "rb"), os.fdopen(w2, "wb"), os.fdopen(r2, "rb"), os.fdopen(w1, "wb")]
-        factory = backend_factory or (lambda cfg, d: FixtureBackend(self.world))
+        factory = backend_factory or self._fixture
         self.app = ConnectorApp(self.platform, timing=self.timing, backend_factory=factory, env=dict(env or {}))
         self.peer = Peer(self._files[0], self._files[1], self.app.handle, on_event=self.app.on_event,
                          after=self.app.after)
@@ -578,6 +578,13 @@ class Harness:
         test.addCleanup(self.close)
         if initialize:
             self.initialize()
+
+    def _fixture(self, cfg, data_dir) -> FixtureBackend:
+        """The example backend, with what the platform it stands in for can do (WeChat: no @s by id, no topic groups)."""
+        b = FixtureBackend(self.world)
+        if self.platform.name != "飞书":
+            b.can_mention = b.topic_groups = False
+        return b
 
     def _serve(self) -> None:
         self.peer.serve()
