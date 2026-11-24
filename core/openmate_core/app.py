@@ -1536,6 +1536,18 @@ class ConnectorApp:
 
     # ------------------------------------------------------------------ sends (journal: each key once)
 
+    def send_known(self, key: str) -> Optional[dict]:
+        """What the journal says of key without taking it: the first result when it went out, an RPCError (in the
+        words send_once uses) when it is still going or may have gone, None when it does not know the key."""
+        row = self.store.send_get(key)
+        if row is None:
+            return None
+        if row["state"] == "done":
+            return row["result"]
+        if key in self._inflight:
+            raise RPCError("同一个请求正在发送，请稍等，不会重复发送")
+        raise RPCError("上一次用同一个请求发送时结果不确定（可能已经发出去了），为避免重复不会再发。请先在%s里确认是否已发出。" % self.platform.name)
+
     def send_once(self, key: str, kind: str, send) -> dict:
         """Run send() once for key. A key that went out answers its first result again; one whose earlier attempt has
         an unknown outcome is refused, never sent again; one that surely failed may try again."""

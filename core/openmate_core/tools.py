@@ -631,11 +631,6 @@ def describe(app, params: dict) -> dict:
     raise RPCError("没有这个写操作：%s" % name)
 
 
-def _not_again() -> dict:
-    """send_once's send for a request whose card cannot be read now: never sends (the request id is freed)."""
-    raise RPCError("没能读出这条消息的发送信息，没有发出，请再试一次")
-
-
 def do(app, params: dict) -> dict:
     name = str(params.get("name") or "")
     request_id = str(params.get("request_id") or "").strip()
@@ -661,10 +656,9 @@ def do(app, params: dict) -> dict:
                 if quoted is not None and quoted.get("root_id"):
                     root = quoted["root_id"]
         except Exception as e:
-            if app.store.send_get(key) is not None:
-                # a request seen before: the journal answers (went out, still going, or may have), whatever the card
-                # reads now (its names may be gone)
-                return _result(app.send_once(key, name, _not_again))
+            known = app.send_known(key)  # a request seen before: the journal answers, never taken (RPCError: going
+            if known is not None:  # or may have gone), whatever the card reads now (its names may be gone)
+                return _result(known)
             if isinstance(e, RPCError):
                 raise
             # (a store busy for a moment): nothing sent, the same request may try again
