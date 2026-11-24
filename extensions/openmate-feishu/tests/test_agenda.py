@@ -1,6 +1,7 @@
 """The calendar page and card: lark-cli calendar +agenda (read-only), what the page says, the card, opening an event,
 and what it says when lark-cli is missing, not signed in or slow."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import datetime as dt
 import json
 import os

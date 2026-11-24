@@ -1,5 +1,6 @@
 """inbox.collect (kinds, done, noise, context, tags, rules, the window) and inbox.reply (once, as the user)."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import time
 import unittest
 

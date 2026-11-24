@@ -2,6 +2,7 @@
 to 自动代答; checked before anything goes out (a PNG or JPEG in a temporary directory, not too big, not a link out of
 it); sent right after the answer's text, once, as part of the one reply; its failure reported, never tried again."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import shutil
 import tempfile

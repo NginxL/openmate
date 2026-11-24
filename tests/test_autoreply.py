@@ -2,6 +2,7 @@
 confirmation; never a direct chat, a bot, another AI's reply, past the group's daily most, or a word of its own in the
 group when it fails."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import time
 import unittest
 

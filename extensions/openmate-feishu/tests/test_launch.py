@@ -1,6 +1,7 @@
 """Starting under LarkAgentX's Python: reading initialize without taking more, the decision, the hand-over of the
 line through a pipe, and the real launcher re-executing itself."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import os
 import shutil

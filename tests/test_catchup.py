@@ -2,6 +2,7 @@
 away), each chat read back to what is stored (a busy group's whole outage), a chat that cannot be read skipped, and
 the first time done only once every read worked."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import unittest
 
 from harness import Harness, wait_until

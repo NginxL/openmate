@@ -1,6 +1,7 @@
 """OPENMATE_LOG raises OpenMate's own loggers only: a library's DEBUG (websockets: handshakes, headers, frames with
 the connection's ticket) stays off."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import logging
 import unittest
 

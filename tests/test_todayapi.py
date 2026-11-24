@@ -1,6 +1,7 @@
 """The extension's own HTTP for another extension's 今天 (todayapi): who may call it, what it answers signed out and
 signed in, 处理完 for the version the caller saw, its limits, and its socket going away with the program."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import dataclasses
 import http.client
 import json

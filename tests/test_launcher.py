@@ -1,5 +1,6 @@
 """The real launcher as the hub starts it: a subprocess speaking the protocol on stdin / stdout."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import os
 import shutil

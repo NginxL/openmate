@@ -1,6 +1,7 @@
 """Sealed credentials: rotations land in order and the newest wins; logout's delete is the last write, so a rotation
 from before it never brings the sign-in back; a new sign-in writes again."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import threading
 import time
 import unittest

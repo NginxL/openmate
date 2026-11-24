@@ -1,5 +1,6 @@
 """StarkMesh: the gateway's quota through a read-only scoped admin key; counted in 号, kept fresh behind the page."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import datetime as dt
 import io
 import json

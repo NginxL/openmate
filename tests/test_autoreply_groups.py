@@ -1,6 +1,7 @@
 """自动代答's groups: the marked ones and the 50 the user wrote in last on the chats page, then 找群, a search over every
 group the service lists, where any of them can be switched on."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import time
 import unittest

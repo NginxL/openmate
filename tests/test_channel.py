@@ -4,6 +4,7 @@ then nothing is sent). There the user's /agent goes to Persona's channel flow (c
 conversation, Persona's answers come back through channel.send where they were asked, and a question Persona put
 there is taken back once it was answered somewhere else (Feishu; WeChat cannot take a message back)."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import os
 import sys

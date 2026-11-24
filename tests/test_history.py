@@ -1,5 +1,6 @@
 """history.chats / archive.history: the knowledge base's per-chat settings and history import, read from the store."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import sys
 import time

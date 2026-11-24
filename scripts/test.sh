@@ -34,6 +34,7 @@ for base in "${TMPDIR:-}" /tmp /var/tmp; do
 done
 [ -n "$RUN_TMP" ] || { echo "scripts/test.sh: cannot make a temporary directory in \$TMPDIR, /tmp or /var/tmp" >&2; exit 1; }
 export TMPDIR="$RUN_TMP"
+export OPENMATE_TEST_TMP="$RUN_TMP"  # tests/_runtmp.py: this directory is the run's already
 "$PY" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else "Python 3.9 or newer is needed")'
 "$PY" -I -B -m unittest discover -s tests
 for d in extensions/*/tests; do

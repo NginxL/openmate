@@ -1,6 +1,7 @@
 """Who is a program: a bot's direct messages and @-mentions are notices, not things that need the user. Asked of the
 service in the background (Backend.people_kinds), kept in the store; a draw never waits for it."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import tempfile
 import time

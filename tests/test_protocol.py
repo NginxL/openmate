@@ -1,5 +1,6 @@
 """The process protocol's handshake and errors, over the real JSON-line pipes."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import os
 import unittest

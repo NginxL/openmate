@@ -4,6 +4,7 @@ the way it always did (the task notice into the conversation, then <connector>_a
 assistant gets it instead when the Agent is gone, the to-do closed, nothing can tell which Agent, or the user wrote
 问 Persona / 问助手; someone else's message is never handed on."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import dataclasses
 import time
 import unittest

@@ -2,6 +2,7 @@
 shown in the chat and never handed to the knowledge base, by archive.changes or archive.history, whether the backend
 could be made or not. The mark is the message's own, not its text: a message that says the note's words is archived."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import shutil
 import sqlite3

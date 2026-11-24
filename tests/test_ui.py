@@ -1,5 +1,6 @@
 """The extension's page and card in the Persona apps (ui.render / ui.action) and the navigation badge."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import time
 import unittest
 

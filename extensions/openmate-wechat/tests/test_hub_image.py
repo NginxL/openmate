@@ -3,6 +3,7 @@ key; its echo is ours (history, never live); a refusal before or after staging i
 answer is unknown (never sent again); another account there refuses it before anything is uploaded; the program alone
 (no hub) cannot send pictures."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import os
 import time

@@ -1,5 +1,6 @@
 """thread.page / thread.media and archive.changes / archive.media."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import base64
 import unittest
 

@@ -3,6 +3,7 @@ connector ids, no document search, no /agent progress (WeChat cannot edit a mess
 Also the core fixes made with it: a new account forgets the old one's marked groups, and a group's hourly most holds
 when two @s come at once."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import json
 import os
 import sys

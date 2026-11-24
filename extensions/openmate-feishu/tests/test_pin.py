@@ -1,6 +1,7 @@
 """Which LarkAgentX commit is installed: a checkout's HEAD (detached, a branch, packed, a worktree), pip's record of a
 git install or of a copy from a checkout, and the refusals."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import shutil
 import sys

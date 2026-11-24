@@ -1,5 +1,6 @@
 """status states, the QR sign-in, credentials in the hub's secrets, the live link and history catch-up."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import stat
 import time

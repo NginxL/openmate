@@ -1,5 +1,6 @@
 """The changed-event debouncer and the store's own guarantees."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import os
 import shutil
 import sqlite3

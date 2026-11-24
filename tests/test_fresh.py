@@ -1,6 +1,7 @@
 """Fresh: what a page shows comes at once; a read that takes seconds (lark-cli, the hub across the border) happens behind
 it, and a failed read keeps the last one."""
 
+import _runtmp  # noqa: F401  (first: every temporary directory of this run in one, removed at its end)
 import threading
 import time
 import unittest
