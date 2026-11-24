@@ -81,10 +81,19 @@ def size_of(data: bytes) -> Optional[Tuple[int, int]]:
     return None
 
 
+def _ends(data: bytes, kind: str) -> bool:
+    """Whether the file reaches its end mark (a PNG's IEND, a JPEG's EOI): one cut off is not sent as it is."""
+    if kind == "image/png":
+        return data[-12:-4] == b"\x00\x00\x00\x00IEND"
+    if kind == "image/jpeg":
+        return data.rstrip(b"\x00").endswith(b"\xff\xd9")
+    return True
+
+
 def _within(data: bytes) -> Optional[Tuple[str, Tuple[int, int]]]:
     kind = kind_of(data)
     size = size_of(data) if kind else None
-    if not kind or size is None or len(data) > ONE_MOST or max(size) > SIDE_MOST:
+    if not kind or size is None or len(data) > ONE_MOST or max(size) > SIDE_MOST or not _ends(data, kind):
         return None
     return kind, size
 
@@ -105,6 +114,8 @@ def _pil_size(data: bytes) -> Optional[Tuple[int, int]]:
     try:
         with pil[0].open(io.BytesIO(data)) as im:
             return im.size
+    except getattr(pil[0], "DecompressionBombError", ()) or ():
+        return (INPUT_PIXELS_MOST + 1, 1)  # Pillow's own refusal: too big to draw here, by sips either
     except Exception:
         return None
 
@@ -137,6 +148,12 @@ def _pillow(data: bytes, side: int) -> Optional[bytes]:
             im.seek(0)  # an animated sticker: its first frame
             im.draft("RGB", (side, side))  # a big JPEG: decoded at a fraction of its size to begin with
             turned = ImageOps.exif_transpose(im) or im  # a phone's portrait photo stays upright
+            if turned.mode.startswith("I") or turned.mode == "F":  # 16-bit and wider: scaled to 8 bits, not clipped
+                if turned.mode not in ("I", "F"):
+                    turned = turned.convert("I")
+                low, high = turned.getextrema()
+                span = float(high - low) or 1.0
+                turned = turned.point(lambda v: (v - low) * 255.0 / span).convert("L")
             frame = turned.convert("RGBA") if turned.mode in ("RGBA", "LA", "P", "PA") else turned.convert("RGB")
             frame.thumbnail((side, side))
             if frame.mode == "RGBA":  # a transparent picture on white, as a chat shows it

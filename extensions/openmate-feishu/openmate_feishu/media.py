@@ -124,6 +124,8 @@ def fetch(app, mid: str, chat_id: str = ""):
     not_ready = _not_ready(app, bool(folder))
     if not_ready:
         raise MediaError(head + "\n" + not_ready)
+    if getattr(app, "_handoff", False):  # the adapter may answer as the account signing in already
+        raise MediaError(head + "\n正在换飞书账号，稍后再试一次。")
     lines: List[str] = [head]
     got = 0
     pictures = modelimages.Pictures() if modelimages.CAPABILITY in getattr(app, "hub_capabilities", ()) else None

@@ -2249,6 +2249,10 @@ class PictureTest(Base):
         from openmate_core.backend import Chat
         b._chats["501"] = (time.monotonic() + 600, Chat(id="501", kind="dm", name="示例同事", peer_id="7003"))
         self.assertIn("/v3_p~?", b.chat_info("501").avatar, "a chat kept from a list's row: its picture asked for now")
+        S.chats["513"] = {"id": "513", "type": 2, "name": "群", "avatar": {"key": "v3_new"}}
+        b._chats["513"] = (time.monotonic() + 600, Chat(id="513", kind="group", name="群"))  # a list's row, no picture
+        self.assertIsNone(b.chat_info("513").avatar)
+        self.assertIn("/v3_new~?", b.chat_picture("513").avatar, "the core's ask for a picture reads the chat now")
 
     def test_a_picture_not_known_says_none_and_a_key_that_is_no_key_is_not_put_in_an_address(self):
         b = self.b

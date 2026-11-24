@@ -108,6 +108,17 @@ class SendTest(Pictures):
         h.tool("agent_reply", request=run2["id"], text="第二张。", image=self.picture("c.png", PNG + b"c"))
         self.assertEqual((h.world.images[-1]["reply_to"], h.world.images[-1]["root"]), (None, None))
 
+    def test_two_answers_with_the_same_picture_each_send_it(self):
+        from test_agent import agent
+
+        h = agent(self)  # Feishu's: a message can be edited, so a run may answer more than once
+        h.world.images_ok = True
+        run = running(h, ask(h, "/agent 画两版"))
+        h.tool("agent_reply", request=run["id"], text="第一版。", image=self.picture())
+        h.tool("agent_reply", request=run["id"], text="第一版。", image=self.picture())  # asked again: not again
+        h.tool("agent_reply", request=run["id"], text="第二版（同一张图）。", image=self.picture())
+        self.assertEqual(len(h.world.images), 2, "each answer its own picture, each once")
+
     def test_the_same_answer_again_tells_the_picture_again_without_reading_it(self):
         h = wechat(self)
         h.world.images_ok = True
@@ -172,7 +183,7 @@ class SendTest(Pictures):
         out = h.tool("agent_reply", request=run["id"], text="见图", image=self.picture())
         self.assertIn("结果不确定", out)
         self.assertNotIn("没发出去", out, "unknown is not \"not sent\"")
-        got = h.app.store.send_get(_keys(h, "agent:%s:image:" % run["id"])[0])
+        got = h.app.store.send_get([k for k in _keys(h, "agent:%s:" % run["id"]) if ":image:" in k][0])
         self.assertEqual(got["state"], "uncertain")
 
 

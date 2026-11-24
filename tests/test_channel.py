@@ -195,6 +195,13 @@ class PicturesOutTest(unittest.TestCase):
         img = h.world.images[-1]
         self.assertEqual((img["reply_to"], img["root"], img["to_chat"]), (text["reply_to"], text["root"], True))
 
+    def test_the_same_picture_twice_is_sent_twice_and_once_each_on_a_replay(self):
+        h = pictured_channel(self)
+        same = [{"mime": "image/png", "data": png_b64()}] * 2
+        send(h, ref="twice", text="", kind="push", images=same)
+        send(h, ref="twice", text="", kind="push", images=same)
+        self.assertEqual(len(h.world.images), 2)
+
     def test_a_wechat_picture_marks_nothing_but_its_id_as_before(self):
         w = channel(self, platform=openmate_wechat.platform(), agent_reply_header=" ")
         w.world.images_ok = True

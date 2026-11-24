@@ -2202,6 +2202,12 @@ class LarkXBackend(Backend):
         client, me = self._signed_in()
         return self._chat_read(client, chat_id, me)[1]
 
+    def chat_picture(self, chat_id: str) -> Chat:
+        """The chat as the service says it now (not a row kept from a list, which may not say its picture): what the
+        core asks when it wants a chat's picture."""
+        client, me = self._signed_in()
+        return self._chat_read(client, chat_id, me)[1]
+
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         user_id = _id(user_id)
         if not user_id:

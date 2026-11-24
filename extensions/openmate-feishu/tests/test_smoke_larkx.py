@@ -227,6 +227,21 @@ frames = io.BytesIO()
 Image.new("RGB", (40, 40), (0, 0, 0)).save(frames, "WEBP", save_all=True,
                                            append_images=[Image.new("RGB", (40, 40), (255, 255, 255))])
 small = jpeg(100, 60)
+import warnings
+with warnings.catch_warnings():  # (Pillow's notice about making an I;16 picture: the test's own, not the code's)
+    warnings.simplefilter("ignore", DeprecationWarning)
+    deep = Image.new("I;16", (2100, 30))
+    for x in range(2100):
+        for y in range(30):
+            deep.putpixel((x, y), (0, 20000, 60000)[x * 3 // 2100])
+    buf = io.BytesIO(); deep.save(buf, "PNG")
+drawn = Image.open(io.BytesIO(mi.fit(buf.getvalue())[1])).convert("L")
+four = io.BytesIO(); Image.new("RGB", (4, 4)).save(four, "PNG"); no_end = four.getvalue()[:-12]
+old_most = Image.MAX_IMAGE_PIXELS; Image.MAX_IMAGE_PIXELS = 10  # (a small picture stands for a bomb)
+gif = io.BytesIO(); Image.new("P", (40, 40)).save(gif, "GIF")
+bomb = mi._pil_size(gif.getvalue()); Image.MAX_IMAGE_PIXELS = old_most
+out["deeper"] = [list(drawn.getextrema()),
+                 mi.fit(no_end) is None or mi.fit(no_end)[1] != no_end, bomb[0] > mi.INPUT_PIXELS_MOST]
 out["pictures"] = [mi.fit(small)[1] == small, mi.size_of(mi.fit(jpeg(3000, 1000, turn=6))[1]),
                    mi.fit(small[:len(small) // 2]), mi.fit(frames.getvalue())[0],
                    mi.size_of(mi.fit(jpeg(2400, 1200))[1])]
@@ -304,6 +319,10 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["pictures"], [True, [523, 1568], None, "image/jpeg", [1568, 784]],
                          "with the real Pillow: a whole small one as it is, a phone's portrait upright, a cut-off one"
                          " left out (the hub would drop it), an animated sticker drawn again, a big one drawn smaller")
+        self.assertEqual(out["deeper"][0][0] < 30 and out["deeper"][0][1] > 220, True,
+                         "a 16-bit picture drawn again keeps its levels (not all white): %r" % (out["deeper"][0],))
+        self.assertEqual(out["deeper"][1:], [True, True], "a PNG without its end is not sent as it is; a bomb is"
+                                                          " not handed on")
         self.assertEqual(out["files"], [], "nothing written to the data directory")
         self.assertTrue(out["home"])
         self.assertEqual(res.stderr, b"", "LarkAgentX's logging is off")

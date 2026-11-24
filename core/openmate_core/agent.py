@@ -2199,17 +2199,18 @@ class AgentRunner:
             self.store.run_put(cur)
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
-        note = self._send_image(cur, pic, named) if pic is not None else ""
+        note = self._send_image(cur, pic, named_key) if pic is not None else ""
         return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, sent_id or "未知", note)
 
-    def _send_image(self, run: dict, pic: tuple, named: str = "") -> str:
+    def _send_image(self, run: dict, pic: tuple, reply_key: str = "") -> str:
         """The answer's picture, once (its own key in the send journal: by its bytes), right after the answer's text;
         what became of it, for the Agent (kept with the run: the same answer asked again tells it again). Its failure
         leaves the answer as it is (one reply: never tried again). A /stop that landed first keeps it from going: the
         run's lock orders the two (a /stop after it began is like one after the text began)."""
         path, sha, name = pic
-        # keyed by the request the reply names, as its text is: asked again, never a second copy under another run
-        key = "agent:%s:image:%s" % (named or run["id"], sha[:32])
+        # keyed by its reply (the request it names and its text) and its bytes: that reply asked again sends it never a
+        # second time, wherever the reply went; another reply's picture is its own
+        key = ("%s:image:%s" % (reply_key, sha[:32])) if reply_key else "agent:%s:image:%s" % (run["id"], sha[:32])
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur is None:

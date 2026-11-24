@@ -1637,6 +1637,7 @@ class ConnectorApp:
             # its echo in the 渠道's chat (it may come before its id is known) is no line of the user's
             self.channel.outgoing(chat_id, "", picture=True)
         try:
+            self._not_handing_off()  # (again, right before the adapter takes the session it sends with)
             if (reply_to or root) and getattr(self.backend, "image_threads", False):
                 mid = self.backend.send_image(chat_id, path, reply_to=reply_to or None, root=root or None,
                                               to_chat=bool(to_chat))
@@ -1705,7 +1706,8 @@ class ConnectorApp:
                 if self.closing.is_set() or not self.owns(epoch):
                     return
                 try:
-                    info = self.backend.chat_info(chat_id)
+                    fresh = getattr(self.backend, "chat_picture", None)  # the service asked now, not a kept row
+                    info = fresh(chat_id) if callable(fresh) else self.backend.chat_info(chat_id)
                 except BackendError as e:
                     log.info("a chat's picture was not read: %s", e.kind)
                     continue

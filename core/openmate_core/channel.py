@@ -77,6 +77,7 @@ KEEP = 7 * 86400.0  # what the channel remembers of its messages
 REFS_KEEP = 30 * 86400.0  # a ref's account: as long as the send journal keeps the ref
 MAIN = {"reply_to": "", "root": "", "to_chat": False}
 PICTURE = "\x00picture"  # outgoing's words for a picture being sent: its echo is a line of type IMAGE
+PICTURE_WINDOW = 120.0  # a picture sent whose outcome is not known stands for its echo this long from its start
 
 
 class _Later(Exception):
@@ -255,7 +256,8 @@ class ChannelBridge:
             gone_to = ""  # the chat what of this ref went out already went to: the rest goes there or nowhere
             if pictures:
                 # the text and each picture once each (their own keys): a ref sent again sends only what did not go
-                sent = [app.store.send_get(_picture_key(self.id, ref, data)) for data in pictures]
+                keys = _picture_keys(self.id, ref, pictures)
+                sent = [app.store.send_get(k) for k in keys]
                 if all(r is not None and r["state"] == "done" for r in sent) and (done is not None or not text.strip()):
                     return _answer(done["result"] if done is not None else sent[0]["result"])
                 for r in [done] + sent:
@@ -290,10 +292,10 @@ class ChannelBridge:
                 res = done["result"] if done is not None else \
                     self._deliver(chat, key, text, where, "Persona 渠道把%s以你的身份发到" % what, epoch, owner)
                 self._track(epoch, res, ref, kind)
-            for data in pictures:
+            for data, pkey in zip(pictures, _picture_keys(self.id, ref, pictures)):
                 if where == MAIN and res and res.get("message_ref"):
                     where = self._under(chat, str(res["message_ref"]))  # a topic group: in the first part's topic
-                got = self._deliver_picture(chat, _picture_key(self.id, ref, data), data, where,
+                got = self._deliver_picture(chat, pkey, data, where,
                                             "Persona 渠道把%s里的一张图片以你的身份发到" % what, epoch, owner)
                 self._track(epoch, got, ref, "answer" if kind == "ask" else kind)  # (the question is its text)
                 res = res or got
@@ -402,9 +404,11 @@ class ChannelBridge:
         if m is not None and m["dir"] in ("out", "echo"):
             return True
         now = time.monotonic()
-        said = PICTURE if (row.get("type") or "").upper() == "IMAGE" else (row.get("text") or "").strip()
+        picture = (row.get("type") or "").upper() == "IMAGE"
+        said = PICTURE if picture else (row.get("text") or "").strip()
+        window = PICTURE_WINDOW if picture else ECHO_WINDOW  # a picture's echo comes within moments, or not at all
         with self._mu:
-            return any(now - at < ECHO_WINDOW for at in self._outs.get((chat, said), ()))
+            return any(now - at < window for at in self._outs.get((chat, said), ()))
 
     # ---------------------------------------------------------------- the user's lines
 
@@ -759,11 +763,17 @@ class _NoLock:
 _NO_LOCK = _NoLock()
 
 
-def _picture_key(channel: str, ref: str, data: bytes) -> str:
-    """The send journal's key of a picture of a channel.send: by its bytes (Persona may give a ref's pictures again
-    in another order, or with one it could not fetch before), in a namespace of its own, apart from every text's
-    ("channel:<id>:<ref>"), whatever the ref is."""
-    return "channel-picture:%s:%s:%s" % (channel, hashlib.sha256(data).hexdigest()[:32], ref)
+def _picture_keys(channel: str, ref: str, pictures: List[bytes]) -> List[str]:
+    """The send journal's keys of a channel.send's pictures: each by its bytes and which time those bytes come in it
+    (Persona may give a ref's pictures again in another order, or with one it could not fetch before; the same
+    picture twice is two), in a namespace of its own, apart from every text's ("channel:<id>:<ref>")."""
+    seen: Dict[str, int] = {}
+    out = []
+    for data in pictures:
+        sha = hashlib.sha256(data).hexdigest()[:32]
+        seen[sha] = seen.get(sha, 0) + 1
+        out.append("channel-picture:%s:%s.%d:%s" % (channel, sha, seen[sha], ref))
+    return out
 
 
 def _never() -> dict:
