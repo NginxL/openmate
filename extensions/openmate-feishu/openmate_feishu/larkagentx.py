@@ -2272,6 +2272,7 @@ class LarkXBackend(Backend):
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
         b = self.lx.builders
+        plain = False  # a new message to a group read as ordinary: sent again as a topic when refused (below)
         try:
             rid = self.lx.ids.generate_long_request_id()
             if root and not self._is_dm(client, chat_id):
@@ -2290,8 +2291,9 @@ class LarkXBackend(Backend):
                 pkt = b.build_send_message_packet(text, chat_id, rid, root_id=reply_to or root, thread_chat=True)
             else:
                 pkt = b.build_send_message_packet(text, chat_id, rid)
-                if not self._is_dm(client, chat_id) and self._thread_first(client, chat_id):
-                    pkt = new_topic(pkt)  # a thread-first group takes a new message only as a topic of its own
+                plain = not self._is_dm(client, chat_id)
+                if plain and self._thread_first(client, chat_id):
+                    pkt, plain = new_topic(pkt), False  # a thread-first group takes a new message only as a topic
             if people:
                 pkt = with_mentions(pkt, text, people)
         except Exception as e:
@@ -2299,7 +2301,22 @@ class LarkXBackend(Backend):
         try:
             content = client._gateway_post(pkt)
         except Exception as e:
-            raise self._send_error(e)
+            err = self._send_error(e)
+            if not (plain and isinstance(err, SendRejected) and self._http_status(e) == 400):
+                raise err
+            # refused, so surely not sent: a group thread-first in a way its record does not say takes it only as a
+            # topic of its own; once more so (a new request id)
+            log.info("group %s refused a plain message (HTTP 400): sent again as a topic of its own", chat_id)
+            try:
+                pkt = new_topic(b.build_send_message_packet(text, chat_id, self.lx.ids.generate_long_request_id()))
+                if people:
+                    pkt = with_mentions(pkt, text, people)
+            except Exception:
+                raise err
+            try:
+                content = client._gateway_post(pkt)
+            except Exception as e2:
+                raise self._send_error(e2)
         try:
             msg_id = _id(b.decode_put_message_response(content))
         except Exception:
@@ -2321,6 +2338,12 @@ class LarkXBackend(Backend):
         if len(out) > MENTIONS_MOST:
             raise SendRejected("一条消息最多 @ %d 个人" % MENTIONS_MOST)
         return out
+
+    def _http_status(self, e: Exception) -> int:
+        """The HTTP status of a refused post (0 when it is no HTTP answer)."""
+        if not isinstance(e, self.lx.requests.exceptions.HTTPError):
+            return 0
+        return _int(getattr(getattr(e, "response", None), "status_code", 0))
 
     def _send_error(self, e: Exception) -> BackendError:
         """What a failed send post means: SendRejected only when nothing can have reached the service."""

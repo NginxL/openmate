@@ -857,6 +857,34 @@ class SendTest(Base):
         self.assertEqual((self.last()["root"], self.last()["reply_in_thread"], self.last().get("new_topic")),
                          ("61", False, None), "a reply to a topic's first message goes into that topic")
 
+    def test_a_plain_message_refused_with_400_goes_again_as_a_topic(self):
+        b = self.b
+        self.patch_packets()
+        S.post_answers = [R.HTTPError("400", response=R.Response(400))]
+        self.assertTrue(b.send("500", "新话题", mentions=[("7001", "张三")]))
+        first, again = S.posts[-2], S.posts[-1]
+        self.assertNotIn("new_topic", first)
+        self.assertTrue(again.get("new_topic"), "a group thread-first in a way its record does not say")
+        self.assertEqual((again["text"], again["mentions"]), ("新话题", [("7001", "张三")]), "the same message")
+        self.assertNotEqual(first["request"], again["request"], "a new request id")
+        S.post_answers = [R.HTTPError("400", response=R.Response(400)), R.HTTPError("400", response=R.Response(400))]
+        with self.assertRaises(SendRejected):
+            b.send("500", "还是不行")
+        n = len(S.posts)
+        for answer, args, why in ((R.HTTPError("403", response=R.Response(403)), ("500", "x"), "another refusal"),
+                                  (R.HTTPError("400", response=R.Response(400)), ("500", "x", "85"), "a reply"),
+                                  (R.HTTPError("400", response=R.Response(400)), ("501", "x"), "a direct chat"),
+                                  (R.HTTPError("400", response=R.Response(400)), ("502", "x"), "already a topic")):
+            S.post_answers = [answer]
+            with self.assertRaises(SendRejected, msg=why):
+                b.send(*args)
+            self.assertEqual(len(S.posts), n + 1, why + ": never sent again")
+            n = len(S.posts)
+        S.post_answers = [R.HTTPError("400", response=R.Response(400)), R.ReadTimeout("r")]
+        with self.assertRaises(BackendError) as e:
+            b.send("500", "不确定")
+        self.assertNotIsInstance(e.exception, SendRejected, "the second try may have gone out")
+
     def test_a_group_switched_to_topic_mode_is_read_so_by_its_push(self):
         b = self.b
         self.patch_packets()
