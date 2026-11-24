@@ -1637,7 +1637,6 @@ class ConnectorApp:
             # its echo in the 渠道's chat (it may come before its id is known) is no line of the user's
             self.channel.outgoing(chat_id, "", picture=True)
         try:
-            self._not_handing_off()  # (again, right before the adapter takes the session it sends with)
             if (reply_to or root) and getattr(self.backend, "image_threads", False):
                 mid = self.backend.send_image(chat_id, path, reply_to=reply_to or None, root=root or None,
                                               to_chat=bool(to_chat))
