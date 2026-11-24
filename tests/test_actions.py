@@ -305,6 +305,7 @@ class ActionTest(unittest.TestCase):
             with self.assertRaises(HubSideError) as e:
                 self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-busy")
             self.assertIn("没有发出", e.exception.message)
+            self.assertIsNone(store.send_get("action:req-busy"), "the card is read before the request is claimed")
             res = self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-busy")
         finally:
             store.get_chat = real

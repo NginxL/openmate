@@ -631,6 +631,11 @@ def describe(app, params: dict) -> dict:
     raise RPCError("没有这个写操作：%s" % name)
 
 
+def _not_again() -> dict:
+    """send_once's send for a request whose card cannot be read now: never sends (the request id is freed)."""
+    raise RPCError("没能读出这条消息的发送信息，没有发出，请再试一次")
+
+
 def do(app, params: dict) -> dict:
     name = str(params.get("name") or "")
     request_id = str(params.get("request_id") or "").strip()
@@ -648,20 +653,24 @@ def do(app, params: dict) -> dict:
             raise RPCError("刚换了%s账号，没有发出：请在新账号下重新操作" % p)
 
     if name == c + "_send":
-        def send():
-            # the card's reading inside the journal's claim: a request seen before answers from the journal first
-            # (went out, or may have), whatever its names read now; a card that cannot be made frees the request id
-            try:
-                chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
-                root = None
-                if reply_to:
-                    quoted = app.store.message(chat_id, reply_to)
-                    if quoted is not None and quoted.get("root_id"):
-                        root = quoted["root_id"]
-            except RPCError:
+        try:
+            chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
+            root = None
+            if reply_to:
+                quoted = app.store.message(chat_id, reply_to)
+                if quoted is not None and quoted.get("root_id"):
+                    root = quoted["root_id"]
+        except Exception as e:
+            if app.store.send_get(key) is not None:
+                # a request seen before: the journal answers (went out, still going, or may have), whatever the card
+                # reads now (its names may be gone)
+                return _result(app.send_once(key, name, _not_again))
+            if isinstance(e, RPCError):
                 raise
-            except Exception as e:  # (a store busy for a moment): nothing sent, the same request may try again
-                raise RPCError("没能读出这条消息的发送信息（%s），没有发出，请再试一次" % type(e).__name__)
+            # (a store busy for a moment): nothing sent, the same request may try again
+            raise RPCError("没能读出这条消息的发送信息（%s），没有发出，请再试一次" % type(e).__name__)
+
+        def send():
             as_asked()
             mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None)
             return {"text": "已发送到%s" % visible, "message_ref": mid}
