@@ -2286,7 +2286,7 @@ class LarkXBackend(Backend):
              to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None) -> str:
         """Backend.send. mentions [(user id, name, offset)]: real @s (with_mentions). A group in topic mode
         (topic_mode) takes a reply only into its topic, the thread way, and a new message (a topic of its own) only
-        from a newer client (newer_post): once it refused one so, the message goes once more that way."""
+        from a newer client: a new message it refused so goes once more that way (newer_post), and only that one."""
         if not (text or "").strip():
             raise SendRejected("消息内容是空的")
         chat_id = str(chat_id or "").strip()
@@ -2311,7 +2311,6 @@ class LarkXBackend(Backend):
             return with_mentions(pkt, text, people) if people else pkt
 
         new_in_group = False  # a new message to a group (one in topic mode takes it from a newer client only)
-        newer = False  # posted as a newer client (newer_post)
         into_topic = ""  # a quote in a group: the message whose topic it goes into when the group shows topics
         try:
             if root and not self._is_dm(client, chat_id):
@@ -2336,11 +2335,10 @@ class LarkXBackend(Backend):
             else:
                 pkt = build()
                 new_in_group = not self._known_dm(chat_id)  # (known, no request; only a group refuses so anyway)
-                newer = new_in_group and self.topic_mode(chat_id)  # known in topic mode: as a newer client at once
         except Exception as e:
             raise SendRejected("没能组成这条%s消息（%s）" % (self.region.label, type(e).__name__))
         try:
-            content = newer_post(client, pkt) if newer else client._gateway_post(pkt)
+            content = client._gateway_post(pkt)
         except Exception as e:
             err = self._send_error(e)
             if not (isinstance(err, SendRejected) and (new_in_group or into_topic) and self._topic_refusal(e)):
@@ -2354,9 +2352,7 @@ class LarkXBackend(Backend):
             # refused (surely not sent) as a group in topic mode refuses a message outside a topic: known from now on
             self._learn_topic_mode(chat_id, "it refused a message outside a topic")
             if new_in_group:
-                if newer:  # refused as a newer client too: Feishu wants a newer one still
-                    raise SendRejected(TOPIC_TOO_OLD, 400)
-                return self._new_topic_again(client, chat_id, build)
+                return self._new_topic_again(client, chat_id, build)  # (only this retry goes as a newer client)
             try:
                 pkt = build(into_topic, False)  # the quote, once more: into that message's topic, the thread way
             except Exception:

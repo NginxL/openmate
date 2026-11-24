@@ -190,17 +190,17 @@ class _Answer:
 
 
 headered = isinstance(lxc.requests, larkagentx._HeaderedRequests)  # put in place when the backend loaded LarkAgentX
-real_requests = lxc.requests._real if headered else None
-if headered:
-    lxc.requests._real = types.SimpleNamespace(post=lambda url, headers=None, **kw: sent_headers.append(dict(headers)) or _Answer())
+if not headered:  # never a real post from this offline test
+    raise SystemExit("LarkAgentX's client module has no _HeaderedRequests")
+real_requests = lxc.requests._real
+lxc.requests._real = types.SimpleNamespace(post=lambda url, headers=None, **kw: sent_headers.append(dict(headers)) or _Answer())
 fake_auth = types.SimpleNamespace(region=types.SimpleNamespace(gateway_url="https://gateway.invalid/", web_origin="https://web.invalid"),
                                   cookies={}, gateway_app_id="1")
 fake_client = types.SimpleNamespace(auth=fake_auth)
 fake_client._gateway_post = lambda p: lxc.LarkClient._gateway_post(fake_client, p)
 pkt = b.lx.builders.build_send_message_packet("x", "900", "rid")
 posted = [fake_client._gateway_post(pkt), larkagentx.newer_post(fake_client, pkt), fake_client._gateway_post(pkt)]
-if headered:
-    lxc.requests._real = real_requests
+lxc.requests._real = real_requests
 out["newer_post"] = [headered, [p.decode() for p in posted], [h.get("x-command-version") for h in sent_headers],
                      sorted({h.get("x-web-version") for h in sent_headers}), sorted({h.get("x-command") for h in sent_headers})]
 cmd, req_cls, resp_cls = gateway.resolve_cmd("messages.DeleteMessageRequest")  # recall (the 渠道's ended questions)

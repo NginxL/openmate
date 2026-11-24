@@ -888,22 +888,17 @@ class SendTest(Base):
         self.assertTrue(b.topic_mode("507"))
         self.assertEqual(getattr(larkagentx._extra_headers, "value", None), None, "the header is gone after the post")
         n = len(S.posts)
-        S.post_answers = [self.as_sent]
+        S.post_answers = [self.refused(), self.as_sent]
         b.send("507", "再开一个")
-        self.assertEqual((len(S.posts), S.posts[-1]["newer"]), (n + 1, {"x-command-version": larkagentx.NEWER_COMMAND_VERSION}),
-                         "known: as a newer client at once")
-        # refused as a newer client too: said in words, never sent a third time
-        S.post_answers = [self.refused()]
-        with self.assertRaises(SendRejected) as e:
-            b.send("507", "还是不行")
-        self.assertIn("要求更新的客户端", e.exception.message)
-        self.assertEqual(len(S.posts), n + 2)
+        self.assertEqual([p["newer"] for p in S.posts[n:]], [{}, {"x-command-version": larkagentx.NEWER_COMMAND_VERSION}],
+                         "known or not: plain first, the newer version only on the retry of what was refused")
+        n = len(S.posts)
         S.chats["513"] = {"id": "513", "type": 2, "chatMode": 1}
         S.post_answers = [self.refusal(), self.refusal()]
         with self.assertRaises(SendRejected) as e:
             b.send("513", "两次都被拒")
         self.assertIn("要求更新的客户端", e.exception.message)
-        self.assertEqual(len(S.posts), n + 4, "the plain one, then the newer one: never a third")
+        self.assertEqual(len(S.posts), n + 2, "the plain one, then the newer one: never a third")
         # a quote there goes into the quoted message's topic, the thread way (once more after the refusal)
         S.post_answers = [self.refusal()]
         self.assertTrue(b.send("508", "@张三 回复", reply_to="61", mentions=[("7001", "张三", 0)]))
