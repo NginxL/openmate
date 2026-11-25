@@ -97,8 +97,9 @@ def agent_label(kind: str) -> str:
 MODEL_FAMILIES = ("Opus", "Sonnet", "Haiku", "Fable", "Claude", "GPT", "Gemini", "Deepseek", "DeepSeek", "Kimi", "Qwen",
                   "Grok", "Glm", "GLM", "Llama", "Mistral", "Doubao", "MiniMax", "Seed", "Hunyuan", "Ernie")
 # (a family with its version right after it, "Qwen3"; joined parts as ids have them, "o4-mini"; then words that start
-# with a capital or a digit and are no shouted word, "Astra", "1M", so "o3 returned HTTP 401" is an error's words)
-MODEL_PART = "(?:(?i:%s)[0-9.]*|o[0-9]+)(?:-[A-Za-z0-9][A-Za-z0-9.]*)*(?: (?![A-Z]{3,}\\b)[A-Z0-9][A-Za-z0-9.\\-]*){0,5}" \
+# with a capital or a digit, "Astra", "1M", "AWQ", but no error's words, so "o3 returned HTTP 401" or
+# "MiniMax M2.5 401 Unauthorized" is a person's line)
+MODEL_PART = "(?:(?i:%s)[0-9.]*|o[0-9]+)(?:-[A-Za-z0-9][A-Za-z0-9.]*)*(?: (?!(?:HTTPS?|API|ERROR)\\b|[1-5][0-9][0-9]\\b)[A-Z0-9][A-Za-z0-9.\\-]*){0,5}" \
     % "|".join(MODEL_FAMILIES)
 EFFORT_PART = "(?:minimal|low|medium|high|xhigh|max|ultra|none)"
 AGENT_PART = "(?:%s)" % "|".join(re.escape(n) for n in AGENT_NAMES + (UNKNOWN_AGENT,))

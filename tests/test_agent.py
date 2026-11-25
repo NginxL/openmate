@@ -1801,6 +1801,9 @@ class DefaultsTest(unittest.TestCase):
         self.assertIn("只有 AI 标记", str(c.exception))
         self.assertFalse(h2.app.agent.is_agent_text("/agent 请排查这条报错\npi · GPT-6.2 HTTP 401"))
         self.assertFalse(h2.app.agent.is_agent_text("/agent 请排查这条报错\ncodex · GPT-6.2 HTTP 401"))
+        self.assertFalse(h2.app.agent.is_agent_text("/agent 帮我排查\nopencode · MiniMax M2.5 401 Unauthorized"))
+        self.assertTrue(h2.app.agent.is_agent_text("答案\nopencode · Qwen3 32B AWQ"), "a model's own suffix")
+        self.assertTrue(h2.app.agent.is_agent_text("答案\nopencode · MiniMax M2.5"))
 
     def test_feishu_marks_of_punctuation_or_a_leading_model(self):
         h = self.make(agent_reply_header="—— {model}（{effort}）", agent_mark_effort=True)
