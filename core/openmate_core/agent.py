@@ -80,6 +80,24 @@ def ai_marked(text: str, marks) -> bool:
     """Whether the message carries one of these marks on its first or its last line (ours or another AI's)."""
     first, last = mark_lines(text)
     return any(m and (first.startswith(m) or last.startswith(m)) for m in marks)
+
+
+_LEAD_SEPARATORS = ",，:：、;；!！~～"
+
+
+def _with_lead(text: str, lead: str) -> str:
+    """text starting with lead ("@name "), the same lead it starts with not doubled: lead, then what follows its
+    separators (spaces and punctuation on its own line; a line break and the layout after it kept)."""
+    if text.startswith(lead):
+        i = j = len(lead)
+        while j < len(text) and text[j] not in "\r\n" and (text[j].isspace() or text[j] in _LEAD_SEPARATORS):
+            j += 1
+        if j > i or j == len(text) or text[j] in "\r\n":  # this lead, not the start of a longer name
+            rest = text[j:]
+            if not rest:
+                return lead
+            return lead + rest if rest[0] in "\r\n" else lead + " " + rest
+    return lead + (" " + text if text else "")
 PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
 FORWARDED_NOTE = "已转给正在做这件事的 Agent"
@@ -619,6 +637,7 @@ class AgentRunner:
         if kind != "user":
             log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
             return
+        at_name = self._name_here(sender, chat_id) if self.auto_at else ""
         with self._lock(GUEST_ROOM):  # the check and the reservation at once: two @s together never pass one place
             with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
                 if not ok:
@@ -635,6 +654,7 @@ class AgentRunner:
                 run["kind"] = "auto"
                 run["asker"] = row.get("sender_name") or ""
                 run["asker_id"] = sender  # a person, as the service said just now: the one the answer @s (_asker_at)
+                run["asker_at"] = at_name  # their name in this chat (a cached name may be another group's alias)
                 self.store.run_put(run)
                 self.store.quota_add(chat_id, "auto", now)
         self._prune()
@@ -2003,10 +2023,7 @@ class AgentRunner:
         t = self._clean_answer(text, run, me)
         at = 0
         if lead:
-            rest = t
-            if rest.startswith(lead) and (len(rest) == len(lead) or rest[len(lead)] in " \t\n,，:：、"):
-                rest = rest[len(lead):].lstrip(" \t\n,，:：、")
-            t = lead + (" " + rest if rest else "")
+            t = _with_lead(t, lead)
         if header:
             line = fill_header(header, *me)
             if run and run.get("kind") == "doc":
@@ -2027,11 +2044,36 @@ class AgentRunner:
             return None
         if not getattr(getattr(self.app, "backend", None), "can_mention", False):
             return None
-        uid, name = str(run.get("asker_id") or ""), str(run.get("asker") or "").strip()
+        uid, name = str(run.get("asker_id") or ""), str(run.get("asker_at") or "").strip()
+        if not uid or not name or "\n" in name or "\r" in name:
+            return None
         me = getattr(self.app, "account", None)
         if me is not None and getattr(me, "id", "") == uid:  # sent as the user, an @ of them reads as an @自己 request
             return None
-        return (uid, name) if uid and name else None
+        # the mark where any OpenMate reads it (AI_MARKS on the first or the last line): a configured mark of its own,
+        # or one an end mark pushes off the last line, would let the asker's own 自动代答 answer this @ of theirs
+        if not ai_marked(self._marked("…", run, ("", ""), "@" + name)[0], AI_MARKS):
+            return None
+        return uid, name
+
+    def _name_here(self, user_id: str, chat_id: str) -> str:
+        """A person's display name in this chat, as the service says it ("" when it cannot say)."""
+        backend = getattr(self.app, "backend", None)
+        if backend is None:
+            return ""
+        try:
+            return str(backend.user_name(user_id, chat_id) or "").strip()
+        except Exception:
+            return ""
+
+    def _at_turn(self, run: dict, key: str) -> bool:
+        """Under the run's lock: whether the reply sent under key is the one that @s the asker. The first answer is;
+        once one was meant to (at_key), only it, unless it surely never went out (its journal entry released, or
+        never taken: a restart before it was sent)."""
+        k = str(run.get("at_key") or "")
+        if k:
+            return k == key or self.store.send_get(k) is None
+        return int(run.get("replies") or 0) == 0
 
     def _where(self, run: dict) -> dict:
         """Where a message about the run goes: back where its request was asked (_where); a run whose placement is
@@ -2124,6 +2166,9 @@ class AgentRunner:
         answer's text, part of the same one reply (checked before anything goes out)."""
         run = self.store.run_get(request.split(".", 1)[0])
         sid = (run or {}).get("session_id") or ""
+        if run is not None and run.get("kind") == "auto":
+            with self._lock("reply:" + run["id"]):  # one answer at a time: which one @s the asker is decided in turn
+                return self._reply_tool(request, text, progress, image)
         if run is None or not sid or run.get("kind") in GUEST_KINDS:
             return self._reply_tool(request, text, progress, image)
         with self._lock("route:" + sid):  # where a reply goes is chosen and held one reply at a time per conversation
@@ -2186,13 +2231,16 @@ class AgentRunner:
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
                 or (not quiet and (cur.get("fallback") == "claimed" or cur.get("timeout_notice") == "claimed")) \
                 or posted("fallback") or posted("timeout")
-            first = not answered  # only the first answer @s its asker: a second one would remind them again
             if (not self._can_edit() or cur.get("kind") == "doc") and answered:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got
                     ref = (done.get("result") or {}).get("message_ref") or "未知"
                     return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, ref, cur.get("image_note") or "")
                 raise RPCError("%s只回复一次，这条已经回复过了（或者结果还不确定），不要再发" % self.app.platform.name)
+            # only one answer @s its asker (a second would remind them again), kept with the run so a restart keeps it
+            asker = self._asker_at(cur) if self._at_turn(cur, key) else None
+            if asker:
+                cur["at_key"] = key
             cur["reply_inflight"] = int(cur.get("reply_inflight") or 0) + 1
             self.store.run_put(cur)
         # the place is held; the model is read once, and the answer is cleaned and marked with the same reading
@@ -2205,8 +2253,10 @@ class AgentRunner:
                     cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
                     self.store.run_put(cur)
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
-        asker = self._asker_at(cur) if first else None
         body, at = self._marked(text, cur, me, "@" + asker[1] if asker else "")
+        if asker and not ai_marked(body, AI_MARKS):  # the mark as it came out is not where others read it: no @
+            asker = None
+            body, at = self._marked(text, cur, me)
         sent_id = ""
         try:
             if cur.get("kind") == "doc":

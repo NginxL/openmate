@@ -225,5 +225,115 @@ class AutoReplyAtTest(unittest.TestCase):
         self.assertEqual((sent["text"], sent["mentions"]), ("接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh", []))
 
 
+    def test_the_at_uses_the_name_this_group_shows(self):
+        # a cached name may be the person's alias in another group: the @ takes this group's, asked when it starts
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        real = h.app.backend.user_name
+        h.app.backend.user_name = lambda uid, chat=None: "乙在本群" if chat == TEAM and uid == "user_example_b" \
+            else real(uid, chat)
+        run, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual(run["asker"], "示例同事乙", "the prompt names them as the message did")
+        self.assertEqual(sent["text"].split("\n")[0], "@乙在本群 接口周五前上线。")
+        self.assertEqual(sent["mentions"], [("user_example_b", "乙在本群", 0)])
+
+    def test_no_name_here_no_at(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        h.app.backend.user_name = lambda uid, chat=None: ""
+        _, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual(sent["mentions"], [])
+        self.assertFalse(sent["text"].startswith("@"))
+
+    def test_a_mark_others_cannot_read_never_ats(self):
+        # the asker's own 自动代答 must see an AI's answer: a mark of one's own, or one an end mark pushes off the
+        # last line, is not where any OpenMate reads it
+        for cfg in ({"auto_reply_header": "{model} 代答"}, {"agent_reply_suffix": "—— 以上仅供参考"}):
+            h = make(self, **cfg)
+            h.app.store.autoreply_set(TEAM, True)
+            _, sent = self.answer(h, "接口周五前上线。")
+            self.assertEqual(sent["mentions"], [], cfg)
+            self.assertTrue(sent["text"].startswith("接口周五前上线。"), cfg)
+        h = make(self, agent_reply_suffix="> 🤖 AI 代答，仅供参考")  # an end mark that is itself a mark: read there
+        h.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual(len(sent["mentions"]), 1)
+
+    def test_an_at_the_agent_wrote_with_other_spacing_is_not_doubled(self):
+        cases = [("@示例同事乙\u3000收到", "@示例同事乙 收到"), ("@示例同事乙！收到", "@示例同事乙 收到"),
+                 ("@示例同事乙\r\n收到", "@示例同事乙\r\n收到"), ("@示例同事乙\n  - 第一点\n  - 第二点", "@示例同事乙\n  - 第一点\n  - 第二点")]
+        for written, want in cases:
+            h = make(self)
+            h.app.store.autoreply_set(TEAM, True)
+            _, sent = self.answer(h, written)
+            self.assertEqual(sent["text"].rsplit("\n\n", 1)[0], want, repr(written))
+            self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", 0)])
+
+    def test_a_refused_first_answer_leaves_the_at_to_the_next(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        h.world.send_fail = "rejected"
+        with self.assertRaises(Exception):
+            h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+        h.tool("agent_reply", request=run["id"], text="接口周五前上线，文档同步更新。")
+        self.assertEqual(h.sent()[-1]["mentions"], [("user_example_b", "示例同事乙", 0)])
+
+    def test_an_answer_that_may_have_gone_keeps_the_at_its_own(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        h.world.send_fail = "uncertain"
+        with self.assertRaises(Exception):
+            h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+        h.tool("agent_reply", request=run["id"], text="补充：文档也一起更新。")
+        self.assertEqual(h.sent()[-1]["mentions"], [], "the first may have @-ed them already")
+
+    def test_a_restart_before_the_send_still_ats(self):
+        # the answer's place was held (reply_inflight) and the extension stopped before its journal entry was taken
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        cur = h.app.store.run_get(run["id"])
+        cur["reply_inflight"], cur["at_key"] = 1, "agent:%s:%s" % (run["id"], "0" * 32)
+        h.app.store.run_put(cur)
+        h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+        self.assertEqual(h.sent()[-1]["mentions"], [("user_example_b", "示例同事乙", 0)])
+
+    def test_two_answers_at_once_one_at(self):
+        import threading
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        errors = []
+
+        def reply():
+            try:
+                h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        ts = [threading.Thread(target=reply) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(10)
+        sent = [x for x in h.sent() if x["chat"] == TEAM and x["text"].endswith("xhigh")]
+        self.assertEqual(len(sent), 1, (sent, errors))
+        self.assertEqual(sent[0]["mentions"], [("user_example_b", "示例同事乙", 0)])
+
+    def test_an_old_run_or_the_account_itself_is_never_at(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        cur = h.app.store.run_get(run["id"])
+        self.assertEqual(h.app.agent._asker_at(dict(cur, asker_id=h.world.me.id)), None, "never the account itself")
+        for k in ("asker_id", "asker_at"):
+            cur.pop(k, None)
+        h.app.store.run_put(cur)  # a run started before this version
+        h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+        self.assertEqual(h.sent()[-1]["mentions"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
