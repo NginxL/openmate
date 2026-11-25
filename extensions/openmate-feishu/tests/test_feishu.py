@@ -78,7 +78,7 @@ class ManifestTest(unittest.TestCase):
                                        "agent_ack_reaction",
                                        "agent_done_reaction", "agent_fail_reaction",
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
-                                       "auto_reply_header",
+                                       "auto_reply_header", "auto_reply_at_asker",
                                        "agent_reply_suffix",
                                        "history_chats", "triage_rules", "lark_cli", "lark_cli_profile", "starkmesh_url", "needs_hours", "bookmarks"])
         self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])
@@ -89,8 +89,8 @@ class ManifestTest(unittest.TestCase):
         d = config_defaults(MANIFEST)
         self.assertEqual(props["starkmesh_url"]["format"], "uri")
         self.assertNotIn("starkmesh_url", d, "an address a network permission names is the user's to write: no default")
-        self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"]),
-                         (True, 20, "> 🤖 AI 代答 · {model} · {effort}"))
+        self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"], d["auto_reply_at_asker"]),
+                         (True, 20, "> 🤖 AI 代答 · {model} · {effort}", True))
         self.assertEqual(d["larkx_commit"], "97ad48e69e34bd8c78ee30f795b7c3759dd81659")
         self.assertTrue(re.match(props["larkx_commit"]["pattern"], d["larkx_commit"]))
         self.assertEqual([c["const"] for c in props["region"]["oneOf"]], ["feishu", "lark"])

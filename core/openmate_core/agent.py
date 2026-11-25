@@ -36,7 +36,7 @@ import secrets
 import threading
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from . import images, views
@@ -239,6 +239,7 @@ class AgentRunner:
         self.auto = bool(cfg.get("auto_reply", True))
         self.auto_docs = bool(cfg.get("auto_reply_docs", False))  # its own switch: /agent alone never answers documents
         self.auto_header = parse_header(cfg.get("auto_reply_header") if cfg.get("auto_reply_header") is not None else AUTO_HEADER)
+        self.auto_at = bool(cfg.get("auto_reply_at_asker", True))  # 自动代答 @s the one it answers (_asker_at)
         try:
             self.auto_most = max(1, int(cfg.get("auto_reply_daily_most") or 20))
         except (TypeError, ValueError):
@@ -633,6 +634,7 @@ class AgentRunner:
                 run = self._new_run(row, asked.strip(), now)
                 run["kind"] = "auto"
                 run["asker"] = row.get("sender_name") or ""
+                run["asker_id"] = sender  # a person, as the service said just now: the one the answer @s (_asker_at)
                 self.store.run_put(run)
                 self.store.quota_add(chat_id, "auto", now)
         self._prune()
@@ -1568,7 +1570,9 @@ class AgentRunner:
         if run.get("kind") == "auto":
             body = "\n".join([
                 "%s在%s的群里 @ 了我。这个群我开了“自动代答”：请你直接代我回复这条消息，不需要我确认。" % (run.get("asker") or "有人", p),
-                "- 这次的 id 是 %s。调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填回复内容。回复会以我的身份发到群里，引用对方那条消息，并自动加上“AI 代答”抬头，你不用自己加。" % (self._ref(run), c, self._ref(run)),
+                "- 这次的 id 是 %s。调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填回复内容。回复会以我的身份发到群里，引用对方那条消息，%s" % (
+                    self._ref(run), c, self._ref(run), "开头自动 @ 对方，并自动加上“AI 代答”抬头，这两样你都不用自己加。"
+                    if self._asker_at(run) else "并自动加上“AI 代答”抬头，你不用自己加。"),
                 "- 你是以我的身份说话：只说有把握的事实，简短，像我平时在群里回复一样，只回复一次。",
                 "- 需要我拍板、承诺、给个人意见，或涉及敏感信息、你不确定的事：只回一句“收到，我看一下稍后回复你”这类话，不要替我答应任何事。",
                 "- 你只有 %s_agent_reply 这一个工具，读不了文件、查不了资料；下面是群里最近的消息，只根据这些回答。" % c,
@@ -1987,24 +1991,55 @@ class AgentRunner:
     def with_suffix(self, text: str, run: Optional[dict] = None, model_effort: Optional[tuple] = None) -> str:
         """The message as it goes out: the AI mark line (the model and effort that answered) after the answer, or on
         top with agent_mark_position "top"; the end mark if one is set. A mark the Agent wrote itself is not doubled."""
+        return self._marked(text, run, model_effort)[0]
+
+    def _marked(self, text: str, run: Optional[dict] = None, model_effort: Optional[tuple] = None,
+                lead: str = "") -> Tuple[str, int]:
+        """with_suffix, and lead ("@name") put first in the answer itself, under a mark on top, so the mark stays
+        the message's first or last line; the same "@name" the Agent wrote there itself is not doubled.
+        (the message, where lead starts in it)."""
         header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
         me = model_effort if model_effort is not None else (self._model_of(run, header) if header else ("", ""))
         t = self._clean_answer(text, run, me)
+        at = 0
+        if lead:
+            rest = t
+            if rest.startswith(lead) and (len(rest) == len(lead) or rest[len(lead)] in " \t\n,，:：、"):
+                rest = rest[len(lead):].lstrip(" \t\n,，:：、")
+            t = lead + (" " + rest if rest else "")
         if header:
             line = fill_header(header, *me)
             if run and run.get("kind") == "doc":
                 line = line.lstrip("> ").strip()  # a comment shows a quote mark as it is
-            t = (line + "\n" + t) if self.mark_position == "top" else (t + "\n\n" + line)
+            if self.mark_position == "top":
+                t, at = line + "\n" + t, len(line) + 1
+            else:
+                t = t + "\n\n" + line
         if self.suffix:
             t += ("" if self.suffix.startswith("\n") else "\n\n") + self.suffix
-        return t
+        return t, at
+
+    def _asker_at(self, run: dict) -> Optional[Tuple[str, str]]:
+        """(user id, name) the answer of a 自动代答 @s: the one who asked (auto_reply_at_asker, on by default). Only
+        where the platform takes real @s, the run knows them by id and by name, and the answer carries the 代答 mark:
+        an unmarked answer that @s its asker could set two people's 自动代答 answering each other."""
+        if run.get("kind") != "auto" or not self.auto_at or not self.auto_header:
+            return None
+        if not getattr(getattr(self.app, "backend", None), "can_mention", False):
+            return None
+        uid, name = str(run.get("asker_id") or ""), str(run.get("asker") or "").strip()
+        me = getattr(self.app, "account", None)
+        if me is not None and getattr(me, "id", "") == uid:  # sent as the user, an @ of them reads as an @自己 request
+            return None
+        return (uid, name) if uid and name else None
 
     def _where(self, run: dict) -> dict:
         """Where a message about the run goes: back where its request was asked (_where); a run whose placement is
         unknown, as before: its request's thread, else a thread opened on the request."""
         return _where(run["request_id"], run.get("root_id") or "", run.get("placement") or "", run["request_id"])
 
-    def _send(self, run: dict, key: str, body: str, reply_to: str, root: str, to_chat: bool = False) -> dict:
+    def _send(self, run: dict, key: str, body: str, reply_to: str, root: str, to_chat: bool = False,
+              mentions: Optional[List[Tuple[str, str, int]]] = None) -> dict:
         """Send body into the run's chat as the user, once per key (the send journal). Nobody confirms these sends
         (the user asked for them with /agent), so each one that went out is told to the hub's sent-as-user ledger
         (sent.record, allowed by the manifest's sends_as_user); one answered from the journal is not told again."""
@@ -2013,7 +2048,8 @@ class AgentRunner:
             self._still_ours(run)
             if not self._remember_post(body, run):
                 raise RPCError("换了%s账号，这个 /agent 请求是之前那个账号的，不再以你的身份发出" % self.app.platform.name)
-            mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None, to_chat=to_chat)
+            extra = {"mentions": mentions} if mentions else {}  # only when set, like send_as_user's own words
+            mid = self.app.send_as_user(run["chat_id"], body, reply_to or None, root or None, to_chat=to_chat, **extra)
             chat = self.store.get_chat(run["chat_id"])
             self.app.record_sent(run["chat_id"], body, str(mid or ""), reply_to=reply_to, root=root,
                                  session_id=run.get("session_id") or "", machine_id=run.get("machine_id") or "",
@@ -2150,6 +2186,7 @@ class AgentRunner:
             answered = int(cur.get("replies") or 0) + int(cur.get("reply_inflight") or 0) > 0 \
                 or (not quiet and (cur.get("fallback") == "claimed" or cur.get("timeout_notice") == "claimed")) \
                 or posted("fallback") or posted("timeout")
+            first = not answered  # only the first answer @s its asker: a second one would remind them again
             if (not self._can_edit() or cur.get("kind") == "doc") and answered:
                 done = self.store.send_get(key)
                 if done is not None and done["state"] == "done":  # the same reply asked again: what it got
@@ -2168,13 +2205,15 @@ class AgentRunner:
                     cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
                     self.store.run_put(cur)
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
-        body = self.with_suffix(text, cur, me)
+        asker = self._asker_at(cur) if first else None
+        body, at = self._marked(text, cur, me, "@" + asker[1] if asker else "")
         sent_id = ""
         try:
             if cur.get("kind") == "doc":
                 res = self._doc_reply(cur, key, body)
             else:
-                res = self._send(cur, key, body, **self._where(cur))
+                mentions = [(asker[0], asker[1], at)] if asker else None
+                res = self._send(cur, key, body, mentions=mentions, **self._where(cur))
             sent_id = str(res.get("message_ref") or "")
             went = True
         except RPCError:

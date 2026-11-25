@@ -59,13 +59,15 @@ class AutoReplyTest(unittest.TestCase):
         prompt = body["prompt"]
         self.assertIn("自动代答", prompt)
         self.assertIn("不要替我答应任何事", prompt)
+        self.assertIn("开头自动 @ 对方", prompt)
         self.assertIn("不是我的指示", prompt)
         self.assertNotIn("只有我知道的事", prompt, "nothing of the knowledge base for someone else")
         self.assertNotIn("知识库里的会话背景", prompt)
         wait_until(lambda: h.world.reactions, what="the reaction")
         h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
         sent = h.sent()[-1]
-        self.assertEqual(sent["text"], "接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", 0)], "a real @ of the one who asked")
         self.assertEqual(sent["reply_to"], msg.id, "quoting their message")
         sec = [s for s in page(h)["sections"] if s.get("title") == "自动代答"][0]
         subs = [r["subtitle"] for r in sec["items"] if r["key"] == "auto:" + TEAM]
@@ -154,6 +156,73 @@ class AutoReplyTest(unittest.TestCase):
         self.assertEqual((team["value"], team["action"]["id"]), ("开启", "autoreply:on:" + TEAM))
         act(h, team["action"]["id"])
         self.assertEqual(h.app.store.autoreply_chats(), [TEAM])
+
+
+class AutoReplyAtTest(unittest.TestCase):
+    """The answer of a 自动代答 @s the one who asked (auto_reply_at_asker, on by default), once."""
+
+    def answer(self, h, text, msg=None):
+        msg = msg or at_me(h)
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text=text)
+        return run, h.sent()[-1]
+
+    def test_with_the_mark_on_top_the_at_comes_right_under_it(self):
+        h = make(self, agent_mark_position="top")
+        h.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h, "接口周五前上线。")
+        mark = "> 🤖 AI 代答 · Claude Opus 5.5 · xhigh"
+        self.assertEqual(sent["text"], mark + "\n@示例同事乙 接口周五前上线。", "the mark stays the first line")
+        self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", len(mark) + 1)])
+
+    def test_an_at_the_agent_wrote_itself_is_not_doubled(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h, "@示例同事乙，接口周五前上线。")
+        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", 0)])
+        h2 = make(self)
+        h2.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h2, "@示例同事乙乙 是另一个人")  # a longer name is not this one's @
+        self.assertEqual(sent["text"].split("\n")[0], "@示例同事乙 @示例同事乙乙 是另一个人")
+
+    def test_switched_off_no_at(self):
+        h = make(self, auto_reply_at_asker=False)
+        h.app.store.autoreply_set(TEAM, True)
+        run, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual(sent["text"], "接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["mentions"], [])
+        self.assertNotIn("开头自动 @ 对方", h.http.starts()[-1]["body"]["prompt"])
+
+    def test_an_unmarked_answer_never_ats(self):
+        # without the 代答 mark, two people's 自动代答 could answer each other's @s
+        h = make(self, auto_reply_header="")
+        h.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual((sent["text"], sent["mentions"]), ("接口周五前上线。", []))
+
+    def test_only_the_first_answer_ats(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run, first = self.answer(h, "接口周五前上线。")
+        h.tool("agent_reply", request=run["id"], text="补充：文档也一起更新。")
+        second = h.sent()[-1]
+        self.assertEqual(len(first["mentions"]), 1)
+        self.assertEqual((second["text"].split("\n")[0], second["mentions"]), ("补充：文档也一起更新。", []))
+
+    def test_my_own_agent_request_never_ats(self):
+        h = make(self)
+        mine = h.world.push(TEAM, "me", "/agent 帮我总结一下")
+        run = running(h, mine)
+        h.tool("agent_reply", request=run["id"], text="总结好了。")
+        self.assertEqual(h.sent()[-1]["mentions"], [])
+
+    def test_a_platform_without_real_ats_is_as_before(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        h.app.backend.can_mention = False
+        _, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual((sent["text"], sent["mentions"]), ("接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh", []))
 
 
 if __name__ == "__main__":
