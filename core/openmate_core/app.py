@@ -35,13 +35,15 @@ from .wire import Peer, RPCError
 
 log = logging.getLogger("openmate")
 
-_SECRETISH = re.compile(r"[A-Za-z0-9+/=_.-]{24,}")
+_RUN = re.compile(r"[A-Za-z0-9+/=_.-]{16,}")
+_CODE = re.compile(r"[a-z_]+")  # an error code such as event_cursor_expired: kept
 
 
 def loggable(reason: str) -> str:
-    """A link's why as the log may keep it: one line, at most 200 characters, and any long token-like run (an echoed
-    key, a signature) replaced, since a why can carry a service's own error text."""
-    return _SECRETISH.sub("…", " ".join(str(reason).split()))[:200]
+    """A link's why as the log may keep it: one line, at most 200 characters, and every run of 16 or more key-like
+    characters that is not a plain error code replaced (a why can carry a service's own error text, an echoed key)."""
+    one = " ".join(str(reason).split())
+    return _RUN.sub(lambda m: m.group(0) if _CODE.fullmatch(m.group(0)) else "…", one)[:200]
 
 EMPTY_PAGES = 6  # a re-read of the messages stored with no text: at most this many pages per chat
 BLANK_MOST = 10  # at every catch-up and done round, this many messages of the last day still empty are read again
@@ -134,6 +136,7 @@ class ConnectorApp:
         self.account: Optional[Account] = None
         self.link = "idle"  # idle | connecting | up | down | expired | error
         self.link_reason = ""
+        self._link_line = ""  # the link's last line in the log
         self.last_sync = 0.0
         self.last_event = 0.0
         self._gen = 0
@@ -757,18 +760,19 @@ class ConnectorApp:
             if gen != self._gen:
                 return
             # a new state, or the same not-up state for another reason (a link down for one reason, then for another):
-            # the log says why, so a link stuck down can be told apart from one that is only slow
-            changed = state != self.link or (state != "up" and reason != self.link_reason)
+            # the log says why, so a link stuck down can be told apart from one that is only slow. Compared as logged:
+            # whys that differ only in what the log leaves out are one line.
+            line = "link %s: %s" % (state, loggable(reason)) if reason and state != "up" else "link %s" % state
+            changed = state != self.link or line != self._link_line
+            if changed:
+                self._link_line = line
             self.link, self.link_reason = state, reason
             if state == "up":
                 self._link_up.set()
             else:
                 self._link_up.clear()
         if changed:
-            if reason and state != "up":
-                log.info("link %s: %s", state, loggable(reason))
-            else:
-                log.info("link %s", state)
+            log.info("%s", line)
 
     def _link_loop(self, gen: int, stop: threading.Event, restore: bool) -> None:
         t = self.timing

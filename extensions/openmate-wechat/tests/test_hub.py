@@ -38,6 +38,15 @@ def wait_until(cond, timeout=5.0):
     return False
 
 
+class FrameCodeTest(unittest.TestCase):
+    def test_only_the_code_of_an_error_frame_is_kept(self):
+        self.assertEqual(wh.frame_code('{"error":{"code":"event_cursor_expired","detail":"key k3y-0f-16-chars!"}}'),
+                         "event_cursor_expired")
+        self.assertEqual(wh.frame_code('{"error":{"code":"k3y 0f text"}}'), "unknown")
+        self.assertEqual(wh.frame_code('{"error":"plain words"}'), "unknown")
+        self.assertEqual(wh.frame_code("not json at all"), "unreadable")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         wb.BUSINESS.clear()

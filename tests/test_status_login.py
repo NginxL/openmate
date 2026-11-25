@@ -78,12 +78,16 @@ class StatusTest(unittest.TestCase):
             with h.world.lock:
                 h.world.link_notes += [("down", "网络不通"), ("down", "网络不通"),
                                        ("down", "AgentWechat 出错了：\nevent_cursor_expired %s" % secret), ("up", "")]
-            wait_until(lambda: any("event_cursor_expired" in line for line in logs.output)
-                       and logs.output[-1] == "INFO:openmate:link up", what="the downs and the way back up")
-        lines = [line for line in logs.output if ":link " in line]
-        self.assertEqual(lines, ["INFO:openmate:link down: 网络不通",  # the same why again: not again
-                                 "INFO:openmate:link down: AgentWechat 出错了： event_cursor_expired …",
-                                 "INFO:openmate:link up"])
+                h.world.link_notes += [("down", "请求 %s 失败" % ("a1b2c3d4" * 3)), ("down", "请求 %s 失败" % ("e5f6a7b8" * 3)),
+                                       ("up", "")]
+            expected = ["INFO:openmate:link down: 网络不通",  # the same why again: not again
+                        "INFO:openmate:link down: AgentWechat 出错了： event_cursor_expired …",
+                        "INFO:openmate:link up",
+                        "INFO:openmate:link down: 请求 … 失败",  # whys alike once left out of the log: one line
+                        "INFO:openmate:link up"]
+            wait_until(lambda: [line for line in logs.output if ":link " in line] == expected,
+                       what="the downs and the way back up")
+        self.assertEqual([line for line in logs.output if ":link " in line], expected)
         self.assertNotIn(secret, "\n".join(logs.output))
 
     def test_unreachable_then_reconnect(self):

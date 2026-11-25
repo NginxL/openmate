@@ -115,6 +115,16 @@ def strip_label(body: str, label: str) -> str:
     return b[len(label):].strip() if b.startswith(label) else b
 
 
+
+def frame_code(data: str) -> str:
+    """The code of the hub's error frame ({"error":{"code":…}}), never its other text (a reason may end up in a log)."""
+    try:
+        err = json.loads(data).get("error")
+    except (ValueError, AttributeError):
+        return "unreadable"
+    code = str(err.get("code") or "") if isinstance(err, dict) else ""
+    return code if code.replace("_", "").isalnum() and len(code) <= 64 else "unknown"
+
 class HubError(Exception):
     """The hub answered with an error (status, its error code)."""
 
@@ -333,7 +343,7 @@ class HubClient:
                     if data and name == "error":
                         # the hub's last frame before it closes the stream ({"error":{"code":…}}): whatever it says,
                         # the reconnect's own answer tells (a cursor really too old is a 410 then)
-                        raise HubDown("the stream ended with an error: %s" % "".join(data)[:200])
+                        raise HubDown("the stream ended with an error: %s" % frame_code("".join(data)))
                     if data:
                         yield eid, "\n".join(data)
                     eid, name, data = "", "", []
