@@ -1701,9 +1701,8 @@ class DefaultsTest(unittest.TestCase):
         h.tool("agent_reply", request=run["id"], text="周报写好了")
         self.assertEqual(h.sent()[-1]["text"], "周报写好了\n\n—— Opus 5.5（xhigh）\n\n" + SUFFIX)
         self.assertEqual(h.world.reactions, [])
-        # without agent_mark_effort a mark names the model alone, its effort's brackets or colon gone with it
-        for header, want in (("> 🤖 AI 回复 · {model} · {effort}", "> 🤖 AI 回复 · Opus 5.5"),
-                             ("—— {model}（{effort}）", "—— Opus 5.5"), ("> {model}：{effort}", "> Opus 5.5")):
+        # without agent_mark_effort a mark names the model alone
+        for header, want in (("> 🤖 AI 回复 · {model} · {effort}", "> 🤖 AI 回复 · Opus 5.5"),):
             h3 = self.make(agent_reply_header=header)
             run = running(h3, ask(h3, "/agent 只写模型"))
             h3.tool("agent_reply", request=run["id"], text="好了")

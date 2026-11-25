@@ -199,12 +199,7 @@ def fill_header(template: str, model: str, effort: str) -> str:
 
 
 def fill_header_raw(template: str, model: str, effort: str) -> str:
-    gone = "\x00"  # where a part is left empty: its brackets, or a colon before it at the end, go with it
-    out = template.replace("{model}", model or gone).replace("{effort}", effort or gone)
-    if gone in out:
-        out = re.sub("[（(\\[【]\\s*\x00\\s*[）)\\]】]", gone, out)  # "Opus 5.5（{effort}）"
-        out = re.sub("\\s*[:：]\\s*\x00(?=\\s*$)", "", out)  # "> {model}：{effort}"
-        out = out.replace(gone, "")
+    out = template.replace("{model}", model).replace("{effort}", effort)
     out = re.sub(r"(\s*·\s*)+(?=\s*(·|$))", "", out)  # empty parts
     return re.sub(r"\s+$", "", out)
 
@@ -665,6 +660,12 @@ class AgentRunner:
         if kind != "user":
             log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
             return
+        # the name the @ shows, asked outside the lock (it may take the network a while) and before the run exists (so
+        # nothing it waits for can undo a /stop): only for an answer that @s (_may_at) and that the group's quota
+        # still lets start (checked again with the reservation); their name in this chat (a cached one may be another
+        # group's alias)
+        at_name = self._name_here(sender, chat_id) if self._may_at() and not self._guest_room(chat_id, "auto", now) \
+            else ""
         with self._lock(GUEST_ROOM):  # the check and the reservation at once: two @s together never pass one place
             with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
                 if not ok:
@@ -681,12 +682,9 @@ class AgentRunner:
                 run["kind"] = "auto"
                 run["asker"] = row.get("sender_name") or ""
                 run["asker_id"] = sender  # a person, as the service said just now: the one the answer @s (_asker_at)
+                run["asker_at"] = at_name
                 self.store.run_put(run)
                 self.store.quota_add(chat_id, "auto", now)
-        if self._may_at():  # the name the @ shows: asked once the run has its place, outside the lock (it may take
-            # the network a while), before the run starts; their name in this chat (a cached one may be another group's)
-            run["asker_at"] = self._name_here(sender, chat_id)
-            self.store.run_put(run)
         self._prune()
         self._start_run(run, row, epoch)
 
@@ -2027,14 +2025,23 @@ class AgentRunner:
                 model, effort = model_effort
             else:
                 model, effort = (run or {}).get("model") or "", (run or {}).get("effort") or ""
-            # this run's mark as any version renders it (an Agent may copy an earlier one from the chat's history):
-            # the model by its full or its own name, with or without the effort
-            own = {fill_header_raw(h, name, e).lstrip("> ").strip() for h in (self.header, self.auto_header) if h
-                   for name in {mark_model(model), model_label(model)} for e in {(effort or "").strip(), ""}}
+            own, whole = set(), set()
+            for h in (self.header, self.auto_header):
+                if not h:
+                    continue
+                line = fill_header(h, model, effort if self.mark_effort else "")
+                if not re.sub(r"[\W_]", "", h.replace("{model}", "").replace("{effort}", "")):
+                    whole.add(line.strip())  # a mark of punctuation alone ("> {model}"): only the very line, ">" too
+                    continue
+                own.add(line.lstrip("> ").strip())
+                # and as other versions render it (an Agent may copy one from the chat's history): the model by its
+                # full or its own name, with or without the effort
+                own |= {fill_header_raw(h, name, e).lstrip("> ").strip()
+                        for name in {mark_model(model), model_label(model)} for e in {(effort or "").strip(), ""}}
             own |= {DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]}
             if self.suffix.strip():
                 own.add(self.suffix.strip().lstrip("> ").strip())
-            is_mark = lambda line: line.lstrip("> ").strip() in own  # noqa: E731
+            is_mark = lambda line: line.lstrip("> ").strip() in own or line.strip() in whole  # noqa: E731
         while t and is_mark(t.split("\n", 1)[0]):
             t = t.split("\n", 1)[1].lstrip() if "\n" in t else ""
         while t and is_mark(t.rsplit("\n", 1)[-1]):

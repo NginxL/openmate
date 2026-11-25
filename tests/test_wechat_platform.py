@@ -198,6 +198,11 @@ class MarksAndMentionsTest(unittest.TestCase):
         run = running(h, ask(h, "/agent 状态"))
         h.tool("agent_reply", request=run["id"], text="【Claude Opus 5.5 回复】\n一切正常。")
         self.assertEqual(h.sent()[-1]["text"], "【Opus 5.5 回复】\n一切正常。")
+        # a mark of punctuation alone takes no other version's form: an answer that is a model's name is an answer
+        h = wechat(self, agent_reply_header="> {model} · {effort}", agent_mark_position="top")
+        run = running(h, ask(h, "/agent 你是什么模型？只回模型名"))
+        h.tool("agent_reply", request=run["id"], text="Opus 5.5")
+        self.assertEqual(h.sent()[-1]["text"], "> Opus 5.5\nOpus 5.5")
 
     def test_a_header_that_starts_with_a_placeholder_is_seen(self):
         h = wechat(self, auto_reply_header="> {model} · [智能代答]", agent_mark_position="top")

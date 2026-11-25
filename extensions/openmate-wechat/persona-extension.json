@@ -164,7 +164,7 @@
       "agent_mark_effort": {
         "type": "boolean",
         "title": "AI 标记写上思考强度",
-        "description": "打开后 AI 标记里 {effort} 换成回答它的思考强度（如 high）；关着只写模型。",
+        "description": "打开后 AI 标记里 {effort} 换成回答它的思考强度（如 high）；关着 {effort} 留空，连同它前面的“ · ”一起去掉，只写模型。",
         "default": false
       },
       "agent_ack_reaction": {
