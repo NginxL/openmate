@@ -103,6 +103,15 @@ class DocSafetyTest(unittest.TestCase):
 
 
 class DocReplyTest(unittest.TestCase):
+    def test_a_comment_of_its_mark_alone_is_no_answer(self):
+        h = make(self, auto_reply_header="> —— {model}")
+        mention(h)
+        run = doc_run(h)
+        with self.assertRaises(Exception) as c:
+            h.tool("agent_reply", request=run["id"], text="—— Opus 5.5")  # the mark as a comment shows it
+        self.assertIn("只有 AI 标记", str(c.exception))
+        self.assertEqual(h.world.doc_replies, [])
+
     def test_answered_in_the_comment_as_me(self):
         h = make(self)
         h.world.doc_texts[URL] = "# 示例方案\n口径：按自然周统计。" + "很长的正文。" * 3000

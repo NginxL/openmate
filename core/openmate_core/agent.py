@@ -80,7 +80,11 @@ def mark_lines(text: str) -> tuple:
 # an Agent's name before the model ("claude code · Opus 5.5", "codex · GPT-6.2 Astra"; the user's marks since
 # 2026-11-25): an AI's mark as the built-in ones are. Lower case as marks write them, so a person's "Claude Code · …" is theirs
 AGENT_NAMES = ("claude code", "codex", "agy", "gemini", "trae", "opencode", "cursor", "kimi", "qwen", "grok", "droid")
-_AGENT_MARK = re.compile("^(?:%s) · \\S" % "|".join(re.escape(n) for n in AGENT_NAMES))
+# a model as mark_model names it ("Opus 5.5", "GPT-6.2 Astra", "Gemini 4 Neon"), and an effort: what a mark's parts look
+# like, so "codex · 登录失败" or "cursor · 未安装" is a person's line, not a mark
+MODEL_PART = "[A-Z][A-Za-z0-9.\\-]*(?: [A-Za-z0-9][A-Za-z0-9.\\-]*){0,5}"
+EFFORT_PART = "(?:minimal|low|medium|high|xhigh|max|ultra|none)"
+_AGENT_MARK = re.compile("^(?:%s) · %s(?: · %s)?$" % ("|".join(re.escape(n) for n in AGENT_NAMES), MODEL_PART, EFFORT_PART))
 
 
 def ai_marked(text: str, marks) -> bool:
@@ -498,7 +502,8 @@ class AgentRunner:
                 line = fill_header_raw(h or "", m, e).lstrip("> ").strip()
                 if not re.sub(r"[\W_]", "", line.replace("\x01", "").replace("\x02", "")):
                     continue  # nothing but punctuation fixed: it would take any "a：b" line for a mark
-                out.append(re.compile(re.escape(line).replace("\x01", ".+?").replace("\x02", ".+?")))
+                model, effort = (MODEL_PART, EFFORT_PART) if feishu else (".+?", ".+?")
+                out.append(re.compile(re.escape(line).replace("\x01", model).replace("\x02", effort)))
         return out
 
     def _is_own_mark_line(self, line: str, feishu: bool = False) -> bool:
@@ -2037,9 +2042,17 @@ class AgentRunner:
                     t = t[: -len(s)].rstrip()
                     if t.endswith(">"):
                         t = t[:-1].rstrip()
-            # and this run's own mark as the very line ("—— Opus 5.5（xhigh）": a mark of punctuation alone)
-            exact = {fill_header(h, model, effort if self.mark_effort else "").strip()
-                     for h in (self.header, self.auto_header) if h}
+            # and this reply's own mark as the very line ("—— Opus 5.5（xhigh）": a mark of punctuation alone), once its
+            # model is known; never a line that is the model's name alone (an answer may be just that), and in a
+            # document's comment as it shows there (without the quote mark)
+            exact = set()
+            header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
+            if header and model:
+                line = fill_header(header, model, effort if self.mark_effort else "")
+                if line.lstrip("> ").strip() != mark_model(model):
+                    exact.add(line.strip())
+                    if run and run.get("kind") == "doc":
+                        exact.add(line.lstrip("> ").strip())
             is_mark = lambda line: self._feishu_mark_line(line) or line.strip() in exact  # noqa: E731
         else:  # WeChat: only a whole line equal to this run's own rendered mark or an old end mark goes
             own, whole = set(), set()
@@ -2108,7 +2121,7 @@ class AgentRunner:
             return None
         # the mark where any OpenMate reads it (AI_MARKS on the first or the last line): a configured mark of its own,
         # or one an end mark pushes off the last line, would let the asker's own 自动代答 answer this @ of theirs
-        if not ai_marked(self._marked("…", run, ("m", ""), "@" + name)[0], AI_MARKS):
+        if not ai_marked(self._marked("…", run, ("claude-opus-5-5", ""), "@" + name)[0], AI_MARKS):
             return None
         return uid, name
 
@@ -2119,7 +2132,7 @@ class AgentRunner:
         if not (self.auto_at and self.auto_header and getattr(getattr(self.app, "backend", None), "can_mention", False)):
             return False
         # (the mark as rendered with some model: "claude code · {model}" is a mark with one, its words alone are not)
-        return ai_marked(self._marked("…", {"kind": "auto"}, ("m", ""), "@…")[0], AI_MARKS)
+        return ai_marked(self._marked("…", {"kind": "auto"}, ("claude-opus-5-5", ""), "@…")[0], AI_MARKS)
 
     def _name_here(self, user_id: str, chat_id: str) -> str:
         """A person's display name in this chat, as the service says it ("" when it cannot say, or says it over more

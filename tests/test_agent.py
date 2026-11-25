@@ -1736,6 +1736,12 @@ class DefaultsTest(unittest.TestCase):
         running(h, ask(h, "/agent 帮我看下\nclaude code 报错了"))
         self.assertEqual(len(h.http.starts()), n + 1, "a request of the user's, not an AI's")
         self.assertFalse(a.is_agent_text("/agent 帮我安装下面这个工具\nclaude code"), "the words alone are the user's")
+        self.assertFalse(a.is_agent_text("/agent 看看这条报错\ncodex · 登录失败"), "a person's line, not a mark")
+        self.assertFalse(a.is_agent_text("/agent 看看这条报错\nclaude code · 登录失败"))
+        h.tool("agent_reply", request=run["id"], text="装好的工具：\ncodex · 已安装\ncursor · 未安装")
+        self.assertEqual(h.sent()[-1]["text"], "装好的工具：\ncodex · 已安装\ncursor · 未安装\n\nclaude code · Opus 5.5")
+        h.tool("agent_reply", request=run["id"], text="claude code")  # asked for the tool's name alone
+        self.assertEqual(h.sent()[-1]["text"], "claude code\n\nclaude code · Opus 5.5")
         self.assertTrue(a.is_agent_text("答案\n\ncodex · GPT-6.2 Astra"), "an Agent's name before the model is an AI's")
 
     def test_feishu_marks_of_punctuation_or_a_leading_model(self):
@@ -1752,6 +1758,10 @@ class DefaultsTest(unittest.TestCase):
         run = running(h2, ask(h2, "/agent 推荐一个适合编程的 AI 助手"))
         h2.tool("agent_reply", request=run["id"], text="这是一款开源的 AI 助手")
         self.assertEqual(h2.sent()[-1]["text"], "这是一款开源的 AI 助手\n\nOpus 5.5 助手")
+        h3 = self.make(auto_reply_header="{model}")  # the 自动代答's mark is no /agent answer's
+        run = running(h3, ask(h3, "/agent 你是什么模型？只回模型名"))
+        h3.tool("agent_reply", request=run["id"], text="Opus 5.5")
+        self.assertTrue(h3.sent()[-1]["text"].startswith("Opus 5.5\n\n"))
 
     def test_the_mark_on_top_on_request_and_marks_at_either_end_are_recognised(self):
         h = self.make(agent_mark_position="top")
