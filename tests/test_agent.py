@@ -1693,19 +1693,25 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(h2.sent()[-1]["text"], "第二条\n\n> 🤖 AI 回复 · Opus 5.5", "asked again")
 
     def test_settings_and_a_refused_reaction(self):
-        h = self.make(agent_ack_reaction="OnIt", agent_reply_header="—— {model}（{effort}）", agent_reply_suffix=SUFFIX)
+        h = self.make(agent_ack_reaction="OnIt", agent_reply_header="—— {model}（{effort}）", agent_reply_suffix=SUFFIX,
+                      agent_mark_effort=True)
         h.world.react_fail = True
         msg = ask(h, "/agent 写个周报")
         run = running(h, msg)  # a refused reaction never holds the request
         h.tool("agent_reply", request=run["id"], text="周报写好了")
         self.assertEqual(h.sent()[-1]["text"], "周报写好了\n\n—— Opus 5.5（xhigh）\n\n" + SUFFIX)
         self.assertEqual(h.world.reactions, [])
-        # the earlier default, as a settings page saved it, is today's: the model alone
-        h3 = self.make(agent_reply_header="> 🤖 AI 回复 · {model} · {effort}")
-        msg = ask(h3, "/agent 旧设置")
-        run = running(h3, msg)
-        h3.tool("agent_reply", request=run["id"], text="好了")
-        self.assertEqual(h3.sent()[-1]["text"], "好了\n\n> 🤖 AI 回复 · Opus 5.5")
+        # without agent_mark_effort a mark names the model alone, its effort's brackets or colon gone with it
+        for header, want in (("> 🤖 AI 回复 · {model} · {effort}", "> 🤖 AI 回复 · Opus 5.5"),
+                             ("—— {model}（{effort}）", "—— Opus 5.5"), ("> {model}：{effort}", "> Opus 5.5")):
+            h3 = self.make(agent_reply_header=header)
+            run = running(h3, ask(h3, "/agent 只写模型"))
+            h3.tool("agent_reply", request=run["id"], text="好了")
+            self.assertEqual(h3.sent()[-1]["text"], "好了\n\n" + want, header)
+        h4 = self.make(agent_mark_effort=True)
+        run = running(h4, ask(h4, "/agent 也写强度"))
+        h4.tool("agent_reply", request=run["id"], text="好了")
+        self.assertEqual(h4.sent()[-1]["text"], "好了\n\n> 🤖 AI 回复 · Opus 5.5 · xhigh")
         h2 = self.make(agent_ack_reaction="", agent_reply_header="")
         msg = ask(h2, "/agent 不要表情")
         run = running(h2, msg)

@@ -141,8 +141,8 @@
       "agent_reply_header": {
         "type": "string",
         "title": "AI 回复标记",
-        "description": "每条 /agent 回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5）；想同时写思考强度就加 {effort}。放在哪由“AI 标记位置”决定。留空表示不加。",
-        "default": "> 🤖 AI 回复 · {model}",
+        "description": "每条 /agent 回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
+        "default": "> 🤖 AI 回复 · {model} · {effort}",
         "maxLength": 200
       },
       "agent_mark_position": {
@@ -160,6 +160,12 @@
           }
         ],
         "default": "end"
+      },
+      "agent_mark_effort": {
+        "type": "boolean",
+        "title": "AI 标记写上思考强度",
+        "description": "打开后 AI 标记里 {effort} 换成回答它的思考强度（如 high）；关着只写模型。",
+        "default": false
       },
       "agent_ack_reaction": {
         "type": "string",
@@ -207,8 +213,8 @@
       "auto_reply_header": {
         "type": "string",
         "title": "代答标记",
-        "description": "自动代答回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5）；想同时写思考强度就加 {effort}。位置同“AI 标记位置”。留空表示不加。",
-        "default": "> 🤖 AI 代答 · {model}",
+        "description": "自动代答回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
+        "default": "> 🤖 AI 代答 · {model} · {effort}",
         "maxLength": 200
       },
       "triage_rules": {

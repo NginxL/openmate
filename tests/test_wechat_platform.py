@@ -192,6 +192,13 @@ class MarksAndMentionsTest(unittest.TestCase):
         person = h.world.push(TEAM, "user_example_b", "@示例用户\u2005【紧急】今天能发版吗？", at_me=True)
         self.assertEqual(running(h, person)["kind"], "auto", "a person's 【紧急】 is a question")
 
+    def test_a_mark_copied_from_an_earlier_version_is_not_doubled(self):
+        # earlier versions named the model in full and with its effort: an Agent may copy such a mark from the chat
+        h = wechat(self, agent_reply_header="【{model} 回复】", agent_mark_position="top")
+        run = running(h, ask(h, "/agent 状态"))
+        h.tool("agent_reply", request=run["id"], text="【Claude Opus 5.5 回复】\n一切正常。")
+        self.assertEqual(h.sent()[-1]["text"], "【Opus 5.5 回复】\n一切正常。")
+
     def test_a_header_that_starts_with_a_placeholder_is_seen(self):
         h = wechat(self, auto_reply_header="> {model} · [智能代答]", agent_mark_position="top")
         h.app.store.autoreply_set(TEAM, True)

@@ -54,10 +54,8 @@ log = logging.getLogger("openmate.agent")
 DEFAULT_PREFIX = "/agent"
 DEFAULT_SUFFIX = "> 🤖 AI 代答，仅供参考"  # the end mark before 0.4: none by default now, still recognized
 KNOWN_SUFFIXES = ("🤖 AI 代答，仅供参考", "🤖")
-DEFAULT_HEADER = "> 🤖 AI 回复 · {model}"  # the model alone (the user, 2026-11-25): {effort} only where configured
-AUTO_HEADER = "> 🤖 AI 代答 · {model}"
-# the earlier defaults, as a settings page may have saved them: they follow the defaults
-_OLD_HEADERS = {"> 🤖 AI 回复 · {model} · {effort}": DEFAULT_HEADER, "> 🤖 AI 代答 · {model} · {effort}": AUTO_HEADER}
+DEFAULT_HEADER = "> 🤖 AI 回复 · {model} · {effort}"  # {effort} is filled only with agent_mark_effort (off)
+AUTO_HEADER = "> 🤖 AI 代答 · {model} · {effort}"
 HEADER_MARK = "🤖 AI 回复"
 AI_MARKS = ("🤖 AI 回复", "🤖 AI 代答", "🤖 AI")  # a line that starts so is an AI's: never answered by ours
 QUIET_KINDS = ("auto", "doc")  # runs nobody asked for in the chat: only the Agent's own replies go out there
@@ -86,6 +84,7 @@ def ai_marked(text: str, marks) -> bool:
 
 
 _LEAD_SEPARATORS = ",，:：、;；!！~～"
+_NAME_JOINERS = "-‐'’._·・"  # between letters they join one name ("Anne-Marie", "O'Neil")
 
 
 def _with_lead(text: str, lead: str) -> str:
@@ -107,7 +106,8 @@ def _with_lead(text: str, lead: str) -> str:
             return lead + text[j:]
         if j > i:
             return lead + " " + text[j:]
-        if unicodedata.category(text[i])[0] in "PS":  # "@张三？": the agent's own @, as it wrote it
+        joined = text[i] in _NAME_JOINERS and i + 1 < len(text) and text[i + 1].isalnum()  # "@Anne-Marie"
+        if not joined and unicodedata.category(text[i])[0] in "PS":  # "@张三？": the agent's own @, as it wrote it
             return text
         # else a longer name ("@张三丰"): not this one's @
     return lead + (" " + text if text else "")
@@ -148,13 +148,10 @@ def parse_suffix(v) -> str:
 
 
 def parse_header(v) -> str:
-    """The reply's first line, {model} and {effort} filled in: the default when unset, none for empty or a space; an
-    earlier default is today's."""
+    """The reply's first line, {model} and {effort} filled in: the default when unset, none for empty or a space."""
     if v is None:
         return DEFAULT_HEADER
     s = str(v)
-    if s.strip() in _OLD_HEADERS:
-        return _OLD_HEADERS[s.strip()]
     return "" if not s.strip() else s.replace("\\n", " ")
 
 
@@ -202,7 +199,12 @@ def fill_header(template: str, model: str, effort: str) -> str:
 
 
 def fill_header_raw(template: str, model: str, effort: str) -> str:
-    out = template.replace("{model}", model).replace("{effort}", effort)
+    gone = "\x00"  # where a part is left empty: its brackets, or a colon before it at the end, go with it
+    out = template.replace("{model}", model or gone).replace("{effort}", effort or gone)
+    if gone in out:
+        out = re.sub("[（(\\[【]\\s*\x00\\s*[）)\\]】]", gone, out)  # "Opus 5.5（{effort}）"
+        out = re.sub("\\s*[:：]\\s*\x00(?=\\s*$)", "", out)  # "> {model}：{effort}"
+        out = out.replace(gone, "")
     out = re.sub(r"(\s*·\s*)+(?=\s*(·|$))", "", out)  # empty parts
     return re.sub(r"\s+$", "", out)
 
@@ -277,6 +279,8 @@ class AgentRunner:
         self.header = parse_header(cfg.get("agent_reply_header"))
         pos = str(cfg.get("agent_mark_position") or "end").strip().lower()
         self.mark_position = pos if pos in MARK_POSITIONS else "end"
+        # the mark names the model alone unless asked (the user, 2026-11-25): {effort} stays empty, with its " · "
+        self.mark_effort = bool(cfg.get("agent_mark_effort", False))
         self.forward = bool(cfg.get("agent_forward", True))  # a follow-up goes to the task's Agent (see the docstring)
         self.auto = bool(cfg.get("auto_reply", True))
         self.auto_docs = bool(cfg.get("auto_reply_docs", False))  # its own switch: /agent alone never answers documents
@@ -661,11 +665,6 @@ class AgentRunner:
         if kind != "user":
             log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
             return
-        # the name the @ shows, asked outside the lock (it may take the network a while), and only for an answer that
-        # @s (_may_at) and that its group's quota still lets start (checked again with the reservation below)
-        at_name = ""
-        if self._may_at() and not self._guest_room(chat_id, "auto", now):
-            at_name = self._name_here(sender, chat_id)
         with self._lock(GUEST_ROOM):  # the check and the reservation at once: two @s together never pass one place
             with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
                 if not ok:
@@ -682,9 +681,12 @@ class AgentRunner:
                 run["kind"] = "auto"
                 run["asker"] = row.get("sender_name") or ""
                 run["asker_id"] = sender  # a person, as the service said just now: the one the answer @s (_asker_at)
-                run["asker_at"] = at_name  # their name in this chat (a cached name may be another group's alias)
                 self.store.run_put(run)
                 self.store.quota_add(chat_id, "auto", now)
+        if self._may_at():  # the name the @ shows: asked once the run has its place, outside the lock (it may take
+            # the network a while), before the run starts; their name in this chat (a cached one may be another group's)
+            run["asker_at"] = self._name_here(sender, chat_id)
+            self.store.run_put(run)
         self._prune()
         self._start_run(run, row, epoch)
 
@@ -2025,11 +2027,10 @@ class AgentRunner:
                 model, effort = model_effort
             else:
                 model, effort = (run or {}).get("model") or "", (run or {}).get("effort") or ""
-            own = {fill_header(h, model, effort).lstrip("> ").strip() for h in (self.header, self.auto_header) if h}
-            # and the same mark as the earlier default rendered it ("🤖 AI 回复 · Claude Opus 5.5 · xhigh"), which an
-            # Agent may copy from the chat's history
-            own |= {fill_header_raw(o, model_label(model), (effort or "").strip()).lstrip("> ").strip()
-                    for o, new in _OLD_HEADERS.items() if new in (self.header, self.auto_header)}
+            # this run's mark as any version renders it (an Agent may copy an earlier one from the chat's history):
+            # the model by its full or its own name, with or without the effort
+            own = {fill_header_raw(h, name, e).lstrip("> ").strip() for h in (self.header, self.auto_header) if h
+                   for name in {mark_model(model), model_label(model)} for e in {(effort or "").strip(), ""}}
             own |= {DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]}
             if self.suffix.strip():
                 own.add(self.suffix.strip().lstrip("> ").strip())
@@ -2057,7 +2058,7 @@ class AgentRunner:
         if lead:
             t = _with_lead(t, lead)
         if header:
-            line = fill_header(header, *me)
+            line = fill_header(header, me[0], me[1] if self.mark_effort else "")
             if run and run.get("kind") == "doc":
                 line = line.lstrip("> ").strip()  # a comment shows a quote mark as it is
             if self.mark_position == "top":
@@ -2088,9 +2089,12 @@ class AgentRunner:
         return uid, name
 
     def _may_at(self) -> bool:
-        """Whether a 自动代答 answer may @ its asker at all: switched on, with the 代答 mark, where real @s exist."""
-        return bool(self.auto_at and self.auto_header
-                    and getattr(getattr(self.app, "backend", None), "can_mention", False))
+        """Whether a 自动代答 answer may @ its asker at all: switched on, where real @s exist, and with the 代答 mark
+        where any OpenMate reads it (AI_MARKS on the first or the last line): a configured mark of its own, or one an
+        end mark pushes off the last line, would let the asker's own 自动代答 answer this @ of theirs."""
+        if not (self.auto_at and self.auto_header and getattr(getattr(self.app, "backend", None), "can_mention", False)):
+            return False
+        return ai_marked(self._marked("…", {"kind": "auto"}, ("", ""), "@…")[0], AI_MARKS)
 
     def _name_here(self, user_id: str, chat_id: str) -> str:
         """A person's display name in this chat, as the service says it ("" when it cannot say, or says it over more

@@ -75,6 +75,7 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
                                        "agent_self_mention",
                                        "agent_machine", "agent_launcher", "agent_forward", "channel_chat", "agent_reply_header", "agent_mark_position",
+                                       "agent_mark_effort",
                                        "agent_ack_reaction",
                                        "agent_done_reaction", "agent_fail_reaction",
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
@@ -90,7 +91,7 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(props["starkmesh_url"]["format"], "uri")
         self.assertNotIn("starkmesh_url", d, "an address a network permission names is the user's to write: no default")
         self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"], d["auto_reply_at_asker"]),
-                         (True, 20, "> 🤖 AI 代答 · {model}", True))
+                         (True, 20, "> 🤖 AI 代答 · {model} · {effort}", True))
         self.assertEqual(d["larkx_commit"], "97ad48e69e34bd8c78ee30f795b7c3759dd81659")
         self.assertTrue(re.match(props["larkx_commit"]["pattern"], d["larkx_commit"]))
         self.assertEqual([c["const"] for c in props["region"]["oneOf"]], ["feishu", "lark"])
@@ -99,7 +100,8 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(props["agent_machine"]["format"], "machine")
         self.assertEqual(props["agent_launcher"]["format"], "launcher")
         self.assertEqual((d["agent_reply_header"], d["agent_ack_reaction"], d["agent_reply_suffix"]),
-                         ("> 🤖 AI 回复 · {model}", "THINKING", ""))
+                         ("> 🤖 AI 回复 · {model} · {effort}", "THINKING", ""))
+        self.assertIs(d["agent_mark_effort"], False, "the mark names the model alone")
         self.assertEqual((props["history_chats"]["minimum"], props["history_chats"]["maximum"], d["history_chats"]), (0, 50, 20))
         self.assertLessEqual(props["triage_rules"]["maxLength"], 4000)
         self.assertIn("http://", props["http_proxy"]["description"])

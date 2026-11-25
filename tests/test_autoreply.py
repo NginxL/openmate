@@ -185,6 +185,10 @@ class AutoReplyAtTest(unittest.TestCase):
         h2.app.store.autoreply_set(TEAM, True)
         _, sent = self.answer(h2, "@示例同事乙乙 是另一个人")  # a longer name is not this one's @
         self.assertEqual(sent["text"].split("\n")[0], "@示例同事乙 @示例同事乙乙 是另一个人")
+        h3 = make(self)
+        h3.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h3, "@示例同事乙-Marie 负责发布")  # nor one joined on
+        self.assertEqual(sent["text"].split("\n")[0], "@示例同事乙 @示例同事乙-Marie 负责发布")
 
     def test_switched_off_no_at(self):
         h = make(self, auto_reply_at_asker=False)
@@ -254,7 +258,8 @@ class AutoReplyAtTest(unittest.TestCase):
 
     def test_no_name_is_asked_for_an_answer_that_never_ats(self):
         # the name may take the network a while: never for an answer without an @, or one its group's quota stops
-        for cfg, mention in (({"auto_reply_at_asker": False}, True), ({"auto_reply_header": ""}, True), ({}, False)):
+        for cfg, mention in (({"auto_reply_at_asker": False}, True), ({"auto_reply_header": ""}, True), ({}, False),
+                             ({"auto_reply_header": "【{model} 代答】"}, True)):  # a mark nobody reads never @s
             h = make(self, **cfg)
             h.app.store.autoreply_set(TEAM, True)
             h.app.backend.can_mention = mention
