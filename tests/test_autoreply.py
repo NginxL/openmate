@@ -92,6 +92,27 @@ class AutoReplyTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(len(h.http.starts()), 1)
 
+    def test_an_at_that_answers_an_ai_message_of_ours_is_left_to_me(self):
+        # whoever answers our 自动代答 (a person, or a bot whose mark we cannot read): never answered again by itself
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+        ours = h.sent()[-1]["id"]
+        n = len(h.http.starts())
+        h.world.push(TEAM, "user_example_b", "@示例用户 好的，那文档呢？", at_me=True, parent_id=ours)
+        time.sleep(0.5)
+        self.assertEqual(len(h.http.starts()), n, "an @ that replies to our answer is the user's")
+        # nor one that quotes the user's own /agent answer (its AI mark), though no run of this store sent it
+        mine = h.world.push(TEAM, "me", "周报写好了\n\n> 🤖 AI 回复 · Opus 5.5")
+        h.world.push(TEAM, "user_example_b", "@示例用户 周报里的数字对吗？", at_me=True, parent_id=mine.id)
+        time.sleep(0.5)
+        self.assertEqual(len(h.http.starts()), n)
+        # a reply to a person's message of the user's is a question as ever
+        plain = h.world.push(TEAM, "me", "我下午看一下")
+        person = h.world.push(TEAM, "user_example_b", "@示例用户 看完了吗？", at_me=True, parent_id=plain.id)
+        self.assertEqual(running(h, person)["kind"], "auto")
+
     def test_a_sender_nobody_can_tell_is_not_answered(self):
         h = make(self)
         h.app.store.autoreply_set(TEAM, True)

@@ -682,11 +682,28 @@ class AgentRunner:
         text = row.get("text") or ""
         if self.is_agent_text(text) or self._other_ai(text):
             return
+        if self._answers_ours(row):
+            log.info("自动代答: not answered (it answers an AI's message of ours); left for the user")
+            return
         with self.app.owned(epoch) as ok:
             if not ok or not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
                 return
         threading.Thread(target=self._auto_start, args=(row, text, now, epoch), name="openmate-agent-auto",
                          daemon=True).start()
+
+    def _answers_ours(self, row: dict) -> bool:
+        """Whether the message replies to (quotes) an AI's message of ours: one an /agent or a 自动代答 of ours sent,
+        or the user's own message with an AI mark. Whoever answers that, a person or someone else's bot whose mark we
+        cannot read, 自动代答 leaves it to the user, so two automatic answerers never go back and forth (the user,
+        2026-11-25)."""
+        parent = row.get("parent_id") or ""
+        if not parent:
+            return False
+        chat_id = row["chat_id"]
+        if any(parent in (r.get("reply_ids") or []) for r in self.store.runs_in_chat(chat_id, 50)):
+            return True
+        quoted = self.store.message(chat_id, parent)
+        return bool(quoted and quoted.get("mine") and self.is_agent_text(quoted.get("text") or ""))
 
     def _auto_start(self, row: dict, text: str, now: float, epoch: Optional[int] = None) -> None:
         chat_id = row["chat_id"]
