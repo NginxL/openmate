@@ -116,6 +116,10 @@ def strip_label(body: str, label: str) -> str:
 
 
 
+# an error code as the hub writes them (event_cursor_expired): the same shape the core's log keeps
+ERROR_CODE = re.compile(r"[a-z]{1,12}(?:_[a-z]{1,12})+")
+
+
 def frame_code(data: str) -> str:
     """The code of the hub's error frame ({"error":{"code":…}}), never its other text (a reason may end up in a log)."""
     try:
@@ -123,7 +127,7 @@ def frame_code(data: str) -> str:
     except (ValueError, AttributeError):
         return "unreadable"
     code = str(err.get("code") or "") if isinstance(err, dict) else ""
-    return code if code.replace("_", "").isalnum() and len(code) <= 64 else "unknown"
+    return code if ERROR_CODE.fullmatch(code) and len(code) <= 64 else "unknown"
 
 class HubError(Exception):
     """The hub answered with an error (status, its error code)."""

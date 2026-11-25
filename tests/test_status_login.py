@@ -70,6 +70,13 @@ class StatusTest(unittest.TestCase):
         h.world.listen_error = None
         h.wait_ok()
 
+    @staticmethod
+    def _link_lines(logs):
+        """The link's lines in the log, less a first "link up" of the sign-in written after the capture began (the
+        sign-in publishes the state before it logs it)."""
+        lines = [line for line in logs.output if ":link " in line]
+        return lines[1:] if lines[:2] == ["INFO:openmate:link up", "INFO:openmate:link down: 网络不通"] else lines
+
     def test_a_link_down_says_why_in_the_log(self):
         h = Harness(self)
         h.sign_in()
@@ -85,9 +92,8 @@ class StatusTest(unittest.TestCase):
                         "INFO:openmate:link up",
                         "INFO:openmate:link down: 请求 … 失败",  # whys alike once left out of the log: one line
                         "INFO:openmate:link up"]
-            wait_until(lambda: [line for line in logs.output if ":link " in line] == expected,
-                       what="the downs and the way back up")
-        self.assertEqual([line for line in logs.output if ":link " in line], expected)
+            wait_until(lambda: self._link_lines(logs) == expected, what="the downs and the way back up")
+        self.assertEqual(self._link_lines(logs), expected)
         self.assertNotIn(secret, "\n".join(logs.output))
 
     def test_unreachable_then_reconnect(self):

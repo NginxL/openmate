@@ -43,6 +43,7 @@ class FrameCodeTest(unittest.TestCase):
         self.assertEqual(wh.frame_code('{"error":{"code":"event_cursor_expired","detail":"key k3y-0f-16-chars!"}}'),
                          "event_cursor_expired")
         self.assertEqual(wh.frame_code('{"error":{"code":"k3y 0f text"}}'), "unknown")
+        self.assertEqual(wh.frame_code('{"error":{"code":"abcdefghijklmnopqrst"}}'), "unknown")  # a lowercase key
         self.assertEqual(wh.frame_code('{"error":"plain words"}'), "unknown")
         self.assertEqual(wh.frame_code("not json at all"), "unreadable")
 

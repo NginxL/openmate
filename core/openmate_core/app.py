@@ -36,14 +36,19 @@ from .wire import Peer, RPCError
 log = logging.getLogger("openmate")
 
 _RUN = re.compile(r"[A-Za-z0-9+/=_.-]{16,}")
-_CODE = re.compile(r"[a-z_]+")  # an error code such as event_cursor_expired: kept
+# words a long run may be and still be logged: an error code (event_cursor_expired) or an exception's name
+# (SSLCertVerificationError); anything else that long (a key, a signature, a random id) is left out
+ERROR_CODE = re.compile(r"[a-z]{1,12}(?:_[a-z]{1,12})+")
+_CLASS_NAME = re.compile(r"[A-Z]*(?:[A-Z][a-z]{2,12})+")
 
 
 def loggable(reason: str) -> str:
     """A link's why as the log may keep it: one line, at most 200 characters, and every run of 16 or more key-like
-    characters that is not a plain error code replaced (a why can carry a service's own error text, an echoed key)."""
+    characters that is not an error code or an exception's name replaced (a why can carry a service's own error
+    text, an echoed key)."""
     one = " ".join(str(reason).split())
-    return _RUN.sub(lambda m: m.group(0) if _CODE.fullmatch(m.group(0)) else "…", one)[:200]
+    keep = lambda m: m.group(0) if ERROR_CODE.fullmatch(m.group(0)) or _CLASS_NAME.fullmatch(m.group(0)) else "…"
+    return _RUN.sub(keep, one)[:200]
 
 EMPTY_PAGES = 6  # a re-read of the messages stored with no text: at most this many pages per chat
 BLANK_MOST = 10  # at every catch-up and done round, this many messages of the last day still empty are read again
