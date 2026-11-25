@@ -464,12 +464,12 @@ class FakeHubHTTP:
                     return 200, {"sessions": [], "total": 0, "has_more": False}
                 status = "offline" if s.get("offline") else "working" if s["working"] else "done"
                 state = {"offline": "offline", "working": "working"}.get(status, "unread")
-                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state}
+                row = {"session_id": sid, "machine_id": mid, "status": status, "state": state,
+                       "agent": s.get("agent", "claude")}  # the Agent is known from the start
                 if self.model_late > 0:  # a session just started is listed before its model
                     self.model_late -= 1
                 else:
-                    row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"),
-                               agent=s.get("agent", "claude"))
+                    row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"))
                 if s.get("background"):
                     row.update(background_working=True, state="working")
                 on = self._todo_of(mid, sid)

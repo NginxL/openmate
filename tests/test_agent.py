@@ -1781,6 +1781,27 @@ class DefaultsTest(unittest.TestCase):
         h.tool("agent_reply", request=run["id"], text="又一句")
         self.assertEqual(h.sent()[-1]["text"], "又一句\n\ncodex · Opus 5.5")
 
+    def test_an_agent_or_a_model_said_late(self):
+        h = self.make(agent_reply_header="{agent} · {model} · {effort}", agent_reply_suffix="")
+        run = running(h, ask(h, "/agent 你好"))
+        h.http.sessions[run["session_id"]].update(agent="")  # the hub has not said the Agent yet
+        h.tool("agent_reply", request=run["id"], text="第一句")
+        self.assertEqual(h.sent()[-1]["text"], "第一句\n\n🤖 AI · Opus 5.5")
+        h.http.sessions[run["session_id"]].update(agent="claude")  # now it has: asked again, not kept empty
+        h.tool("agent_reply", request=run["id"], text="第二句")
+        self.assertEqual(h.sent()[-1]["text"], "第二句\n\nclaude code · Opus 5.5")
+        h2 = self.make(agent_reply_header="{agent} · {model} · {effort}", agent_reply_suffix="")
+        run = running(h2, ask(h2, "/agent 模型一直不来"))
+        h2.http.model_late = 1000
+        h2.tool("agent_reply", request=run["id"], text="先发出去")
+        self.assertEqual(h2.sent()[-1]["text"], "先发出去\n\n🤖 AI", "no model: a built-in mark alone, not the Agent's name")
+        self.assertEqual(h2.app.store.run_get(run["id"]).get("agent"), "claude", "the Agent kept on its own")
+        with self.assertRaises(Exception) as c:
+            h2.tool("agent_reply", request=run["id"], text="🤖 AI")
+        self.assertIn("只有 AI 标记", str(c.exception))
+        self.assertFalse(h2.app.agent.is_agent_text("/agent 请排查这条报错\npi · GPT-6.2 HTTP 401"))
+        self.assertFalse(h2.app.agent.is_agent_text("/agent 请排查这条报错\ncodex · GPT-6.2 HTTP 401"))
+
     def test_feishu_marks_of_punctuation_or_a_leading_model(self):
         h = self.make(agent_reply_header="—— {model}（{effort}）", agent_mark_effort=True)
         run = running(h, ask(h, "/agent 写个周报"))
