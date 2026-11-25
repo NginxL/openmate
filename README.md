@@ -126,7 +126,7 @@ tests/                         用假的平台后端和假的 hub 驱动完整�
 - `scripts/test.sh` 跑全部测试（`python3 -I`）；`PYTHON=/usr/bin/python3 scripts/test.sh` 可以指定解释器。后端的测试用假的 LarkAgentX（`extensions/openmate-feishu/tests/fakelarkx`），不联网；`OPENMATE_LARKX_PYTHON=$HOME/larkx/venv/bin/python scripts/test.sh` 会再对真实的 LarkAgentX 跑冒烟测试（同样不联网、不登录）。
 - 改了代码要发布时，先改扩展的版本号，再运行 `python3 -I scripts/package.py`，把新包和索引一起提交。已经发布的版本不可改动。
 - `OPENMATE_BACKEND=fixture` 让扩展用内置的假后端运行（不连网、不需要账号），可以用来跑 Persona 自己的连接器一致性测试。
-- **从零实现**：只依据 Persona（MIT）公开的协议文档和本仓库的功能清单编写，不含任何其他飞书桥接项目的代码或文字；LarkAgentX 只通过它的 API 调用，不复制它的代码。仓库里不放任何公司内容。
+- **代码来源**：主要依据 Persona（MIT）公开的协议文档和本仓库的功能清单编写；为了和上游行为一致而直接用到其他项目代码的地方，都在代码注释里注明出处。LarkAgentX 只通过它的公开接口调用。仓库里不放任何公司内容。
 
 ## English
 

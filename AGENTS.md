@@ -30,7 +30,10 @@ OpenMate 是 Persona 的扩展（飞书、微信）。这个仓库的任务**做
 ## 规矩
 
 - 这是公开仓库：提交身份用 `NginxL <8777777+NginxL@users.noreply.github.com>`，不写任何公司内部的内容、地址和名字。
-- 只参考思路，不抄 lark-bridge、larkx、LarkAgentX、openlark 的代码；只能调用 LarkAgentX 的公开接口。
+- 代码来源（用户 2026-11-25 放开）：先照功能说明和协议自己写；自己写做不到和上游严格一致时，可以直接用 Persona、larkx、LarkAgentX 等项目的代码。
+  - 用到别人代码的地方，在注释里写明出处：仓库、文件、提交号。
+  - 私有或公司内部的代码（openlark、lark-bridge 等）放进来就公开了，和上一条冲突：用之前先停下来问用户。
+- 调用 LarkAgentX 只用它的公开接口。
   - 唯一例外（用户 2026-11-24 同意）：`larkagentx.py` 的 `_HeaderedRequests` / `newer_post`。在开了话题模式的群里发新消息被飞书以 5801 拒绝时，只在那一次重发里把请求头 `x-command-version` 换成 `NEWER_COMMAND_VERSION`。不要扩大它的范围，也不要去掉它。
 - 不打印、不提交任何密钥和凭据。
 - 微信扩展和原生组件（`extensions/openmate-wechat/`、`native/`）也按上面的流程一路做完，不用等别人审。改了 `native/` 的 Rust 代码，本机跑 `cargo test --locked`（在 `native/matewechat-native` 里），CI 的 Rust 测试也要通过。
