@@ -2254,6 +2254,17 @@ class PictureTest(Base):
         self.assertIsNone(b.chat_info("513").avatar)
         self.assertIn("/v3_new~?", b.chat_picture("513").avatar, "the core's ask for a picture reads the chat now")
 
+    def test_after_a_restart_a_direct_chats_picture_is_its_other_persons_as_the_core_knows_them(self):
+        b = self.b
+        S.chats["501"] = {"id": "501", "type": 1, "name": "示例同事"}  # (named: the name's own lookup is not this test's)
+        b._peers.clear()  # a restart: nobody of the direct chats is known until they write again
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {"7003": {"id": "7003", "avatar": {"key": "v3_p"}}}}
+        self.assertIsNone(b.chat_picture("501").avatar, "not known here, not told: no picture (asked again later)")
+        self.assertIn("/v3_p~?", b.chat_picture("501", "7003").avatar, "the other person the store knows")
+        b._chats.clear()
+        S.chats["510"] = {"id": "510", "type": 2, "name": "示例群", "avatar": {"key": "v3_group_example"}}
+        self.assertIn("/v3_group_example~?", b.chat_picture("510", "7003").avatar, "a group's is its own")
+
     def test_a_picture_not_known_says_none_and_a_key_that_is_no_key_is_not_put_in_an_address(self):
         b = self.b
         b._peers["501"] = "7003"

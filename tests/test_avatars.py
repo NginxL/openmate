@@ -120,6 +120,26 @@ class AvatarTest(unittest.TestCase):
         after = h.app.store.get_chat(TEAM)
         self.assertEqual((after["muted"], after["name"], after["kind"]), (True, "列表里的名字", team["kind"]))
 
+    def test_a_direct_chats_other_person_is_told_to_the_backend_from_the_store(self):
+        world = pictured(FixtureWorld())
+        world.chats[DM].avatar = None  # the backend knows nobody of it (restarted): only the store does
+        h = signed(self, world)
+        told = []
+
+        def chat_picture(chat_id, peer_id=""):
+            told.append((chat_id, peer_id))
+            c = world.chats[chat_id]
+            if chat_id == DM:
+                from openmate_core.backend import Chat
+                return Chat(c.id, c.kind, c.name, avatar=PIC_DM if peer_id == "user_example_a" else None)
+            return c
+
+        h.app.backend.chat_picture = chat_picture
+        things(h)
+        wait_until(lambda: h.app.store.avatars([DM]).get(DM), what="the direct chat's picture")
+        self.assertIn((DM, "user_example_a"), told)
+        self.assertEqual(things(h)[DM]["avatar"], PIC_DM)
+
     def test_a_page_opened_asks_for_its_picture_too(self):
         world = pictured(FixtureWorld())
         h = signed(self, world)

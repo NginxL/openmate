@@ -2202,11 +2202,19 @@ class LarkXBackend(Backend):
         client, me = self._signed_in()
         return self._chat_read(client, chat_id, me)[1]
 
-    def chat_picture(self, chat_id: str) -> Chat:
+    def chat_picture(self, chat_id: str, peer_id: str = "") -> Chat:
         """The chat as the service says it now (not a row kept from a list, which may not say its picture): what the
-        core asks when it wants a chat's picture."""
+        core asks when it wants a chat's picture. peer_id is the other person of a direct chat as the core's store
+        knows them: after a restart this backend knows them only once they write again, and a direct chat's record
+        has no picture of its own, so without it most direct chats would have none."""
         client, me = self._signed_in()
-        return self._chat_read(client, chat_id, me)[1]
+        chat = self._chat_read(client, chat_id, me)[1]
+        peer_id = _id(peer_id)
+        if chat.kind == "dm" and chat.avatar is None and not chat.peer_id and peer_id:
+            key = self._person_avatar(peer_id)
+            if key is not None:
+                chat.avatar = avatar_address(self.region.file_host, key)
+        return chat
 
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:
         user_id = _id(user_id)
