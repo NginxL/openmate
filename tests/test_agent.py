@@ -1740,6 +1740,10 @@ class DefaultsTest(unittest.TestCase):
         self.assertFalse(a.is_agent_text("/agent 看看这条报错\nclaude code · 登录失败"))
         self.assertFalse(a.is_agent_text("/agent 帮我排查\ncodex · HTTP 401"), "an error, not a model")
         self.assertTrue(a.is_agent_text("答案\ncodex · o3"), "o3 is a model")
+        self.assertFalse(a.is_agent_text("/agent 帮我排查\ncodex · o3 returned HTTP 401"), "an error's words")
+        from openmate_core.agent import mark_model
+        for m in ("qwen3-32b", "o4-mini", "gpt-6-2-astra", "claude-sonnet-5-5[1m]", "deepseek-v4-1", "gemini-4-neon"):
+            self.assertTrue(a.is_agent_text("答案\ncodex · " + mark_model(m)), m)
         h.tool("agent_reply", request=run["id"], text="装好的工具：\ncodex · 已安装\ncursor · 未安装")
         self.assertEqual(h.sent()[-1]["text"], "装好的工具：\ncodex · 已安装\ncursor · 未安装\n\nclaude code · Opus 5.5")
         h.tool("agent_reply", request=run["id"], text="排查结果：\ncodex · HTTP 401")

@@ -84,7 +84,10 @@ AGENT_NAMES = ("claude code", "codex", "agy", "gemini", "trae", "opencode", "cur
 # and names; and an effort. What a mark's parts look like, so "codex · 登录失败" or "codex · HTTP 401" is a person's line
 MODEL_FAMILIES = ("Opus", "Sonnet", "Haiku", "Fable", "Claude", "GPT", "Gemini", "Deepseek", "DeepSeek", "Kimi", "Qwen",
                   "Grok", "Glm", "GLM", "Llama", "Mistral", "Doubao")
-MODEL_PART = "(?:%s|o[0-9]+)(?:[- ][A-Za-z0-9][A-Za-z0-9.\\-]*){0,5}" % "|".join(MODEL_FAMILIES)
+# (a family with its version right after it, "Qwen3"; joined parts as ids have them, "o4-mini"; then words that start
+# with a capital or a digit, "Astra", "1M", so "o3 returned HTTP 401" is an error's words)
+MODEL_PART = "(?:(?i:%s)[0-9.]*|o[0-9]+)(?:-[A-Za-z0-9][A-Za-z0-9.]*)*(?: [A-Z0-9][A-Za-z0-9.\\-]*){0,5}" \
+    % "|".join(MODEL_FAMILIES)
 EFFORT_PART = "(?:minimal|low|medium|high|xhigh|max|ultra|none)"
 _AGENT_MARK = re.compile("^(?:%s) · %s(?: · %s)?$" % ("|".join(re.escape(n) for n in AGENT_NAMES), MODEL_PART, EFFORT_PART))
 
