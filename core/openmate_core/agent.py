@@ -77,10 +77,18 @@ def mark_lines(text: str) -> tuple:
     return (lines[0], lines[-1]) if lines else ("", "")
 
 
+# an Agent's name before the model ("claude code · Opus 5.5", "codex · GPT-6.2 Astra"; the user's marks since
+# 2026-11-25): an AI's mark as the built-in ones are. Lower case as marks write them, so a person's "Claude Code · …" is theirs
+AGENT_NAMES = ("claude code", "codex", "agy", "gemini", "trae", "opencode", "cursor", "kimi", "qwen", "grok", "droid")
+_AGENT_MARK = re.compile("^(?:%s) · \\S" % "|".join(re.escape(n) for n in AGENT_NAMES))
+
+
 def ai_marked(text: str, marks) -> bool:
-    """Whether the message carries one of these marks on its first or its last line (ours or another AI's)."""
+    """Whether the message carries one of these marks on its first or its last line (ours or another AI's), or an
+    Agent's name before the model there."""
     first, last = mark_lines(text)
-    return any(m and (first.startswith(m) or last.startswith(m)) for m in marks)
+    return any(m and (first.startswith(m) or last.startswith(m)) for m in marks) \
+        or bool(_AGENT_MARK.match(first) or _AGENT_MARK.match(last))
 
 
 _LEAD_SEPARATORS = ",，:：、;；!！~～"
@@ -472,32 +480,39 @@ class AgentRunner:
         configured header as fill_header renders it. A line that merely starts with a configured header's words is
         not one: with "claude code · {model}", "claude code 报错了" is the user's own words."""
         s = line.lstrip("> ").strip()
-        return any(s.startswith(m) for m in AI_MARKS[:2]) or self._is_own_mark_line(line)
+        return any(s.startswith(m) for m in AI_MARKS[:2]) or bool(_AGENT_MARK.match(s)) \
+            or self._is_own_mark_line(line, feishu=True)
 
-    def _header_patterns(self) -> List["re.Pattern"]:
+    def _header_patterns(self, feishu: bool = False) -> List["re.Pattern"]:
         """The configured headers as whole-line patterns, made by the sender's own rule (fill_header): {model} and
-        {effort} are anything, each may be missing with its " · ", every other character is itself."""
+        {effort} are anything, each may be missing with its " · ", every other character is itself. feishu: only a
+        header that starts with words of its own ("{model} 助手" would take "推荐一个 AI 助手"), and never its line
+        without the model ("claude code" alone is the user's words; a mark without the model is rare there)."""
         out = []
         for h in (self.header, self.auto_header):
+            if feishu and not re.sub(r"[\W_]", "", (h or "").split("{", 1)[0]):
+                continue
             for m, e in (("\x01", "\x02"), ("\x01", ""), ("", "\x02"), ("", "")):
+                if feishu and not m and "{model}" in (h or ""):
+                    continue
                 line = fill_header_raw(h or "", m, e).lstrip("> ").strip()
                 if not re.sub(r"[\W_]", "", line.replace("\x01", "").replace("\x02", "")):
                     continue  # nothing but punctuation fixed: it would take any "a：b" line for a mark
                 out.append(re.compile(re.escape(line).replace("\x01", ".+?").replace("\x02", ".+?")))
         return out
 
-    def _is_own_mark_line(self, line: str) -> bool:
+    def _is_own_mark_line(self, line: str, feishu: bool = False) -> bool:
         """A line that is one of our marks exactly: a configured header as fill_header renders it, or the old end
         mark. "🤖 AI 回复 API 仍不允许上线。" is an answer, not a mark."""
         line = line.lstrip("> ").strip()
         return line in (DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]) \
-            or any(p.fullmatch(line) for p in self._header_patterns())
+            or any(p.fullmatch(line) for p in self._header_patterns(feishu))
 
     def _is_mark_line(self, line: str) -> bool:
         """WeChat: a line that is an AI mark (a built-in one as a word: "🤖 AI 代答功能…" is text; or a whole
         configured header)."""
         line = line.lstrip("> ").strip()
-        return bool(_BUILTIN_MARK.match(line)) or line == KNOWN_SUFFIXES[0] \
+        return bool(_BUILTIN_MARK.match(line) or _AGENT_MARK.match(line)) or line == KNOWN_SUFFIXES[0] \
             or any(p.fullmatch(line) for p in self._header_patterns())
 
     def is_agent_text(self, text: str) -> bool:
@@ -2012,18 +2027,21 @@ class AgentRunner:
         """The Agent's answer without a mark it wrote itself (so marks are never doubled). model_effort: the model
         the mark is rendered with (None: what the run has stored, without asking the hub)."""
         t = (text or "").strip()
+        if model_effort is not None:
+            model, effort = model_effort
+        else:
+            model, effort = (run or {}).get("model") or "", (run or {}).get("effort") or ""
         if getattr(self.app.platform, "mark_view", None) is None:  # Feishu: as it always cleaned
             for s in {self.suffix.strip(), DEFAULT_SUFFIX, KNOWN_SUFFIXES[0]}:
                 while s and t.endswith(s):
                     t = t[: -len(s)].rstrip()
                     if t.endswith(">"):
                         t = t[:-1].rstrip()
-            is_mark = self._feishu_mark_line
+            # and this run's own mark as the very line ("—— Opus 5.5（xhigh）": a mark of punctuation alone)
+            exact = {fill_header(h, model, effort if self.mark_effort else "").strip()
+                     for h in (self.header, self.auto_header) if h}
+            is_mark = lambda line: self._feishu_mark_line(line) or line.strip() in exact  # noqa: E731
         else:  # WeChat: only a whole line equal to this run's own rendered mark or an old end mark goes
-            if model_effort is not None:
-                model, effort = model_effort
-            else:
-                model, effort = (run or {}).get("model") or "", (run or {}).get("effort") or ""
             own, whole = set(), set()
             for h in (self.header, self.auto_header):
                 if not h:
@@ -2090,7 +2108,7 @@ class AgentRunner:
             return None
         # the mark where any OpenMate reads it (AI_MARKS on the first or the last line): a configured mark of its own,
         # or one an end mark pushes off the last line, would let the asker's own 自动代答 answer this @ of theirs
-        if not ai_marked(self._marked("…", run, ("", ""), "@" + name)[0], AI_MARKS):
+        if not ai_marked(self._marked("…", run, ("m", ""), "@" + name)[0], AI_MARKS):
             return None
         return uid, name
 
@@ -2100,7 +2118,8 @@ class AgentRunner:
         end mark pushes off the last line, would let the asker's own 自动代答 answer this @ of theirs."""
         if not (self.auto_at and self.auto_header and getattr(getattr(self.app, "backend", None), "can_mention", False)):
             return False
-        return ai_marked(self._marked("…", {"kind": "auto"}, ("", ""), "@…")[0], AI_MARKS)
+        # (the mark as rendered with some model: "claude code · {model}" is a mark with one, its words alone are not)
+        return ai_marked(self._marked("…", {"kind": "auto"}, ("m", ""), "@…")[0], AI_MARKS)
 
     def _name_here(self, user_id: str, chat_id: str) -> str:
         """A person's display name in this chat, as the service says it ("" when it cannot say, or says it over more
@@ -2398,7 +2417,7 @@ class AgentRunner:
         if getattr(self.app.platform, "mark_view", None) is None:
             return ai_marked(text, AI_MARKS)
         first, last = mark_lines(self._mark_view(text))
-        return any(_GENERIC_MARK.match(x.lstrip("> ").strip()) for x in (first, last))
+        return any(_GENERIC_MARK.match(x) or _AGENT_MARK.match(x) for x in (y.lstrip("> ").strip() for y in (first, last)))
 
     def _mark_view(self, text: str) -> str:
         """The text as the AI-mark check reads it: the platform's view (WeChat: without the "@name " a reply that @s

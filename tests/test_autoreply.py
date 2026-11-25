@@ -276,6 +276,18 @@ class AutoReplyAtTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(asked, ["user_example_b"], "the second @ is past the hour's most: nobody is asked")
 
+    def test_an_agents_name_before_the_model_is_a_mark(self):
+        # "claude code · Opus 5.5" (the user's, 2026-11-25) is an AI's mark: the @ stays, and another's is not answered
+        h = make(self, auto_reply_header="claude code · {model} · {effort}")
+        h.app.store.autoreply_set(TEAM, True)
+        _, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\nclaude code · Opus 5.5")
+        self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", 0)])
+        n = len(h.http.starts())
+        at_me(h, text="@示例用户 好的，周五见\n\ncodex · GPT-6.2 Astra")
+        time.sleep(0.5)
+        self.assertEqual(len(h.http.starts()), n, "another AI's answer is never answered")
+
     def test_a_mark_others_cannot_read_never_ats(self):
         # the asker's own 自动代答 must see an AI's answer: a mark of one's own, or one an end mark pushes off the
         # last line, is not where any OpenMate reads it

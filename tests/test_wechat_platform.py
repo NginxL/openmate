@@ -204,6 +204,13 @@ class MarksAndMentionsTest(unittest.TestCase):
         h.tool("agent_reply", request=run["id"], text="Opus 5.5")
         self.assertEqual(h.sent()[-1]["text"], "> Opus 5.5\nOpus 5.5")
 
+    def test_an_agents_name_before_the_model_is_another_ais(self):
+        h = wechat(self)
+        a = h.app.agent
+        self.assertTrue(a._other_ai("好的\ncodex · GPT-6.2 Astra"))
+        self.assertTrue(a.is_agent_text("claude code · Opus 5.5\n答案"))
+        self.assertFalse(a._other_ai("claude code 怎么装？"))
+
     def test_a_header_that_starts_with_a_placeholder_is_seen(self):
         h = wechat(self, auto_reply_header="> {model} · [智能代答]", agent_mark_position="top")
         h.app.store.autoreply_set(TEAM, True)

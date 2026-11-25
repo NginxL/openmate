@@ -1735,6 +1735,23 @@ class DefaultsTest(unittest.TestCase):
         n = len(h.http.starts())
         running(h, ask(h, "/agent 帮我看下\nclaude code 报错了"))
         self.assertEqual(len(h.http.starts()), n + 1, "a request of the user's, not an AI's")
+        self.assertFalse(a.is_agent_text("/agent 帮我安装下面这个工具\nclaude code"), "the words alone are the user's")
+        self.assertTrue(a.is_agent_text("答案\n\ncodex · GPT-6.2 Astra"), "an Agent's name before the model is an AI's")
+
+    def test_feishu_marks_of_punctuation_or_a_leading_model(self):
+        h = self.make(agent_reply_header="—— {model}（{effort}）", agent_mark_effort=True)
+        run = running(h, ask(h, "/agent 写个周报"))
+        h.tool("agent_reply", request=run["id"], text="周报写好了\n\n—— Opus 5.5（xhigh）")
+        self.assertEqual(h.sent()[-1]["text"], "周报写好了\n\n—— Opus 5.5（xhigh）", "the copied mark is not doubled")
+        with self.assertRaises(Exception) as c:
+            h.tool("agent_reply", request=run["id"], text="—— Opus 5.5（xhigh）")
+        self.assertIn("只有 AI 标记", str(c.exception))
+        h2 = self.make(agent_reply_header="{model} 助手")
+        a = h2.app.agent
+        self.assertFalse(a.is_agent_text("/agent 推荐一个适合编程的 AI 助手"))
+        run = running(h2, ask(h2, "/agent 推荐一个适合编程的 AI 助手"))
+        h2.tool("agent_reply", request=run["id"], text="这是一款开源的 AI 助手")
+        self.assertEqual(h2.sent()[-1]["text"], "这是一款开源的 AI 助手\n\nOpus 5.5 助手")
 
     def test_the_mark_on_top_on_request_and_marks_at_either_end_are_recognised(self):
         h = self.make(agent_mark_position="top")
