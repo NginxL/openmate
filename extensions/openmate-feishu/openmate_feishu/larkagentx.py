@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import json
 import logging
 import os
@@ -2210,10 +2211,11 @@ class LarkXBackend(Backend):
         client, me = self._signed_in()
         chat = self._chat_read(client, chat_id, me)[1]
         peer_id = _id(peer_id)
-        if chat.kind == "dm" and chat.avatar is None and not chat.peer_id and peer_id:
+        if (chat.kind == "dm" and chat.avatar is None and not chat.peer_id and peer_id
+                and not (me is not None and me.id == peer_id)):  # (told by a store of another account: not its own)
             key = self._person_avatar(peer_id)
-            if key is not None:
-                chat.avatar = avatar_address(self.region.file_host, key)
+            if key is not None:  # on a copy: the chat kept for the session stays as the service said it
+                chat = dataclasses.replace(chat, avatar=avatar_address(self.region.file_host, key))
         return chat
 
     def user_name(self, user_id: str, chat_id: Optional[str] = None) -> str:

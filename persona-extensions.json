@@ -412,8 +412,8 @@
       "packages": [
         {
           "url": "packages/openmate-feishu/0.11.45/openmate-feishu-0.11.45.tar.gz",
-          "sha256": "23af7cca80aff0400394c86e8bc904b96d199ec27c9725f0ea8e5ea1637d0349",
-          "size": 274982
+          "sha256": "516d96fbe4433d0aa9c629cd1dd40ef02dd6af71ec1a080fb7449928dc09570a",
+          "size": 275271
         }
       ]
     },
@@ -701,8 +701,8 @@
       "packages": [
         {
           "url": "packages/openmate-wechat/0.1.43/openmate-wechat-0.1.43.tar.gz",
-          "sha256": "caba84b8df130e69f6c205a8a4d9c7b97e18b9d09d5180af2fce84018a51e69c",
-          "size": 241515
+          "sha256": "ba23c1e0f4755566d92b0d7b3c99ef9b4b332d8fe73518f280e4bf64b5df17a8",
+          "size": 241737
         }
       ]
     }

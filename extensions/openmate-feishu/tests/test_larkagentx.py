@@ -2261,9 +2261,14 @@ class PictureTest(Base):
         S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {"7003": {"id": "7003", "avatar": {"key": "v3_p"}}}}
         self.assertIsNone(b.chat_picture("501").avatar, "not known here, not told: no picture (asked again later)")
         self.assertIn("/v3_p~?", b.chat_picture("501", "7003").avatar, "the other person the store knows")
-        b._chats.clear()
-        S.chats["510"] = {"id": "510", "type": 2, "name": "示例群", "avatar": {"key": "v3_group_example"}}
-        self.assertIn("/v3_group_example~?", b.chat_picture("510", "7003").avatar, "a group's is its own")
+        self.assertIsNone(b._chats["501"][1].avatar, "on a copy: the chat kept for the session is as the service said")
+        me = b._me.id
+        S.api_answers["chatters.PullChattersByIdsRequest"] = {"chatters": {me: {"id": me, "avatar": {"key": "v3_me"}}}}
+        self.assertIsNone(b.chat_picture("501", me).avatar, "the account itself (a store of another account): not taken")
+        S.chats["514"] = {"id": "514", "type": 2, "name": "没说头像的群"}
+        asked = len(S.api_calls)
+        self.assertIsNone(b.chat_picture("514", "7003").avatar, "a group: never a person's picture")
+        self.assertFalse([c for c in S.api_calls[asked:] if "Chatters" in str(c)], "asked: %r" % (S.api_calls[asked:],))
 
     def test_a_picture_not_known_says_none_and_a_key_that_is_no_key_is_not_put_in_an_address(self):
         b = self.b

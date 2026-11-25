@@ -489,6 +489,18 @@ class Store:
         r = self._one("SELECT * FROM chats WHERE id = ?", (chat_id,))
         return _chat_row(r) if r else None
 
+    def dm_peer(self, chat_id: str) -> str:
+        """The other person of a direct chat as this store knows them: the chat's peer_id, else whoever but the account
+        wrote in it last ("" for a group, or a direct chat nobody else has written in)."""
+        chat = self.get_chat(chat_id)
+        if chat is None or chat.get("kind") != "dm":
+            return ""
+        if chat.get("peer_id"):
+            return str(chat["peer_id"])
+        r = self._one("SELECT sender_id FROM messages WHERE chat_id = ? AND mine = 0 AND sender_id != '' "
+                      "ORDER BY at DESC, seq DESC LIMIT 1", (chat_id,))
+        return str(r["sender_id"]) if r else ""
+
     def newest_position(self, chat_id: str) -> Optional[int]:
         """The position of the newest message stored of chat, None when none is."""
         rows = self._all("SELECT MAX(position) AS p FROM messages WHERE chat_id = ?", (chat_id,))

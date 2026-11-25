@@ -140,6 +140,15 @@ class AvatarTest(unittest.TestCase):
         self.assertIn((DM, "user_example_a"), told)
         self.assertEqual(things(h)[DM]["avatar"], PIC_DM)
 
+    def test_a_direct_chat_without_its_peer_kept_takes_who_wrote_in_it(self):
+        world = pictured(FixtureWorld())
+        h = signed(self, world)
+        st = h.app.store
+        with st._lock:
+            st._db.execute("UPDATE chats SET peer_id = '' WHERE id = ?", (DM,))  # (kept by a list's row, unnamed peer)
+        self.assertEqual(st.dm_peer(DM), "user_example_a", "the other person who wrote in it")
+        self.assertEqual(st.dm_peer(TEAM), "", "a group has none")
+
     def test_a_page_opened_asks_for_its_picture_too(self):
         world = pictured(FixtureWorld())
         h = signed(self, world)

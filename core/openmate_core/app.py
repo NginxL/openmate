@@ -1704,12 +1704,14 @@ class ConnectorApp:
             for chat_id in due:
                 if self.closing.is_set() or not self.owns(epoch):
                     return
-                row = self.store.get_chat(chat_id)
+                with self.owned(epoch) as ok:  # (this account's store: its own people)
+                    if not ok:
+                        return
+                    peer = self.store.dm_peer(chat_id)
                 try:
                     fresh = getattr(self.backend, "chat_picture", None)  # the service asked now, not a kept row
                     # (with the other person of a direct chat as the store knows them: the backend may not, yet)
-                    info = (fresh(chat_id, str((row or {}).get("peer_id") or "")) if callable(fresh)
-                            else self.backend.chat_info(chat_id))
+                    info = fresh(chat_id, peer) if callable(fresh) else self.backend.chat_info(chat_id)
                 except BackendError as e:
                     log.info("a chat's picture was not read: %s", e.kind)
                     continue
