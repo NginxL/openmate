@@ -862,6 +862,17 @@ class Store:
         rows = self._all("SELECT * FROM runs WHERE chat_id = ? ORDER BY created DESC LIMIT ?", (chat_id, limit))
         return [self._run_row(r) for r in rows]
 
+    def sent_by_a_run(self, chat_id: str, msg_id: str) -> bool:
+        """Whether a run of the chat (any still kept) sent this message: it is in the run's reply_ids."""
+        if not msg_id:
+            return False
+        try:
+            return self._one("SELECT 1 FROM runs, json_each(runs.data, '$.reply_ids') AS r WHERE runs.chat_id = ? "
+                             "AND r.value = ? LIMIT 1", (chat_id, msg_id)) is not None
+        except sqlite3.OperationalError:  # an SQLite without JSON: each kept run of the chat read
+            rows = self._all("SELECT * FROM runs WHERE chat_id = ?", (chat_id,))
+            return any(msg_id in (self._run_row(r).get("reply_ids") or []) for r in rows)
+
     def runs_since(self, since: float, limit: int = 50) -> List[dict]:
         rows = self._all("SELECT * FROM runs WHERE created >= ? ORDER BY created DESC LIMIT ?", (since, limit))
         return [self._run_row(r) for r in rows]

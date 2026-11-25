@@ -697,13 +697,23 @@ class AgentRunner:
         cannot read, 自动代答 leaves it to the user, so two automatic answerers never go back and forth (the user,
         2026-11-25)."""
         parent = row.get("parent_id") or ""
-        if not parent:
-            return False
+        if not parent or parent == row.get("root_id") and row.get("placement") == "thread":
+            return False  # a line in a thread names its root without quoting it (as channel.py reads it)
         chat_id = row["chat_id"]
-        if any(parent in (r.get("reply_ids") or []) for r in self.store.runs_in_chat(chat_id, 50)):
+        if self.store.sent_by_a_run(chat_id, parent):
             return True
         quoted = self.store.message(chat_id, parent)
-        return bool(quoted and quoted.get("mine") and self.is_agent_text(quoted.get("text") or ""))
+        return bool(quoted and quoted.get("mine") and self._mark_line_in(quoted.get("text") or ""))
+
+    def _mark_line_in(self, text: str) -> bool:
+        """Whether the message's first or last line is an AI mark as a whole line (not "…机器人 🤖": a person's words
+        that end with the emoji)."""
+        first, last = mark_lines(self._mark_view(text))
+        if getattr(self.app.platform, "mark_view", None) is None:
+            check = lambda line: line in KNOWN_SUFFIXES or self._feishu_mark_line(line)  # noqa: E731
+        else:
+            check = lambda line: line in KNOWN_SUFFIXES or self._is_mark_line(line)  # noqa: E731
+        return check(first) or check(last)
 
     def _auto_start(self, row: dict, text: str, now: float, epoch: Optional[int] = None) -> None:
         chat_id = row["chat_id"]

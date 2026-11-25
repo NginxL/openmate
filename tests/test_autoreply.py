@@ -108,10 +108,32 @@ class AutoReplyTest(unittest.TestCase):
         h.world.push(TEAM, "user_example_b", "@示例用户 周报里的数字对吗？", at_me=True, parent_id=mine.id)
         time.sleep(0.5)
         self.assertEqual(len(h.http.starts()), n)
-        # a reply to a person's message of the user's is a question as ever
-        plain = h.world.push(TEAM, "me", "我下午看一下")
-        person = h.world.push(TEAM, "user_example_b", "@示例用户 看完了吗？", at_me=True, parent_id=plain.id)
-        self.assertEqual(running(h, person)["kind"], "auto")
+        # a reply to a person's message of the user's is a question as ever, one ending with the emoji too
+        for words in ("我下午看一下", "我下午验一下机器人 🤖"):
+            plain = h.world.push(TEAM, "me", words)
+            person = h.world.push(TEAM, "user_example_b", "@示例用户 看完了吗？", at_me=True, parent_id=plain.id)
+            self.assertEqual(running(h, person)["kind"], "auto", words)
+
+    def test_a_question_in_a_thread_under_an_ai_message_is_answered(self):
+        # in a thread every line names its root: a question there quotes nothing
+        h = make(self, auto_reply_hourly_most=10)
+        h.app.store.autoreply_set(TEAM, True)
+        root = h.world.push(TEAM, "me", "周报写好了\n\n> 🤖 AI 回复 · Opus 5.5")
+        q = h.world.push(TEAM, "user_example_b", "@示例用户 另外，下周的会几点？", at_me=True, parent_id=root.id,
+                         root_id=root.id, placement="thread")
+        self.assertEqual(running(h, q)["kind"], "auto")
+
+    def test_an_old_answer_of_ours_is_known_however_many_runs_came_after(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        old = h.app.agent._new_run({"id": "m_old", "chat_id": TEAM, "sender_id": "user_example_b"}, "旧问题", time.time() - 7200)
+        old.update(kind="auto", state="done", reply_ids=["m_picture"])
+        h.app.store.run_put(old)
+        for i in range(55):
+            r = h.app.agent._new_run({"id": "m_%d" % i, "chat_id": TEAM, "sender_id": "user_example_b"}, "问题", time.time())
+            r.update(state="done")
+            h.app.store.run_put(r)
+        self.assertTrue(h.app.agent._answers_ours({"chat_id": TEAM, "parent_id": "m_picture"}))
 
     def test_a_sender_nobody_can_tell_is_not_answered(self):
         h = make(self)
