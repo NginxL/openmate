@@ -2213,6 +2213,9 @@ class LarkXBackend(Backend):
         peer_id = _id(peer_id)
         if (chat.kind == "dm" and chat.avatar is None and not chat.peer_id and peer_id
                 and not (me is not None and me.id == peer_id)):  # (told by a store of another account: not its own)
+            with self._lock:
+                if not self._still(me):  # another account signed in meanwhile: not asked in its name
+                    return chat
             key = self._person_avatar(peer_id)
             if key is not None:  # on a copy: the chat kept for the session stays as the service said it
                 chat = dataclasses.replace(chat, avatar=avatar_address(self.region.file_host, key))
