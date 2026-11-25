@@ -1717,6 +1717,25 @@ class DefaultsTest(unittest.TestCase):
         h2.tool("agent_reply", request=run["id"], text="好")
         self.assertEqual((h2.sent()[-1]["text"], h2.world.reactions), ("好", []))
 
+    def test_a_mark_of_plain_words_is_read_as_a_whole_line(self):
+        # "claude code · Opus 5.5" (the user's, 2026-11-25): their own lines that merely start with those words are theirs
+        h = self.make(agent_reply_header="claude code · {model} · {effort}")
+        run = running(h, ask(h, "/agent 看下"))
+        h.tool("agent_reply", request=run["id"], text="claude code · Opus 5.5\n答案")
+        sent = h.sent()[-1]["text"]
+        self.assertEqual(sent, "答案\n\nclaude code · Opus 5.5", "the mark the Agent copied is not doubled")
+        self.assertTrue(h.app.agent.is_agent_text(sent))
+        h.tool("agent_reply", request=run["id"], text="配置改好了\nclaude code 的设置在 settings.json")
+        self.assertEqual(h.sent()[-1]["text"], "配置改好了\nclaude code 的设置在 settings.json\n\nclaude code · Opus 5.5",
+                         "an answer's own last line is kept")
+        a = h.app.agent
+        self.assertFalse(a.is_agent_text("/agent 帮我看下\nclaude code 报错了"))
+        self.assertFalse(a.is_agent_text("claude code 怎么配置？"))
+        self.assertTrue(a.is_agent_text("> 🤖 AI 回复 · 别的模型\n答案"), "built-in marks as always")
+        n = len(h.http.starts())
+        running(h, ask(h, "/agent 帮我看下\nclaude code 报错了"))
+        self.assertEqual(len(h.http.starts()), n + 1, "a request of the user's, not an AI's")
+
     def test_the_mark_on_top_on_request_and_marks_at_either_end_are_recognised(self):
         h = self.make(agent_mark_position="top")
         msg = ask(h, "/agent 放第一行")

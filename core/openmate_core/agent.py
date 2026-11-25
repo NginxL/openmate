@@ -467,13 +467,12 @@ class AgentRunner:
             self._handing.clear()  # that account's follow-ups being handed on hold up none of the next one's
             self._handed.notify_all()
 
-    def _header_marks(self) -> List[str]:
-        marks = list(AI_MARKS[:2])
-        for h in (self.header, self.auto_header):
-            lead = h.split("{", 1)[0].strip(" ·>") if h else ""
-            if lead:
-                marks.append(lead)
-        return marks
+    def _feishu_mark_line(self, line: str) -> bool:
+        """Feishu: a line that is an AI mark: one starting with a built-in mark (as it always read), or a whole
+        configured header as fill_header renders it. A line that merely starts with a configured header's words is
+        not one: with "claude code · {model}", "claude code 报错了" is the user's own words."""
+        s = line.lstrip("> ").strip()
+        return any(s.startswith(m) for m in AI_MARKS[:2]) or self._is_own_mark_line(line)
 
     def _header_patterns(self) -> List["re.Pattern"]:
         """The configured headers as whole-line patterns, made by the sender's own rule (fill_header): {model} and
@@ -507,7 +506,8 @@ class AgentRunner:
             for s in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES:
                 if s and t.endswith(s):
                     return True
-            return ai_marked(t, self._header_marks())
+            first, last = mark_lines(t)
+            return self._feishu_mark_line(first) or self._feishu_mark_line(last)
         # WeChat: an end mark only as a whole last line ("…这个机器人 🤖" is a request)
         last_line = t.rsplit("\n", 1)[-1].lstrip("> ").strip()
         if last_line in {x.lstrip("> ").strip() for x in (self.suffix.strip(), DEFAULT_SUFFIX) + KNOWN_SUFFIXES if x}:
@@ -2018,8 +2018,7 @@ class AgentRunner:
                     t = t[: -len(s)].rstrip()
                     if t.endswith(">"):
                         t = t[:-1].rstrip()
-            marks = self._header_marks()
-            is_mark = lambda line: any(line.lstrip("> ").strip().startswith(m) for m in marks)  # noqa: E731
+            is_mark = self._feishu_mark_line
         else:  # WeChat: only a whole line equal to this run's own rendered mark or an old end mark goes
             if model_effort is not None:
                 model, effort = model_effort
