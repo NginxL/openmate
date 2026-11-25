@@ -747,14 +747,19 @@ class ConnectorApp:
         with self.lock:
             if gen != self._gen:
                 return
-            changed = state != self.link
+            # a new state, or the same not-up state for another reason (a link down for one reason, then for another):
+            # the log says why, so a link stuck down can be told apart from one that is only slow
+            changed = state != self.link or (state != "up" and reason != self.link_reason)
             self.link, self.link_reason = state, reason
             if state == "up":
                 self._link_up.set()
             else:
                 self._link_up.clear()
         if changed:
-            log.info("link %s", state)
+            if reason and state != "up":
+                log.info("link %s: %s", state, reason)
+            else:
+                log.info("link %s", state)
 
     def _link_loop(self, gen: int, stop: threading.Event, restore: bool) -> None:
         t = self.timing
