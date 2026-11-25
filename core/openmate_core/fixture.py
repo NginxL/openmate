@@ -106,6 +106,7 @@ class FixtureWorld:
         self.listener: Optional[Callable[[Message], None]] = None
         self.drop_event = threading.Event()
         self.up_event = threading.Event()
+        self.link_notes: List[Tuple[str, str]] = []  # (state, why) the live link reports next, in order
         if seed:
             self._seed()
 
@@ -281,6 +282,10 @@ class FixtureBackend(Backend):
                 if w.expired:
                     on_link("expired", "")
                     raise CredentialsExpired()
+                with w.lock:
+                    notes, w.link_notes = w.link_notes, []
+                for state, why in notes:
+                    on_link(state, why)
                 stop.wait(0.02)
         finally:
             with w.lock:

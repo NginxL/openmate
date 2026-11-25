@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,6 +34,14 @@ from .textutil import rfc3339, zone
 from .wire import Peer, RPCError
 
 log = logging.getLogger("openmate")
+
+_SECRETISH = re.compile(r"[A-Za-z0-9+/=_.-]{24,}")
+
+
+def loggable(reason: str) -> str:
+    """A link's why as the log may keep it: one line, at most 200 characters, and any long token-like run (an echoed
+    key, a signature) replaced, since a why can carry a service's own error text."""
+    return _SECRETISH.sub("…", " ".join(str(reason).split()))[:200]
 
 EMPTY_PAGES = 6  # a re-read of the messages stored with no text: at most this many pages per chat
 BLANK_MOST = 10  # at every catch-up and done round, this many messages of the last day still empty are read again
@@ -757,7 +766,7 @@ class ConnectorApp:
                 self._link_up.clear()
         if changed:
             if reason and state != "up":
-                log.info("link %s: %s", state, reason)
+                log.info("link %s: %s", state, loggable(reason))
             else:
                 log.info("link %s", state)
 

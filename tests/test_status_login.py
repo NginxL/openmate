@@ -73,18 +73,18 @@ class StatusTest(unittest.TestCase):
     def test_a_link_down_says_why_in_the_log(self):
         h = Harness(self)
         h.sign_in()
+        secret = "tok_" + "x1y2z3" * 8
         with self.assertLogs("openmate", level="INFO") as logs:
-            h.world.listen_error = BackendError("网络不通", "unreachable")
-            h.world.drop()
-            wait_until(lambda: "网络不通" in (h.status().get("error") or ""), what="down")
-            h.world.listen_error = BackendError("AgentWechat 出错了：event_cursor_expired", "unreachable")
-            wait_until(lambda: any("event_cursor_expired" in line for line in logs.output), what="the second why")
-            h.world.listen_error = None
-            h.wait_ok()
+            with h.world.lock:
+                h.world.link_notes += [("down", "网络不通"), ("down", "网络不通"),
+                                       ("down", "AgentWechat 出错了：\nevent_cursor_expired %s" % secret), ("up", "")]
+            wait_until(lambda: any("event_cursor_expired" in line for line in logs.output)
+                       and logs.output[-1] == "INFO:openmate:link up", what="the downs and the way back up")
         lines = [line for line in logs.output if ":link " in line]
-        self.assertIn("INFO:openmate:link down: 网络不通", lines)
-        self.assertIn("INFO:openmate:link down: AgentWechat 出错了：event_cursor_expired", lines)
-        self.assertEqual(lines[-1], "INFO:openmate:link up")
+        self.assertEqual(lines, ["INFO:openmate:link down: 网络不通",  # the same why again: not again
+                                 "INFO:openmate:link down: AgentWechat 出错了： event_cursor_expired …",
+                                 "INFO:openmate:link up"])
+        self.assertNotIn(secret, "\n".join(logs.output))
 
     def test_unreachable_then_reconnect(self):
         h = Harness(self)
