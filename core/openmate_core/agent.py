@@ -80,9 +80,11 @@ def mark_lines(text: str) -> tuple:
 # an Agent's name before the model ("claude code · Opus 5.5", "codex · GPT-6.2 Astra"; the user's marks since
 # 2026-11-25): an AI's mark as the built-in ones are. Lower case as marks write them, so a person's "Claude Code · …" is theirs
 AGENT_NAMES = ("claude code", "codex", "agy", "gemini", "trae", "opencode", "cursor", "kimi", "qwen", "grok", "droid")
-# a model as mark_model names it ("Opus 5.5", "GPT-6.2 Astra", "Gemini 4 Neon"), and an effort: what a mark's parts look
-# like, so "codex · 登录失败" or "cursor · 未安装" is a person's line, not a mark
-MODEL_PART = "[A-Z][A-Za-z0-9.\\-]*(?: [A-Za-z0-9][A-Za-z0-9.\\-]*){0,5}"
+# a model as mark_model names it ("Opus 5.5", "GPT-6.2 Astra", "Gemini 4 Neon", "o3"): a known family, then its version
+# and names; and an effort. What a mark's parts look like, so "codex · 登录失败" or "codex · HTTP 401" is a person's line
+MODEL_FAMILIES = ("Opus", "Sonnet", "Haiku", "Fable", "Claude", "GPT", "Gemini", "Deepseek", "DeepSeek", "Kimi", "Qwen",
+                  "Grok", "Glm", "GLM", "Llama", "Mistral", "Doubao")
+MODEL_PART = "(?:%s|o[0-9]+)(?:[- ][A-Za-z0-9][A-Za-z0-9.\\-]*){0,5}" % "|".join(MODEL_FAMILIES)
 EFFORT_PART = "(?:minimal|low|medium|high|xhigh|max|ultra|none)"
 _AGENT_MARK = re.compile("^(?:%s) · %s(?: · %s)?$" % ("|".join(re.escape(n) for n in AGENT_NAMES), MODEL_PART, EFFORT_PART))
 

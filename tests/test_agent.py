@@ -1738,8 +1738,12 @@ class DefaultsTest(unittest.TestCase):
         self.assertFalse(a.is_agent_text("/agent 帮我安装下面这个工具\nclaude code"), "the words alone are the user's")
         self.assertFalse(a.is_agent_text("/agent 看看这条报错\ncodex · 登录失败"), "a person's line, not a mark")
         self.assertFalse(a.is_agent_text("/agent 看看这条报错\nclaude code · 登录失败"))
+        self.assertFalse(a.is_agent_text("/agent 帮我排查\ncodex · HTTP 401"), "an error, not a model")
+        self.assertTrue(a.is_agent_text("答案\ncodex · o3"), "o3 is a model")
         h.tool("agent_reply", request=run["id"], text="装好的工具：\ncodex · 已安装\ncursor · 未安装")
         self.assertEqual(h.sent()[-1]["text"], "装好的工具：\ncodex · 已安装\ncursor · 未安装\n\nclaude code · Opus 5.5")
+        h.tool("agent_reply", request=run["id"], text="排查结果：\ncodex · HTTP 401")
+        self.assertEqual(h.sent()[-1]["text"], "排查结果：\ncodex · HTTP 401\n\nclaude code · Opus 5.5")
         h.tool("agent_reply", request=run["id"], text="claude code")  # asked for the tool's name alone
         self.assertEqual(h.sent()[-1]["text"], "claude code\n\nclaude code · Opus 5.5")
         self.assertTrue(a.is_agent_text("答案\n\ncodex · GPT-6.2 Astra"), "an Agent's name before the model is an AI's")
