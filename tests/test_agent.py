@@ -1752,6 +1752,35 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(h.sent()[-1]["text"], "claude code\n\nclaude code · Opus 5.5")
         self.assertTrue(a.is_agent_text("答案\n\ncodex · GPT-6.2 Astra"), "an Agent's name before the model is an AI's")
 
+    def test_the_mark_names_the_agent_that_answers(self):
+        # {agent}: the Agent the session runs on, as the hub lists it (the user's, 2026-11-25)
+        h = self.make(agent_reply_header="{agent} · {model} · {effort}")
+        run = running(h, ask(h, "/agent 你好"))
+        h.tool("agent_reply", request=run["id"], text="你好")
+        sent = h.sent()[-1]["text"]
+        self.assertEqual(sent, "你好\n\nclaude code · Opus 5.5")
+        self.assertTrue(h.app.agent.is_agent_text(sent), "its own echo is an AI's")
+        h.tool("agent_reply", request=run["id"], text="claude code · Opus 5.5\n再补一句")
+        self.assertEqual(h.sent()[-1]["text"], "再补一句\n\nclaude code · Opus 5.5", "a copied mark is not doubled")
+        sid = run["session_id"]
+        run2 = running(h, ask(h, "/agent 换个 Agent"))
+        h.http.sessions[run2["session_id"]].update(agent="codex", model="gpt-6-2-astra")
+        h.tool("agent_reply", request=run2["id"], text="好的")
+        self.assertEqual(h.sent()[-1]["text"], "好的\n\ncodex · GPT-6.2 Astra")
+        run3 = running(h, ask(h, "/agent 不认识的 Agent"))
+        h.http.sessions[run3["session_id"]].update(agent="someday")
+        h.tool("agent_reply", request=run3["id"], text="好的")
+        sent = h.sent()[-1]["text"]
+        self.assertEqual(sent, "好的\n\n🤖 AI · Opus 5.5", "an Agent nobody knows: an AI's mark all the same")
+        self.assertTrue(h.app.agent.is_agent_text(sent))
+        # a run from before {agent} (its model kept, no agent): asked once
+        cur = h.app.store.run_get(run["id"])
+        cur.pop("agent", None)
+        h.app.store.run_put(cur)
+        h.http.sessions[sid].update(agent="codex")
+        h.tool("agent_reply", request=run["id"], text="又一句")
+        self.assertEqual(h.sent()[-1]["text"], "又一句\n\ncodex · Opus 5.5")
+
     def test_feishu_marks_of_punctuation_or_a_leading_model(self):
         h = self.make(agent_reply_header="—— {model}（{effort}）", agent_mark_effort=True)
         run = running(h, ask(h, "/agent 写个周报"))

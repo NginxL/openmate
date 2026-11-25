@@ -79,7 +79,20 @@ def mark_lines(text: str) -> tuple:
 
 # an Agent's name before the model ("claude code · Opus 5.5", "codex · GPT-6.2 Astra"; the user's marks since
 # 2026-11-25): an AI's mark as the built-in ones are. Lower case as marks write them, so a person's "Claude Code · …" is theirs
-AGENT_NAMES = ("claude code", "codex", "agy", "gemini", "trae", "opencode", "cursor", "kimi", "qwen", "grok", "droid")
+AGENT_NAMES = ("claude code", "codex", "agy", "gemini", "trae", "opencode", "cursor", "kimi", "qwen", "grok", "droid",
+               "pi", "omp", "dsh")
+# {agent} in a mark: the Agent that answers, by the name its kind goes by ("claude" → "claude code"); one this list does
+# not know is "🤖 AI", so the mark is an AI's all the same
+AGENT_LABELS = {"claude": "claude code", "traex": "trae"}
+UNKNOWN_AGENT = "🤖 AI"
+
+
+def agent_label(kind: str) -> str:
+    k = (kind or "").strip().lower()
+    label = AGENT_LABELS.get(k, k)
+    return label if label in AGENT_NAMES else UNKNOWN_AGENT
+
+
 # a model as mark_model names it ("Opus 5.5", "GPT-6.2 Astra", "Gemini 4 Neon", "o3"): a known family, then its version
 # and names; and an effort. What a mark's parts look like, so "codex · 登录失败" or "codex · HTTP 401" is a person's line
 MODEL_FAMILIES = ("Opus", "Sonnet", "Haiku", "Fable", "Claude", "GPT", "Gemini", "Deepseek", "DeepSeek", "Kimi", "Qwen",
@@ -89,7 +102,8 @@ MODEL_FAMILIES = ("Opus", "Sonnet", "Haiku", "Fable", "Claude", "GPT", "Gemini",
 MODEL_PART = "(?:(?i:%s)[0-9.]*|o[0-9]+)(?:-[A-Za-z0-9][A-Za-z0-9.]*)*(?: [A-Z0-9][A-Za-z0-9.\\-]*){0,5}" \
     % "|".join(MODEL_FAMILIES)
 EFFORT_PART = "(?:minimal|low|medium|high|xhigh|max|ultra|none)"
-_AGENT_MARK = re.compile("^(?:%s) · %s(?: · %s)?$" % ("|".join(re.escape(n) for n in AGENT_NAMES), MODEL_PART, EFFORT_PART))
+AGENT_PART = "(?:%s)" % "|".join(re.escape(n) for n in AGENT_NAMES + (UNKNOWN_AGENT,))
+_AGENT_MARK = re.compile("^%s · %s(?: · %s)?$" % (AGENT_PART, MODEL_PART, EFFORT_PART))
 
 
 def ai_marked(text: str, marks) -> bool:
@@ -504,11 +518,12 @@ class AgentRunner:
             for m, e in (("\x01", "\x02"), ("\x01", ""), ("", "\x02"), ("", "")):
                 if feishu and not m and "{model}" in (h or ""):
                     continue
-                line = fill_header_raw(h or "", m, e).lstrip("> ").strip()
-                if not re.sub(r"[\W_]", "", line.replace("\x01", "").replace("\x02", "")):
+                line = fill_header_raw((h or "").replace("{agent}", "\x03"), m, e).lstrip("> ").strip()
+                if not re.sub(r"[\W_]", "", line.replace("\x01", "").replace("\x02", "").replace("\x03", "")):
                     continue  # nothing but punctuation fixed: it would take any "a：b" line for a mark
                 model, effort = (MODEL_PART, EFFORT_PART) if feishu else (".+?", ".+?")
-                out.append(re.compile(re.escape(line).replace("\x01", model).replace("\x02", effort)))
+                out.append(re.compile(re.escape(line).replace("\x01", model).replace("\x02", effort)
+                                      .replace("\x03", AGENT_PART)))
         return out
 
     def _is_own_mark_line(self, line: str, feishu: bool = False) -> bool:
@@ -2007,17 +2022,29 @@ class AgentRunner:
         header = header or self.header
         if not run or not header or "{" not in header:
             return "", ""
-        if run.get("model"):
-            return run["model"], run.get("effort") or ""
         mid, sid = run.get("machine_id") or "", run.get("session_id") or ""
+        if run.get("model"):
+            if "agent" not in run and "{agent}" in header and mid and sid:  # a run from before {agent}: asked once
+                try:
+                    agent = str((self.hub.session_row(mid, sid) or {}).get("agent") or "")
+                except Exception:
+                    agent = ""
+                with self._lock(run["id"]):
+                    cur = self.store.run_get(run["id"])
+                    if cur is not None:
+                        cur["agent"] = agent
+                        self.store.run_put(cur)
+                run["agent"] = agent
+            return run["model"], run.get("effort") or ""
         if not mid or not sid:
             return "", ""
         deadline = time.monotonic() + self.app.timing.agent_model_wait
-        model = effort = ""
+        model = effort = agent = ""
         while True:
             try:
                 srow = self.hub.session_row(mid, sid) or {}
                 model, effort = str(srow.get("model") or ""), str(srow.get("effort") or "")
+                agent = str(srow.get("agent") or "")
             except Exception:
                 pass
             if model or time.monotonic() >= deadline or self._stop.is_set():
@@ -2028,10 +2055,16 @@ class AgentRunner:
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur is not None:
-                cur["model"], cur["effort"] = model, effort
+                cur["model"], cur["effort"], cur["agent"] = model, effort, agent
                 self.store.run_put(cur)
-        run["model"], run["effort"] = model, effort
+        run["model"], run["effort"], run["agent"] = model, effort, agent
         return model, effort
+
+    @staticmethod
+    def _with_agent(template: str, run: Optional[dict]) -> str:
+        """The template with {agent} filled in: the Agent the run's session runs on (_model_of keeps it), "🤖 AI" when
+        that is not known."""
+        return template.replace("{agent}", agent_label((run or {}).get("agent") or "")) if template else template
 
     def _clean_answer(self, text: str, run: Optional[dict], model_effort: Optional[tuple] = None) -> str:
         """The Agent's answer without a mark it wrote itself (so marks are never doubled). model_effort: the model
@@ -2053,7 +2086,7 @@ class AgentRunner:
             exact = set()
             header = self.auto_header if run and run.get("kind") in QUIET_KINDS else self.header
             if header and model:
-                line = fill_header(header, model, effort if self.mark_effort else "")
+                line = fill_header(self._with_agent(header, run), model, effort if self.mark_effort else "")
                 if line.lstrip("> ").strip() != mark_model(model):
                     exact.add(line.strip())
                     if run and run.get("kind") == "doc":
@@ -2064,6 +2097,7 @@ class AgentRunner:
             for h in (self.header, self.auto_header):
                 if not h:
                     continue
+                h = self._with_agent(h, run)
                 line = fill_header(h, model, effort if self.mark_effort else "")
                 if not re.sub(r"[\W_]", "", h.replace("{model}", "").replace("{effort}", "")):
                     whole.add(line.strip())  # a mark of punctuation alone ("> {model}"): only the very line, ">" too
@@ -2100,7 +2134,7 @@ class AgentRunner:
         if lead:
             t = _with_lead(t, lead)
         if header:
-            line = fill_header(header, me[0], me[1] if self.mark_effort else "")
+            line = fill_header(self._with_agent(header, run), me[0], me[1] if self.mark_effort else "")
             if run and run.get("kind") == "doc":
                 line = line.lstrip("> ").strip()  # a comment shows a quote mark as it is
             if self.mark_position == "top":

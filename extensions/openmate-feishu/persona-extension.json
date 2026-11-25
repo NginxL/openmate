@@ -135,7 +135,7 @@
       "agent_reply_header": {
         "type": "string",
         "title": "AI 回复标记",
-        "description": "每条 /agent 回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
+        "description": "每条 /agent 回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
         "default": "> 🤖 AI 回复 · {model} · {effort}",
         "maxLength": 200
       },
@@ -204,7 +204,7 @@
       "auto_reply_header": {
         "type": "string",
         "title": "代答标记",
-        "description": "自动代答回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
+        "description": "自动代答回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
         "default": "> 🤖 AI 代答 · {model} · {effort}",
         "maxLength": 200
       },

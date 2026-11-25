@@ -468,7 +468,8 @@ class FakeHubHTTP:
                 if self.model_late > 0:  # a session just started is listed before its model
                     self.model_late -= 1
                 else:
-                    row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"))
+                    row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"),
+                               agent=s.get("agent", "claude"))
                 if s.get("background"):
                     row.update(background_working=True, state="working")
                 on = self._todo_of(mid, sid)
