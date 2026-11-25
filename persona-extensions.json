@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.11.48",
+        "version": "0.11.49",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -232,7 +232,7 @@
             "agent_reply_header": {
               "type": "string",
               "title": "AI 回复标记",
-              "description": "每条 /agent 回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
+              "description": "每条 /agent 回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
               "default": "> 🤖 AI 回复 · {model} · {effort}",
               "maxLength": 200
             },
@@ -310,7 +310,7 @@
             "auto_reply_header": {
               "type": "string",
               "title": "代答标记",
-              "description": "自动代答回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
+              "description": "自动代答回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
               "default": "> 🤖 AI 代答 · {model} · {effort}",
               "maxLength": 200
             },
@@ -423,9 +423,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.11.48/openmate-feishu-0.11.48.tar.gz",
-          "sha256": "ccf06200b7fcdaeeb2f2a6e2a5602b58e63757ae178b67a94c704c9b4824a1d7",
-          "size": 280096
+          "url": "packages/openmate-feishu/0.11.49/openmate-feishu-0.11.49.tar.gz",
+          "sha256": "b47b9d2bad517698c713e3f772b96224235bd0938bf05c517ed80525c0f531c8",
+          "size": 280801
         }
       ]
     },
@@ -434,7 +434,7 @@
         "manifest_version": 1,
         "id": "openmate-wechat",
         "name": "微信（OpenMate）",
-        "version": "0.1.46",
+        "version": "0.1.47",
         "description": "把微信私聊和群里 @你 的消息接进 Persona 的收件箱和会话页，私聊进知识库；在微信里用 /agent 让 Agent 以你的身份处理和回复，勾选的群里有人 @ 你时自动代答，助手代发的消息都要你在手机上确认。以一台新电脑的身份登录你的微信（非官方协议），与腾讯官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -565,7 +565,7 @@
             "agent_reply_header": {
               "type": "string",
               "title": "AI 回复标记",
-              "description": "每条 /agent 回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
+              "description": "每条 /agent 回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；放在哪由“AI 标记位置”决定。留空表示不加。",
               "default": "> 🤖 AI 回复 · {model} · {effort}",
               "maxLength": 200
             },
@@ -637,7 +637,7 @@
             "auto_reply_header": {
               "type": "string",
               "title": "代答标记",
-              "description": "自动代答回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
+              "description": "自动代答回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
               "default": "> 🤖 AI 代答 · {model} · {effort}",
               "maxLength": 200
             },
@@ -718,9 +718,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-wechat/0.1.46/openmate-wechat-0.1.46.tar.gz",
-          "sha256": "7e2b592a477c8c6f000956c9995a5aa235233919a7605cbe34df4f76f8d01e0f",
-          "size": 246511
+          "url": "packages/openmate-wechat/0.1.47/openmate-wechat-0.1.47.tar.gz",
+          "sha256": "edd3be9f430074080b3207bc97aafee587100a4eb379b453f585fdf6d9f96efc",
+          "size": 247161
         }
       ]
     }
