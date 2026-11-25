@@ -1665,7 +1665,7 @@ class DefaultsTest(unittest.TestCase):
         run = running(h, msg)
         h.tool("agent_reply", request=run["id"], text="> 🤖 AI 回复 · 别的模型\n总结如下：一切正常。")
         sent = h.sent()[-1]
-        self.assertEqual(sent["text"], "总结如下：一切正常。\n\n> 🤖 AI 回复 · Claude Opus 5.5 · xhigh", "its own mark is not doubled")
+        self.assertEqual(sent["text"], "总结如下：一切正常。\n\n> 🤖 AI 回复 · Opus 5.5", "its own mark is not doubled")
         self.assertEqual((sent["reply_to"], sent["root"]), (msg.id, msg.id), "quoting the request")
         self.assertEqual(h.world.reactions, [("chat_example_team", msg.id, "THINKING")], "once")
         self.assertTrue(h.app.agent.is_agent_text(sent["text"]))
@@ -1680,7 +1680,7 @@ class DefaultsTest(unittest.TestCase):
         run = running(h, msg)
         h.http.model_late = 2  # the hub lists the new session twice before it knows its model
         h.tool("agent_reply", request=run["id"], text="第一条")
-        self.assertEqual(h.sent()[-1]["text"], "第一条\n\n> 🤖 AI 回复 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(h.sent()[-1]["text"], "第一条\n\n> 🤖 AI 回复 · Opus 5.5")
         h2 = self.make(agent_reply_suffix="")
         msg = ask(h2, "/agent 一直不知道模型")
         run = running(h2, msg)
@@ -1690,7 +1690,7 @@ class DefaultsTest(unittest.TestCase):
         self.assertFalse(h2.app.store.run_get(run["id"]).get("model"), "not kept empty")
         h2.http.model_late = 0
         h2.tool("agent_reply", request=run["id"], text="第二条")
-        self.assertEqual(h2.sent()[-1]["text"], "第二条\n\n> 🤖 AI 回复 · Claude Opus 5.5 · xhigh", "asked again")
+        self.assertEqual(h2.sent()[-1]["text"], "第二条\n\n> 🤖 AI 回复 · Opus 5.5", "asked again")
 
     def test_settings_and_a_refused_reaction(self):
         h = self.make(agent_ack_reaction="OnIt", agent_reply_header="—— {model}（{effort}）", agent_reply_suffix=SUFFIX)
@@ -1698,8 +1698,14 @@ class DefaultsTest(unittest.TestCase):
         msg = ask(h, "/agent 写个周报")
         run = running(h, msg)  # a refused reaction never holds the request
         h.tool("agent_reply", request=run["id"], text="周报写好了")
-        self.assertEqual(h.sent()[-1]["text"], "周报写好了\n\n—— Claude Opus 5.5（xhigh）\n\n" + SUFFIX)
+        self.assertEqual(h.sent()[-1]["text"], "周报写好了\n\n—— Opus 5.5（xhigh）\n\n" + SUFFIX)
         self.assertEqual(h.world.reactions, [])
+        # the earlier default, as a settings page saved it, is today's: the model alone
+        h3 = self.make(agent_reply_header="> 🤖 AI 回复 · {model} · {effort}")
+        msg = ask(h3, "/agent 旧设置")
+        run = running(h3, msg)
+        h3.tool("agent_reply", request=run["id"], text="好了")
+        self.assertEqual(h3.sent()[-1]["text"], "好了\n\n> 🤖 AI 回复 · Opus 5.5")
         h2 = self.make(agent_ack_reaction="", agent_reply_header="")
         msg = ask(h2, "/agent 不要表情")
         run = running(h2, msg)
@@ -1711,7 +1717,7 @@ class DefaultsTest(unittest.TestCase):
         msg = ask(h, "/agent 放第一行")
         run = running(h, msg)
         h.tool("agent_reply", request=run["id"], text="答案在第二行\n\n> 🤖 AI 回复 · 别的模型")
-        self.assertEqual(h.sent()[-1]["text"], "> 🤖 AI 回复 · Claude Opus 5.5 · xhigh\n答案在第二行", "its own mark at the end is not doubled")
+        self.assertEqual(h.sent()[-1]["text"], "> 🤖 AI 回复 · Opus 5.5\n答案在第二行", "its own mark at the end is not doubled")
         h2 = self.make(agent_mark_position="sideways")
         self.assertEqual(h2.app.agent.mark_position, "end", "an unknown value is the default")
         agent_ = h2.app.agent
@@ -1731,6 +1737,8 @@ class DefaultsTest(unittest.TestCase):
                          ["Claude Opus 5.5", "GPT-6.1 Sol", "GPT-6 Astra", "Claude Sonnet 5.5 1M", "Claude Haiku 5.5",
                           "Gemini 3 Pro", ""])
         self.assertEqual(fill_header("> 🤖 AI 回复 · {model} · {effort}", "", ""), "> 🤖 AI 回复", "unknown parts go")
+        self.assertEqual([fill_header("· {model}", m, "") for m in ("claude-opus-5-5", "gemini-4-neon", "gpt-6-1-sol")],
+                         ["· Opus 5.5", "· Gemini 4 Neon", "· GPT-6.1 Sol"], "a Claude model by its own name in a mark")
         self.assertEqual(fill_header("> 🤖 AI 回复 · {model} · {effort}", "gpt-6-astra", ""), "> 🤖 AI 回复 · GPT-6 Astra")
 
 

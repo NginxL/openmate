@@ -135,8 +135,8 @@
       "agent_reply_header": {
         "type": "string",
         "title": "AI 回复标记",
-        "description": "每条 /agent 回复带的 AI 标记行，{model} 和 {effort} 换成回答它的模型和思考强度；放在哪由“AI 标记位置”决定。留空表示不加。",
-        "default": "> 🤖 AI 回复 · {model} · {effort}",
+        "description": "每条 /agent 回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5）；想同时写思考强度就加 {effort}。放在哪由“AI 标记位置”决定。留空表示不加。",
+        "default": "> 🤖 AI 回复 · {model}",
         "maxLength": 200
       },
       "agent_mark_position": {
@@ -198,14 +198,14 @@
       "auto_reply_header": {
         "type": "string",
         "title": "代答标记",
-        "description": "自动代答回复带的 AI 标记行，{model} 和 {effort} 换成回答它的模型和思考强度；位置同“AI 标记位置”。留空表示不加。",
-        "default": "> 🤖 AI 代答 · {model} · {effort}",
+        "description": "自动代答回复带的 AI 标记行，{model} 换成回答它的模型（如 Opus 5.5）；想同时写思考强度就加 {effort}。位置同“AI 标记位置”。留空表示不加。",
+        "default": "> 🤖 AI 代答 · {model}",
         "maxLength": 200
       },
       "auto_reply_at_asker": {
         "type": "boolean",
         "title": "代答时 @ 对方",
-        "description": "自动代答的回复开头真正 @ 提问的人，对方会收到 @ 提醒；同一个问题只 @ 一次。代答标记留空时不 @，免得两边的自动代答互相 @ 起来。",
+        "description": "自动代答的回复开头真正 @ 提问的人，对方会收到 @ 提醒；同一个问题只 @ 一次。代答标记留空、或改得认不出时不 @（标记要在回复的第一行或最后一行、以「🤖 AI」开头），免得两边的自动代答互相 @ 起来。",
         "default": true
       },
       "agent_reply_suffix": {

@@ -35,6 +35,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 import uuid
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -53,8 +54,10 @@ log = logging.getLogger("openmate.agent")
 DEFAULT_PREFIX = "/agent"
 DEFAULT_SUFFIX = "> 🤖 AI 代答，仅供参考"  # the end mark before 0.4: none by default now, still recognized
 KNOWN_SUFFIXES = ("🤖 AI 代答，仅供参考", "🤖")
-DEFAULT_HEADER = "> 🤖 AI 回复 · {model} · {effort}"
-AUTO_HEADER = "> 🤖 AI 代答 · {model} · {effort}"
+DEFAULT_HEADER = "> 🤖 AI 回复 · {model}"  # the model alone (the user, 2026-11-25): {effort} only where configured
+AUTO_HEADER = "> 🤖 AI 代答 · {model}"
+# the earlier defaults, as a settings page may have saved them: they follow the defaults
+_OLD_HEADERS = {"> 🤖 AI 回复 · {model} · {effort}": DEFAULT_HEADER, "> 🤖 AI 代答 · {model} · {effort}": AUTO_HEADER}
 HEADER_MARK = "🤖 AI 回复"
 AI_MARKS = ("🤖 AI 回复", "🤖 AI 代答", "🤖 AI")  # a line that starts so is an AI's: never answered by ours
 QUIET_KINDS = ("auto", "doc")  # runs nobody asked for in the chat: only the Agent's own replies go out there
@@ -86,18 +89,30 @@ _LEAD_SEPARATORS = ",，:：、;；!！~～"
 
 
 def _with_lead(text: str, lead: str) -> str:
-    """text starting with lead ("@name "), the same lead it starts with not doubled: lead, then what follows its
-    separators (spaces and punctuation on its own line; a line break and the layout after it kept)."""
+    """text starting with lead ("@name"), the same lead it starts with not doubled. Right after the name, its own
+    punctuation (",", "！" …) and the spaces after it give way to one space; a line break and the layout after it are
+    kept; other punctuation right after it ("？", "(" …) stays as written; and nothing after a space is touched
+    ("@张三 !enabled", "@张三 ~50 分钟")."""
     if text.startswith(lead):
         i = j = len(lead)
-        while j < len(text) and text[j] not in "\r\n" and (text[j].isspace() or text[j] in _LEAD_SEPARATORS):
+        if i == len(text):
+            return lead
+        while j < len(text) and text[j] in _LEAD_SEPARATORS:
             j += 1
-        if j > i or j == len(text) or text[j] in "\r\n":  # this lead, not the start of a longer name
-            rest = text[j:]
-            if not rest:
-                return lead
-            return lead + rest if rest[0] in "\r\n" else lead + " " + rest
+        while j < len(text) and text[j] not in "\r\n" and text[j].isspace():
+            j += 1
+        if j == len(text):
+            return lead
+        if text[j] in "\r\n":
+            return lead + text[j:]
+        if j > i:
+            return lead + " " + text[j:]
+        if unicodedata.category(text[i])[0] in "PS":  # "@张三？": the agent's own @, as it wrote it
+            return text
+        # else a longer name ("@张三丰"): not this one's @
     return lead + (" " + text if text else "")
+
+
 PROGRESS_DONE_MARK = "✅ 已完成，结果见后面的回复"
 STOP_WORDS = ("/stop", "/停止", "/停")
 FORWARDED_NOTE = "已转给正在做这件事的 Agent"
@@ -133,10 +148,13 @@ def parse_suffix(v) -> str:
 
 
 def parse_header(v) -> str:
-    """The reply's first line, {model} and {effort} filled in: the default when unset, none for empty or a space."""
+    """The reply's first line, {model} and {effort} filled in: the default when unset, none for empty or a space; an
+    earlier default is today's."""
     if v is None:
         return DEFAULT_HEADER
     s = str(v)
+    if s.strip() in _OLD_HEADERS:
+        return _OLD_HEADERS[s.strip()]
     return "" if not s.strip() else s.replace("\\n", " ")
 
 
@@ -172,9 +190,15 @@ _BUILTIN_MARK = re.compile("^(?:%s)(?:$| · \\S)" % "|".join(re.escape(m) for m 
 _GENERIC_MARK = re.compile("^%s(?:$|\\s*·|\\s*[：:])" % re.escape(AI_MARKS[2]))  # another AI's "🤖 AI · …" / "🤖 AI：…"
 
 
+def mark_model(model: str) -> str:
+    """A model as an AI mark names it: model_label, a Claude model by its own name (claude-opus-5-5 → Opus 5.5)."""
+    label = model_label(model)
+    return label[len("Claude "):] if label.startswith("Claude ") and len(label) > len("Claude ") else label
+
+
 def fill_header(template: str, model: str, effort: str) -> str:
     """The header with what is known; a part left empty takes its " · " with it."""
-    return fill_header_raw(template, model_label(model), (effort or "").strip())
+    return fill_header_raw(template, mark_model(model), (effort or "").strip())
 
 
 def fill_header_raw(template: str, model: str, effort: str) -> str:
@@ -637,7 +661,11 @@ class AgentRunner:
         if kind != "user":
             log.info("自动代答: not answered (the sender is %s)", kind or "unknown")
             return
-        at_name = self._name_here(sender, chat_id) if self.auto_at else ""
+        # the name the @ shows, asked outside the lock (it may take the network a while), and only for an answer that
+        # @s (_may_at) and that its group's quota still lets start (checked again with the reservation below)
+        at_name = ""
+        if self._may_at() and not self._guest_room(chat_id, "auto", now):
+            at_name = self._name_here(sender, chat_id)
         with self._lock(GUEST_ROOM):  # the check and the reservation at once: two @s together never pass one place
             with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
                 if not ok:
@@ -1998,6 +2026,10 @@ class AgentRunner:
             else:
                 model, effort = (run or {}).get("model") or "", (run or {}).get("effort") or ""
             own = {fill_header(h, model, effort).lstrip("> ").strip() for h in (self.header, self.auto_header) if h}
+            # and the same mark as the earlier default rendered it ("🤖 AI 回复 · Claude Opus 5.5 · xhigh"), which an
+            # Agent may copy from the chat's history
+            own |= {fill_header_raw(o, model_label(model), (effort or "").strip()).lstrip("> ").strip()
+                    for o, new in _OLD_HEADERS.items() if new in (self.header, self.auto_header)}
             own |= {DEFAULT_SUFFIX.lstrip("> ").strip(), KNOWN_SUFFIXES[0]}
             if self.suffix.strip():
                 own.add(self.suffix.strip().lstrip("> ").strip())
@@ -2040,13 +2072,12 @@ class AgentRunner:
         """(user id, name) the answer of a 自动代答 @s: the one who asked (auto_reply_at_asker, on by default). Only
         where the platform takes real @s, the run knows them by id and by name, and the answer carries the 代答 mark:
         an unmarked answer that @s its asker could set two people's 自动代答 answering each other."""
-        if run.get("kind") != "auto" or not self.auto_at or not self.auto_header:
+        if run.get("kind") != "auto" or not self._may_at():
             return None
-        if not getattr(getattr(self.app, "backend", None), "can_mention", False):
+        uid, name = str(run.get("asker_id") or ""), str(run.get("asker_at") or "")
+        if not uid or not name.strip() or "\n" in name or "\r" in name:
             return None
-        uid, name = str(run.get("asker_id") or ""), str(run.get("asker_at") or "").strip()
-        if not uid or not name or "\n" in name or "\r" in name:
-            return None
+        name = name.strip()
         me = getattr(self.app, "account", None)
         if me is not None and getattr(me, "id", "") == uid:  # sent as the user, an @ of them reads as an @自己 request
             return None
@@ -2056,15 +2087,22 @@ class AgentRunner:
             return None
         return uid, name
 
+    def _may_at(self) -> bool:
+        """Whether a 自动代答 answer may @ its asker at all: switched on, with the 代答 mark, where real @s exist."""
+        return bool(self.auto_at and self.auto_header
+                    and getattr(getattr(self.app, "backend", None), "can_mention", False))
+
     def _name_here(self, user_id: str, chat_id: str) -> str:
-        """A person's display name in this chat, as the service says it ("" when it cannot say)."""
+        """A person's display name in this chat, as the service says it ("" when it cannot say, or says it over more
+        than one line)."""
         backend = getattr(self.app, "backend", None)
         if backend is None:
             return ""
         try:
-            return str(backend.user_name(user_id, chat_id) or "").strip()
+            name = str(backend.user_name(user_id, chat_id) or "")
         except Exception:
             return ""
+        return "" if "\n" in name or "\r" in name else name.strip()
 
     def _at_turn(self, run: dict, key: str) -> bool:
         """Under the run's lock: whether the reply sent under key is the one that @s the asker. The first answer is;

@@ -66,7 +66,7 @@ class AutoReplyTest(unittest.TestCase):
         wait_until(lambda: h.world.reactions, what="the reaction")
         h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
         sent = h.sent()[-1]
-        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\n> 🤖 AI 代答 · Opus 5.5")
         self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", 0)], "a real @ of the one who asked")
         self.assertEqual(sent["reply_to"], msg.id, "quoting their message")
         sec = [s for s in page(h)["sections"] if s.get("title") == "自动代答"][0]
@@ -171,7 +171,7 @@ class AutoReplyAtTest(unittest.TestCase):
         h = make(self, agent_mark_position="top")
         h.app.store.autoreply_set(TEAM, True)
         _, sent = self.answer(h, "接口周五前上线。")
-        mark = "> 🤖 AI 代答 · Claude Opus 5.5 · xhigh"
+        mark = "> 🤖 AI 代答 · Opus 5.5"
         self.assertEqual(sent["text"], mark + "\n@示例同事乙 接口周五前上线。", "the mark stays the first line")
         self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", len(mark) + 1)])
 
@@ -179,7 +179,7 @@ class AutoReplyAtTest(unittest.TestCase):
         h = make(self)
         h.app.store.autoreply_set(TEAM, True)
         _, sent = self.answer(h, "@示例同事乙，接口周五前上线。")
-        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["text"], "@示例同事乙 接口周五前上线。\n\n> 🤖 AI 代答 · Opus 5.5")
         self.assertEqual(sent["mentions"], [("user_example_b", "示例同事乙", 0)])
         h2 = make(self)
         h2.app.store.autoreply_set(TEAM, True)
@@ -190,7 +190,7 @@ class AutoReplyAtTest(unittest.TestCase):
         h = make(self, auto_reply_at_asker=False)
         h.app.store.autoreply_set(TEAM, True)
         run, sent = self.answer(h, "接口周五前上线。")
-        self.assertEqual(sent["text"], "接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh")
+        self.assertEqual(sent["text"], "接口周五前上线。\n\n> 🤖 AI 代答 · Opus 5.5")
         self.assertEqual(sent["mentions"], [])
         self.assertNotIn("开头自动 @ 对方", h.http.starts()[-1]["body"]["prompt"])
 
@@ -222,7 +222,7 @@ class AutoReplyAtTest(unittest.TestCase):
         h.app.store.autoreply_set(TEAM, True)
         h.app.backend.can_mention = False
         _, sent = self.answer(h, "接口周五前上线。")
-        self.assertEqual((sent["text"], sent["mentions"]), ("接口周五前上线。\n\n> 🤖 AI 代答 · Claude Opus 5.5 · xhigh", []))
+        self.assertEqual((sent["text"], sent["mentions"]), ("接口周五前上线。\n\n> 🤖 AI 代答 · Opus 5.5", []))
 
 
     def test_the_at_uses_the_name_this_group_shows(self):
@@ -245,6 +245,32 @@ class AutoReplyAtTest(unittest.TestCase):
         self.assertEqual(sent["mentions"], [])
         self.assertFalse(sent["text"].startswith("@"))
 
+    def test_a_name_over_two_lines_no_at(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        h.app.backend.user_name = lambda uid, chat=None: "示例同事乙\n"
+        _, sent = self.answer(h, "接口周五前上线。")
+        self.assertEqual(sent["mentions"], [])
+
+    def test_no_name_is_asked_for_an_answer_that_never_ats(self):
+        # the name may take the network a while: never for an answer without an @, or one its group's quota stops
+        for cfg, mention in (({"auto_reply_at_asker": False}, True), ({"auto_reply_header": ""}, True), ({}, False)):
+            h = make(self, **cfg)
+            h.app.store.autoreply_set(TEAM, True)
+            h.app.backend.can_mention = mention
+            asked = []
+            h.app.agent._name_here = lambda uid, chat: asked.append(uid) or "示例同事乙"
+            running(h, at_me(h))
+            self.assertEqual(asked, [], cfg)
+        h = make(self, auto_reply_hourly_most=1)
+        h.app.store.autoreply_set(TEAM, True)
+        asked = []
+        h.app.agent._name_here = lambda uid, chat: asked.append(uid) or "示例同事乙"
+        running(h, at_me(h))
+        at_me(h, text="@示例用户 再问一个")
+        time.sleep(0.5)
+        self.assertEqual(asked, ["user_example_b"], "the second @ is past the hour's most: nobody is asked")
+
     def test_a_mark_others_cannot_read_never_ats(self):
         # the asker's own 自动代答 must see an AI's answer: a mark of one's own, or one an end mark pushes off the
         # last line, is not where any OpenMate reads it
@@ -261,7 +287,10 @@ class AutoReplyAtTest(unittest.TestCase):
 
     def test_an_at_the_agent_wrote_with_other_spacing_is_not_doubled(self):
         cases = [("@示例同事乙\u3000收到", "@示例同事乙 收到"), ("@示例同事乙！收到", "@示例同事乙 收到"),
-                 ("@示例同事乙\r\n收到", "@示例同事乙\r\n收到"), ("@示例同事乙\n  - 第一点\n  - 第二点", "@示例同事乙\n  - 第一点\n  - 第二点")]
+                 ("@示例同事乙\r\n收到", "@示例同事乙\r\n收到"), ("@示例同事乙\n  - 第一点\n  - 第二点", "@示例同事乙\n  - 第一点\n  - 第二点"),
+                 # after a space the answer is its own: its first sign is part of what it says
+                 ("@示例同事乙 !enabled 表示关闭", "@示例同事乙 !enabled 表示关闭"), ("@示例同事乙 ~50 分钟", "@示例同事乙 ~50 分钟"),
+                 ("@示例同事乙？", "@示例同事乙？"), ("@示例同事乙（产品）你看下", "@示例同事乙（产品）你看下")]
         for written, want in cases:
             h = make(self)
             h.app.store.autoreply_set(TEAM, True)
@@ -307,20 +336,33 @@ class AutoReplyAtTest(unittest.TestCase):
         run = running(h, at_me(h))
         errors = []
 
-        def reply():
+        def reply(text):
             try:
-                h.tool("agent_reply", request=run["id"], text="接口周五前上线。")
+                h.tool("agent_reply", request=run["id"], text=text)
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
-        ts = [threading.Thread(target=reply) for _ in range(2)]
+        ts = [threading.Thread(target=reply, args=("接口周五前上线。",)) for _ in range(2)]
         for t in ts:
             t.start()
         for t in ts:
             t.join(10)
-        sent = [x for x in h.sent() if x["chat"] == TEAM and x["text"].endswith("xhigh")]
+        sent = [x for x in h.sent() if x["chat"] == TEAM and x["text"].endswith("Opus 5.5")]
         self.assertEqual(len(sent), 1, (sent, errors))
         self.assertEqual(sent[0]["mentions"], [("user_example_b", "示例同事乙", 0)])
+        # two different answers at once: both go, one @
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        run = running(h, at_me(h))
+        errors = []
+        ts = [threading.Thread(target=reply, args=(t,)) for t in ("接口周五前上线。", "文档也一起更新。")]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(10)
+        sent = [x for x in h.sent() if x["chat"] == TEAM and x["text"].endswith("Opus 5.5")]
+        self.assertEqual((len(sent), errors), (2, []))
+        self.assertEqual(sorted(len(x["mentions"]) for x in sent), [0, 1])
 
     def test_an_old_run_or_the_account_itself_is_never_at(self):
         h = make(self)
