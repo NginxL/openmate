@@ -2281,6 +2281,9 @@ class PictureTest(Base):
         asked = len(S.api_calls)
         self.assertIsNone(b.chat_picture("501", "7003").avatar)
         self.assertFalse([c for c in S.api_calls[asked:] if "Chatters" in str(c)], "asked in the other's name")
+        first = larkagentx.Account(me, "我")
+        self.assertIsNone(b._person_avatar("7003", of=first), "the client at hand is the other account's: not asked")
+        self.assertFalse([c for c in S.api_calls[asked:] if "Chatters" in str(c)])
 
     def test_a_picture_not_known_says_none_and_a_key_that_is_no_key_is_not_put_in_an_address(self):
         b = self.b

@@ -2066,12 +2066,15 @@ class LarkXBackend(Backend):
         return Chat(id=chat_id, kind=kind, name=name, peer_id=peer if kind == "dm" else "", topic=topic and kind == "group",
                     members=members if kind == "group" else 0, avatar=avatar)
 
-    def _person_avatar(self, user_id: str, ask: bool = True) -> Optional[str]:
+    def _person_avatar(self, user_id: str, ask: bool = True, of: Optional[Account] = None) -> Optional[str]:
         """The key of a person's picture ("" when they have none), None when the service could not be asked (or,
-        without ask, when it is not known already)."""
+        without ask, when it is not known already; or, with of, when that account is not the one signed in: the
+        client asked is the one of that account)."""
         user_id = _id(user_id)
         client, me = self._session()
         if client is None or not user_id:
+            return None
+        if of is not None and (me is None or me.id != of.id):
             return None
         now = time.monotonic()
         with self._lock:
@@ -2213,10 +2216,7 @@ class LarkXBackend(Backend):
         peer_id = _id(peer_id)
         if (chat.kind == "dm" and chat.avatar is None and not chat.peer_id and peer_id
                 and not (me is not None and me.id == peer_id)):  # (told by a store of another account: not its own)
-            with self._lock:
-                if not self._still(me):  # another account signed in meanwhile: not asked in its name
-                    return chat
-            key = self._person_avatar(peer_id)
+            key = self._person_avatar(peer_id, of=me)  # (another account signed in meanwhile: not asked in its name)
             if key is not None:  # on a copy: the chat kept for the session stays as the service said it
                 chat = dataclasses.replace(chat, avatar=avatar_address(self.region.file_host, key))
         return chat
