@@ -10,9 +10,13 @@ Busy: the 1-minute load is over BUSY_LOAD_PER_CORE times the computer's cores, l
 free, or BUSY_WORKING or more of its sessions are working a turn: the lines Persona's own admission gate holds a busy
 computer to (assistant.admission: load_per_core, min_memory_bytes, max_claude_procs), so a /agent spills where an
 assistant task would. The working count is one read of the hub's session list (agents.read) for every computer at
-once; an unread count is no count, never a busy one. Another computer is chosen only with both load and memory
-readings fresh and none of the three busy; home without a load or memory reading stays home.
-Nothing here ever stops a start, it only picks where: any error, and a hub too slow (BUDGET), is the old behaviour.
+once, hidden ones included; a session waiting for the user's answer is listed apart (needs_you) and not counted: it
+waits without load, where the gate still counts it. That count is an extra line: unread (an older hub, no
+agents.read, a list too long for one page, no time left) it is no count, never a busy one, and the load and memory
+lines decide alone, as before it was read. Another computer is chosen only with both load and memory readings fresh
+and none of the three busy; home without a load or memory reading stays home.
+Nothing here ever stops a start, it only picks where: an error reading the computers or home, and a hub too slow
+(BUDGET), is the old behaviour.
 Pictures an Agent leaves are read on the extension's computer, taken to be the assistant's (as before placement): a
 conversation placed elsewhere is told it cannot attach one. The launcher Persona gives `/agent` (its "Lark /agent"
 setting) has to run on the chosen computer too: the built-in claude does everywhere.
@@ -37,6 +41,7 @@ BUSY_WORKING = 8  # sessions working a turn at once
 FRESH_SECONDS = 120.0  # a reading older than this (by its own time) is no reading
 BUDGET = 8.0  # seconds placement may take in all: the request waits for it, and a restart meanwhile loses it
 ASK_TIMEOUT = 4.0  # one hub request
+WORKING_TIMEOUT = 2.0  # the session list: an extra line, it must not eat the readings' budget
 
 Reading = Tuple[Optional[float], Optional[int]]  # (load per core, free memory bytes); either may be unknown
 
@@ -125,8 +130,8 @@ def choose(hub, sticky: str = "", clock=time.monotonic) -> Tuple[str, str]:
         if left < 0.5:
             return None
         try:
-            return hub.working_sessions(timeout=min(ASK_TIMEOUT, left))
-        except Exception:  # an older hub, or without agents.read: the load and memory lines alone
+            return hub.working_sessions(timeout=min(WORKING_TIMEOUT, left))
+        except Exception:  # an older hub, no agents.read, a list too long, a slow hub: the other lines alone
             return None
 
     if not home:
@@ -152,7 +157,7 @@ def choose(hub, sticky: str = "", clock=time.monotonic) -> Tuple[str, str]:
     def at(mid: str) -> Optional[int]:
         return None if working is None else working.get(mid, 0)
 
-    here_working = None if working is None else max(working.get(home, 0), working.get(home_now, 0) if home_now else 0)
+    here_working = None if working is None else max(working.get(home, 0), working.get(home_now or home, 0))
     if not busy(here, here_working):
         return "", "%s 不忙（%s）" % (home, _words(here, here_working))
     best: Optional[Tuple[float, str, Reading]] = None

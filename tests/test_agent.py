@@ -1949,6 +1949,30 @@ class LoadPlacementTest(unittest.TestCase):
         ask(h, "/agent 换一台")
         self.assertEqual(started(h)["body"].get("machine_id"), "devbox-small")
 
+    def test_the_working_count_is_read_whole_and_with_hidden_sessions(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 3.0)), "devbox": (True, reading_of(64, 0.5))})
+        h.http.working = {"mac-example": 8}
+        ask(h, "/agent 隐藏的也算")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+        with h.http.lock:
+            q = [r["query"] for r in h.http.requests if r["path"] == "/api/v1/sessions" and r["query"].get("state")]
+        self.assertEqual(q, [{"state": "working", "include_hidden": "1", "limit": "200"}])
+        h2 = agent(self)  # a list longer than one page: counted only in part it could read low, so it is no count
+        computers(h2, "mac-example", **{"mac-example": (True, reading_of(18, 3.0)),
+                                        "devbox": (True, reading_of(64, 0.5))})
+        h2.http.working, h2.http.working_more = {"mac-example": 8}, True
+        ask(h2, "/agent 列不完")
+        self.assertNotIn("machine_id", started(h2)["body"], "an unread count is never busy")
+
+    def test_home_by_an_older_id_counts_its_sessions_by_its_current_one(self):
+        h = agent(self)
+        computers(h, "mac-old-id", **{"mac-example": (True, reading_of(18, 3.0)), "devbox": (True, reading_of(64, 0.5))})
+        h.http.metrics["mac-old-id"] = dict(reading_of(18, 3.0), machine_id="mac-example")  # quiet load
+        h.http.working = {"mac-example": 8}  # the hub lists its sessions by the id it has now
+        ask(h, "/agent 旧编号")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+
     def test_without_the_session_list_the_load_lines_alone(self):
         # an older hub or no agents.read: the working count is unread, never taken as busy
         h = agent(self)
@@ -2230,11 +2254,18 @@ class PlacementReadingTest(unittest.TestCase):
                 self.t += timeout  # each answer takes all it may
                 return reading_of(18, 20.0) if mid == "home" else reading_of(64, 0.5)
 
+            def working_sessions(self, timeout):
+                self.asked.append("working")
+                self.t += timeout
+                return {}
+
         hub = Slow()
         machine, why = placement.choose(hub, clock=hub.clock)
         self.assertLessEqual(hub.t, placement.BUDGET)
-        self.assertGreater(len(hub.asked), 1, "home and at least one other were read")
-        self.assertLess(len(hub.asked), 4, "the budget cuts the readings short")
+        self.assertIn("working", hub.asked, "the session list was read")
+        others = [m for m in hub.asked if m not in ("home", "working")]
+        self.assertGreaterEqual(len(others), 1, "the session list leaves time to read another computer")
+        self.assertLess(len(others), 3, "the budget cuts the readings short")
         self.assertIn(machine, ("", "a", "b"))
 
 

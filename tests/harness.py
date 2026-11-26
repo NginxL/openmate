@@ -250,6 +250,7 @@ class FakeHubHTTP:
         # machine id → how many sessions it has working a turn (GET /api/v1/sessions?state=working lists them, with a
         # session done but unseen beside each, as the hub's working list holds those too); None: that list refused (403)
         self.working: Optional[Dict[str, int]] = {}
+        self.working_more = False  # that list says it has more than one page
         self.refuse_on: Dict[str, Any] = {}  # machine id → (status, code, delivered) a start there is refused with
         self._n = itertools.count(1)
         hub = self
@@ -491,7 +492,7 @@ class FakeHubHTTP:
                               "state": "working"} for i in range(n)]
                     rows.append({"session_id": "%s-done" % wmid, "machine_id": wmid, "status": "done",
                                  "state": "working"})
-                return 200, {"sessions": rows, "total": len(rows), "has_more": False}
+                return 200, {"sessions": rows, "total": len(rows), "has_more": self.working_more}
             if method == "GET" and p == "/api/v1/sessions":
                 sid, mid = query.get("session_id"), query.get("machine_id")
                 s = self.sessions.get(sid or "")

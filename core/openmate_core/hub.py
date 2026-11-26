@@ -7,7 +7,8 @@ asks for (docs/extensions/extensions.md "Hub API: scopes"):
     agents.control  POST /api/v1/sessions/{mid}/{sid}/messages (a conversation's, or a task's Agent's), …/interrupt
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
                     GET  /api/v1/sessions?machine_id=&session_id= (the session's status),
-                    GET  /api/v1/sessions?state=working (placement: how many sessions each computer has working),
+                    GET  /api/v1/sessions?state=working&include_hidden=1 (placement: how many sessions each computer
+                    has working),
                     GET  /api/v1/interactions, …/interactions/history (the questions waiting now, and how one
                     ended: the 渠道 takes back one answered elsewhere)
     machines.read   GET  /api/v1/machines, …/machines/{id}/metrics (placement: which computers, and how loaded)
@@ -202,14 +203,17 @@ class HubAPI:
         return m if isinstance(m, dict) else {}
 
     def working_sessions(self, timeout: float = 10.0) -> Dict[str, int]:
-        """machine id → how many of its sessions are working a turn right now (agents.read), the count Persona's
-        admission gate holds against max_claude_procs; a computer with none is absent. One page of the hub's working
-        list: its state=working also lists sessions done but not yet seen, so only status working counts, and a longer
-        list is cut short (a count can come out low, never high)."""
-        doc = self.request("GET", "/api/v1/sessions", query={"state": "working", "limit": 200}, timeout=timeout)
+        """machine id → how many of its sessions are working a turn right now (agents.read), hidden ones included; a
+        computer with none is absent. The hub's working list also holds sessions done but not yet seen: only status
+        working counts. One page (the hub's most, 200): a list longer than that raises, as a count read only in part
+        could come out low."""
+        doc = self.request("GET", "/api/v1/sessions", query={"state": "working", "include_hidden": 1, "limit": 200},
+                           timeout=timeout)
         items = doc.get("sessions") if isinstance(doc, dict) else None
         if not isinstance(items, list):
             raise HubError(0, "hub 的会话列表不是列表")
+        if doc.get("has_more"):
+            raise HubError(0, "在干活的会话一页列不完")
         out: Dict[str, int] = {}
         for s in items:
             if isinstance(s, dict) and s.get("status") == "working" and s.get("machine_id"):
