@@ -28,6 +28,13 @@ with open(os.path.join(EXT_DIR, "persona-extension.json"), encoding="utf-8") as 
 CONN = MANIFEST["contributes"]["connectors"][0]
 
 
+# The icons the Persona web draws for a nav_page (web/src/lib/extension-ui.ts: UI_ICONS, with UI version 6's NEW_ICONS_6).
+NAV_ICONS = set("""extension plugin chart gauge list bell doc calendar money branch code pull_request merge map
+home sofa light power fan thermometer droplet lock unlock door window camera video play pause stop speaker music tv plug
+battery bolt sun moon cloud rain snow wind leaf car location robot wifi shield trend_up trend_down wallet bank heart plus
+minus trash edit refresh share info""".split())
+
+
 class ManifestTest(unittest.TestCase):
     def test_identity(self):
         self.assertEqual(MANIFEST["id"], "openmate-feishu")
@@ -112,10 +119,18 @@ class ManifestTest(unittest.TestCase):
     def test_pages_and_cards(self):
         ui = {u["id"]: u for u in MANIFEST["contributes"]["ui"]}
         self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
-            "openmate-today": ("nav_page", "bell", None), "today-card": ("overview_card", None, "openmate-today"),
-            "openmate-agents": ("nav_page", "list", None), "agents-card": ("overview_card", None, "openmate-agents"),
-            "chats": ("nav_page", "list", None), "calendar": ("nav_page", "calendar", None),
+            "openmate-today": ("nav_page", "sun", None), "today-card": ("overview_card", None, "openmate-today"),
+            "openmate-agents": ("nav_page", "robot", None), "agents-card": ("overview_card", None, "openmate-agents"),
+            "chats": ("nav_page", "bell", None), "calendar": ("nav_page", "calendar", None),
             "starkmesh": ("nav_page", "wallet", None), "starkmesh-card": ("overview_card", None, "starkmesh")})
+        # Each page keeps its own shape in the sidebar's monochrome icons: no two of our pages share an icon, and each is
+        # one the Persona web draws for a nav_page (web/src/lib/extension-ui.ts UI_ICONS; any other becomes the plain
+        # extension icon there, so "chat" or "person" would not help yet).
+        nav = [u["icon"] for u in ui.values() if u["placement"] == "nav_page"]
+        self.assertTrue(set(nav) <= NAV_ICONS, set(nav) - NAV_ICONS)
+        drawn = [{"plugin": "extension"}.get(i, i) for i in nav]  # plugin is extension's old name: the same picture
+        self.assertEqual(len(drawn), len(set(drawn)), nav)
+        self.assertFalse(set(drawn) & {"list", "extension"}, "the plain list and extension icons look like every other extension's page")
         self.assertEqual(ui["starkmesh"]["title"], "中转站")
         self.assertTrue(all(1 <= len(u["title"]) <= 40 for u in ui.values()))
         # every contribution is drawn by the program (a missing one is an error on the Overview)
