@@ -109,6 +109,18 @@ class SecondReviewTest(unittest.TestCase):
         out, spans = mention_spans(text, [("1", "Ann")], markup.no_mentions(text), markup.FRONT_END)
         self.assertEqual(spans[0][2], out.rindex("@Ann"), "Chinese words in a path are in it")
 
+    def test_third_review(self):
+        for text, hidden in (("[docs](https://a.org)和https://b.org/@Ann", "https://b.org"),
+                             ("**photo** ![pic](https://e.org/@Ann/avatar) tell @Ann", "![pic]"),
+                             ("**look** https://e.org/\uff31\uff21/@Ann", "https://e.org")):
+            out, spans = mention_spans(text, [("1", "Ann")], markup.no_mentions(text), markup.FRONT_END)
+            self.assertTrue(out.startswith("@Ann\n\n") or spans[0][2] == out.rindex("@Ann"), text)
+            self.assertTrue(any(a <= text.index(hidden) < b for a, b in markup.no_mentions(text)), text)
+        quote = markup.blocks("> run `make`\n> ---")[0].markdown()
+        self.assertEqual(quote, "> run `make`\n> \\---", "a rule in a quote is words")
+        self.assertFalse(markup.formatted("@**Ops** thanks", ["**Ops**"]), "a name is never markup")
+        self.assertTrue(markup.formatted("@**Ops** **thanks**", ["**Ops**"]))
+
     def test_words_that_stay_words(self):
         for text in ("*****", '![**map**](map.png "Map")'):
             self.assertFalse(markup.formatted(text), text)

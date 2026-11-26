@@ -1166,6 +1166,8 @@ class PostTreeTest(unittest.TestCase):
         self.assertEqual(larkagentx.tree_words(t), "@Sam`ops\nhello")
 
     def test_mentions_must_be_in_words(self):
+        with self.assertRaises(ValueError):  # (in a bare address: never split for an @)
+            larkagentx.post_tree("**看** https://e.org/@张三", [("7001", "张三", 20)])
         with self.assertRaises(ValueError):
             larkagentx.post_tree("[@张三](https://example.com/x)", [("7001", "张三", 1)])
         with self.assertRaises(ValueError):

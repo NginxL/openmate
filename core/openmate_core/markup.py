@@ -30,16 +30,16 @@ _TARGET = r"(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round b
 LINK = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\(" + _TARGET + r"\)")
 # an image, its title too: words as written, never a link
 IMAGE = re.compile(r"!\[[^\[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)")
-# a bare address: up to a space, a quote, <, >, ` or CJK punctuation (Chinese words in its path are in it), without
-# the sentence marks and stars at its end ("**see https://x.org**." is bold: _trim_url): as written (the service
-# links it), no markup or @ in it
-URL = re.compile("https?://[^\\s<>\"'`　-〿＀-￯]+")
+# a bare address: up to a space, a quote, <, >, ` or CJK or fullwidth punctuation (Chinese words and fullwidth
+# letters in its path are in it), without the sentence marks and stars at its end ("**see https://x.org**." is
+# bold: _trim_url): as written (the service links it), no markup or @ in it
+URL = re.compile(r"https?://[^\s<>\"'`\x01\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
 URL_TAIL = ".,:;!?*"
 MASK = "\x01"  # stands for code's words, an address, an image's text: never markup, wherever the stars are
 # on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](its address, masked)
 INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x01+)\)")
 MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|&])")
-NBSP = " "
+NBSP = "\u00a0"
 
 FEATURES = (("bold", "粗体"), ("link", "链接"), ("list", "列表"), ("code", "代码"), ("heading", "标题"), ("quote", "引用"))
 
@@ -72,13 +72,12 @@ def _masked(line: str) -> str:
     for x in IMAGE.finditer(once):
         blank(x.start(), x.end())
     once = "".join(m)
-    links = []
+    hidden = list(once)  # the links whole as MASK: no bare address starts in one, nor runs on from one
     for x in LINK.finditer(once):
-        links.append((x.start(), x.end()))
+        hidden[x.start():x.end()] = MASK * (x.end() - x.start())
         blank(x.start(2), x.end(2))  # its address is one piece: a "**" in it closes no bold
-    for u in URL.finditer(once):
-        if not any(a <= u.start() < b for a, b in links):
-            blank(u.start(), u.start() + len(_trim_url(u.group())))
+    for u in URL.finditer("".join(hidden)):
+        blank(u.start(), u.start() + len(_trim_url(u.group())))
     return "".join(m)
 
 
@@ -191,16 +190,15 @@ class Block(dict):
             body = self["body"]
             ticks = max([len(t) for t in re.findall(r"`{3,}", body)] + [2]) + 1  # a fence the body never closes
             return "%s%s\n%s%s%s" % ("`" * ticks, self.get("lang") or "", body, "\n" if body else "", "`" * ticks)
-        lines = [_md_line(runs) for runs in self.runs()]
+        # a line of only - = * _ is words, in a quote or a list too (never a heading's underline)
+        lines = [(lambda w: "\\" + w if SETEXT.match(w) else w)(_md_line(runs)) for runs in self.runs()]
         if k == "quote":
             return "\n".join("> " + w for w in lines)
         if k == "bullets":
             return "\n".join("- " + w for w in lines)
         if k == "numbers":
             return "\n".join("%d. %s" % (self.number + i, w) for i, w in enumerate(lines))
-        # a paragraph (a heading: its one bold line): each line break a hard one; a line of only - = * _ is words
-        # (never a heading's underline)
-        return "  \n".join("\\" + w if SETEXT.match(w) else w for w in lines)
+        return "  \n".join(lines)  # a paragraph (a heading: its one bold line): each line break a hard one
 
 
 def _closes(line: str, fence: str) -> bool:
@@ -284,11 +282,18 @@ def blocks(text: str) -> List[Block]:
     return out
 
 
-def features(text: str) -> List[str]:
+def without_names(text: str, names=()) -> str:
+    """The text with each "@name" of the names (those to @) masked: a name is never markup ("@**Ops**" is a name)."""
+    for name in sorted({n for n in names if n}, key=len, reverse=True):
+        text = text.replace("@" + name, "@" + "\x02" * len(name))
+    return text
+
+
+def features(text: str, names=()) -> List[str]:
     """What markup of the subset the text uses, in words (粗体, 链接, 列表, 代码, 标题, 引用): [] for a plain text, which
-    goes as it always did."""
+    goes as it always did. names: those to @, whose "@name" is never markup."""
     seen: Dict[str, bool] = {}
-    for b in blocks(text):
+    for b in blocks(without_names(text, names)):
         if b.kind == "code":
             seen["code"] = True
             continue
@@ -307,9 +312,9 @@ def features(text: str) -> List[str]:
     return [words for key, words in FEATURES if seen.get(key)]
 
 
-def formatted(text: str) -> bool:
-    """Whether the text uses the subset at all (else it is sent as plain text, as before)."""
-    return bool(features(text))
+def formatted(text: str, names=()) -> bool:
+    """Whether the text uses the subset at all (else it is sent as plain text, as before); names: as features'."""
+    return bool(features(text, names))
 
 
 def no_mentions(text: str) -> List[Tuple[int, int]]:
@@ -321,6 +326,9 @@ def no_mentions(text: str) -> List[Tuple[int, int]]:
             continue
         for line in b.runs():
             out.extend((r.start, r.end) for r in line if r.kind in ("code", "link", "url"))
+        for words, at in b.lines:  # an image's address too (its text is words, never an @'s place)
+            plain = CODE_SPAN.sub(lambda c: "`" + MASK * (len(c.group()) - 2) + "`", words)
+            out.extend((at + x.start(), at + x.end()) for x in IMAGE.finditer(plain))
     return out
 
 

@@ -114,9 +114,10 @@ def _text_words(app) -> str:
     return "完整内容（纯文本）"
 
 
-def _rich(app, text: str) -> bool:
-    """Whether the text goes as formatted text: it uses the subset (markup.formatted) and the backend can_format."""
-    return bool(getattr(app.backend, "can_format", False)) and markup.formatted(text)
+def _rich(app, text: str, names=()) -> bool:
+    """Whether the text goes as formatted text: it uses the subset (markup.formatted; the names to @ are no markup)
+    and the backend can_format."""
+    return bool(getattr(app.backend, "can_format", False)) and markup.formatted(text, names)
 
 
 def write_tools(app) -> List[dict]:
@@ -583,11 +584,13 @@ def _send_card(app, a: dict) -> tuple:
     text = _check_text(_need(a, "text", "消息内容"))
     reply_to = str(a.get("reply_to") or "").strip()
     mentions = _mentions(app, a, chat_id)
-    rich = _rich(app, text)
+    names = [n for _, n in mentions]
+    rich = _rich(app, text, names)
     spans: List[tuple] = []
     if mentions:  # the text as it will read: one not written goes in front (the card, the send and its echo agree)
         if rich:  # never an @ in code or in a link's words; those in front on a line of their own
-            text, spans = mention_spans(text, mentions, markup.no_mentions(text), markup.FRONT_END)
+            text, spans = mention_spans(text, mentions, markup.no_mentions(markup.without_names(text, names)),
+                                        markup.FRONT_END)
         else:
             text, spans = mention_spans(text, mentions)
         text = _check_text(text)
@@ -635,17 +638,18 @@ def _send_card(app, a: dict) -> tuple:
     if mentions:
         lines.append("会 @ 并提醒：" + "、".join("%s（%s）" % (n, u) for u, n in mentions))
     if rich:
-        lines.append(_rich_line(app, text, [at for _, _, at in spans]))
+        lines.append(_rich_line(app, text, [at for _, _, at in spans], names))
     lines += ["——", text]
     return chat_id, text, reply_to, visible, "\n".join(lines), spans, rich
 
 
-def _rich_line(app, text: str, ats=()) -> str:
+def _rich_line(app, text: str, ats=(), names=()) -> str:
     """The card's word on a formatted text: what shows formatted (the text below it is as written), and where code
-    stays as written (a block with an @: markup.code_as_written)."""
+    stays as written (a block with an @: markup.code_as_written). names: those @-ed, never markup."""
+    plain = markup.without_names(text, names)
     line = "按%s富文本发送：下面的%s会按格式显示（这里是写的原文，链接的地址就是括号里的）" % (
-        app.platform.name, "、".join(markup.features(text)))
-    if markup.code_as_written(text, list(ats)):
+        app.platform.name, "、".join(markup.features(plain)))
+    if markup.code_as_written(plain, list(ats)):
         line += "；有 @ 的那一段里的行内代码按原样显示（带反引号）"
     return line
 

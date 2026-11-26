@@ -606,6 +606,9 @@ def post_tree(text: str, spans) -> _Tree:
             if r.kind == "code":  # (a block with an @: no Markdown of it) the code's words, as written
                 ids.append(t.add(TEXT_TAG, ("text", "`%s`" % r.words), bold=r.bold))
                 continue
+            if r.kind == "url":  # a bare address, whole (an @ never inside it: it is left over, and refused)
+                ids.append(t.add(TEXT_TAG, ("text", text[r.at:r.at + len(r.words)]), bold=r.bold))
+                continue
             pos, end = r.at, r.at + len(r.words)
             for i, (uid, name, at) in enumerate(left):
                 stop = at + len("@" + name)
@@ -2684,15 +2687,15 @@ class LarkXBackend(Backend):
             if v and not v.isdigit():
                 raise SendRejected("要回复的%s消息 id 不对" % self.region.label)
         text, people = self._mention_list(text, mentions, rich and not _image)
+        client, _ = self._session()
+        if client is None:
+            raise SendRejected("还没有登录%s" % self.region.label)
         tree = None
-        if rich and not _image:
+        if rich and not _image:  # (after the session is taken, as a text's packet is: no wider gap before it)
             try:
                 tree = post_tree(text, people)
             except ValueError:
                 raise SendRejected("这条消息的格式没法照写的样子发出（@ 的人要写在普通文字里，不能在代码或链接里）")
-        client, _ = self._session()
-        if client is None:
-            raise SendRejected("还没有登录%s" % self.region.label)
         if _client is not None and client is not _client:
             raise SendRejected("刚换了%s账号，这张图片没有发出" % self.region.label)
         b = self.lx.builders
@@ -2829,7 +2832,9 @@ class LarkXBackend(Backend):
             if spans:
                 raise SendRejected("要 @ 的人不对")
             if rich:
-                text, spans = mention_spans(text, pairs, markup.no_mentions(text), markup.FRONT_END)
+                names = [n for _, n in pairs]
+                text, spans = mention_spans(text, pairs, markup.no_mentions(markup.without_names(text, names)),
+                                            markup.FRONT_END)
             else:
                 text, spans = mention_spans(text, pairs)
         if len({uid for uid, _, _ in spans}) > MENTIONS_MOST:

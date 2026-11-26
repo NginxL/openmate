@@ -494,12 +494,14 @@ class AgentRunner:
             del self._own[k]
 
     def _own_echo(self, row: dict) -> bool:
-        """Whether the row is the echo of a tool's formatted send (own_send)."""
+        """Whether the row is the echo of a tool's formatted send (own_send): by its id, or a POST by its words."""
         chat = row.get("chat_id") or ""
         with self._mu:
             self._prune_own()
-            return (("id", chat, str(row.get("id") or "")) in self._own
-                    or (chat, self._digest(row.get("text") or "")) in self._own)
+            if ("id", chat, str(row.get("id") or "")) in self._own:
+                return True
+            # before its id is known (or never, the send uncertain): only a POST reads so; a typed TEXT is the user's
+            return (row.get("type") or "").upper() == "POST" and (chat, self._digest(row.get("text") or "")) in self._own
 
     def _remember_post(self, body: str, run: Optional[dict] = None) -> bool:
         """What is about to go out, so its echo is never a request; False (nothing remembered, and it must not go out)
@@ -532,6 +534,7 @@ class AgentRunner:
         """Another account signed in: what /agent posted for the one before is no echo of the next one's lines."""
         with self._mu:
             self._posted.clear()
+            self._own.clear()  # (the formatted sends of the account before: their echoes are none of this one's)
             self._handing.clear()  # that account's follow-ups being handed on hold up none of the next one's
             self._handed.notify_all()
 
