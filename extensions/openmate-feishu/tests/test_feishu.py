@@ -134,7 +134,9 @@ class ManifestTest(unittest.TestCase):
         # a NavIcon name (the hub refuses any other).
         nav = [u["icon"] for u in ui.values() if u["placement"] == "nav_page"]
         self.assertTrue(set(nav) <= NAV_ICONS, set(nav) - NAV_ICONS)
-        drawn = [{"plugin": "extension"}.get(i, i) for i in nav]  # plugin is extension's old name: the same picture
+        # names the web draws as one picture (web/src/views/extensions/icon-map.ts ROW_ICON): plugin is extension's old
+        # name, and file and doc are both the "read" glyph
+        drawn = [{"plugin": "extension", "file": "doc"}.get(i, i) for i in nav]
         self.assertEqual(len(drawn), len(set(drawn)), nav)
         self.assertFalse(set(drawn) & {"list", "extension"}, "the plain list and extension icons look like every other extension's page")
         self.assertEqual(ui["starkmesh"]["title"], "中转站")
