@@ -38,6 +38,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from openmate_core.backend import (Account, Backend, BackendError, Chat, CredentialsExpired, DocMention, LoginDone, LoginQR,
                                    Media, Message, Person, SendRejected)
+from openmate_core import markup
 from openmate_core.textutil import mention_spans, span_pieces
 
 from . import DLP_BLOCKED_TEXT, launch, pin  # DLP_BLOCKED_TEXT: a blocked message's note (Message.blocked)
@@ -84,9 +85,10 @@ AT_TAG = 5
 STATUS_NORMAL, STATUS_MODIFIED = 1, 3  # entities.Message.Status: as sent, edited
 CODE_BLOCK_TAGS = (31, 37)  # CODE_BLOCK, CODE_BLOCK_V2: their own properties, not a TextProperty
 # DOCS (22) included: the newer rich text's block around its paragraphs (not a document; read "[文档]" before)
-BLOCK_TAGS = frozenset((3, 4, 14, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46))
+BLOCK_TAGS = frozenset((3, 4, 14, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46, 49))
 # RichTextElement.Tag: P, FIGURE, DIV, H1-H3, UL, OL, LI, QUOTE, CODE_BLOCK, HR, CODE_BLOCK_V2, TABLE…, COLUMNS, COLUMN,
-# H4-H6: blocks (a new line where one starts, in an @自己 request); B, I, U, LINK, CODE, A run on in the line
+# H4-H6, MARKDOWN: blocks (a new line where one starts, in an @自己 request); B, I, U, LINK, CODE, A run on in the line
+MARKDOWN_TAG = 49  # a block of Markdown the clients render (MarkdownProperty: its source in field 1)
 PUSH_CMD = 6
 PUSH_DOC_FEED_CMD = 14004  # improto.Command.PUSH_DOC_FEED: a document's notices (comments, @-mentions…)
 PUSH_FEED_CARDS_CMD = 1002  # feed.PushFeedCardsRequest: feed cards changed, among them chats moved to 完成 (done)
@@ -539,6 +541,194 @@ def with_mentions(pkt, text: str, mentions):
     rich.innerText = "".join(words)
     del req.atUserIdList[:]
     for uid in dict.fromkeys(uid for uid, _, _ in mentions):
+        req.atUserIdList.append(int(uid))
+    pkt.payload = req.SerializeToString()
+    return pkt
+
+
+# ---------------------------------------------------------------- formatted sends (POST)
+#
+# A text in the Markdown subset (openmate_core.markup) goes as a POST whose rich text is the tree Feishu's web client
+# sends: a DOCS root over blocks (P, UL/OL over LI, QUOTE over P), in them TEXT runs (bold: the run's fontWeight style,
+# also listed in the elements' styles and styleRefs), A links and AT @s; every container's property set, empty. Code
+# (a fenced block, and a block with `code` in it and no @) goes as a MARKDOWN element holding that block's Markdown:
+# the server flattens an inline CODE element to plain words and the clients show a CODE_BLOCK as an empty frame.
+# The shapes follow two public reverse-engineered clients, both checked against the real service:
+# github.com/cv-cat/LarkAgentX larkx/proto/compose.py (commit f18c68c) and github.com/SugarMGP/LarkX AGENTS.md
+# ("富文本消息", commit ab20b16); the code here is written anew.
+
+DOCS_TAG, P_TAG, TEXT_TAG, A_TAG, UL_TAG, OL_TAG, LI_TAG, QUOTE_TAG = 22, 3, 1, 6, 26, 27, 28, 29
+ANCHOR_CUSTOM_EDIT = 3  # AnchorProperty.Scene CUSTOM_EDIT: a link with words of its own
+BOLD_STYLE = ("fontWeight", "bold")
+
+
+class _Tree:
+    """A post's rich text, in plain Python (as_post makes it the protobuf): els {id: {"tag", "prop", "kids",
+    "bold"}}, ids numbered from 1 in the order made (as the web client numbers them); root: the DOCS element.
+    prop: None (a container), ("text", words), ("at", user id, name), ("a", address, words), ("md", markdown),
+    ("ul",), ("ol", first number)."""
+
+    def __init__(self):
+        self.els: Dict[str, dict] = {}
+        self.root = ""
+
+    def add(self, tag: int, prop=None, kids=(), bold: bool = False) -> str:
+        eid = str(len(self.els) + 1)
+        self.els[eid] = {"tag": tag, "prop": prop, "kids": list(kids), "bold": bool(bold)}
+        return eid
+
+    def people(self) -> List[str]:
+        """The user ids @-ed, each once, in order."""
+        return list(dict.fromkeys(el["prop"][1] for el in self.els.values() if el["tag"] == AT_TAG))
+
+
+def post_tree(text: str, spans) -> _Tree:
+    """The rich text of a formatted text (markup) whose @s are spans [(user id, name, offset of its "@name")]
+    (mention_spans' with markup.no_mentions skipped). ValueError when it has no words, or an @ is not in a run of
+    words (inside code, a link, across markup): it cannot be made as written."""
+    t = _Tree()
+    bs = markup.blocks(text)
+    left = sorted(spans or (), key=lambda s: s[2])
+    used: Set[int] = set()
+
+    def runs(line) -> List[str]:
+        ids: List[str] = []
+        for r in line:
+            if r.kind == "link":
+                ids.append(t.add(A_TAG, ("a", r.url, r.words), bold=r.bold))
+                continue
+            if r.kind == "code":  # (a block with an @: no Markdown of it) the code's words, as written
+                ids.append(t.add(TEXT_TAG, ("text", "`%s`" % r.words), bold=r.bold))
+                continue
+            pos, end = r.at, r.at + len(r.words)
+            for i, (uid, name, at) in enumerate(left):
+                stop = at + len("@" + name)
+                if i in used or not (pos <= at < end):
+                    continue
+                if stop > end:
+                    raise ValueError("an @ runs across markup")
+                if at > pos:
+                    ids.append(t.add(TEXT_TAG, ("text", text[pos:at]), bold=r.bold))
+                ids.append(t.add(AT_TAG, ("at", uid, name)))
+                used.add(i)
+                pos = stop
+            if pos < end:
+                ids.append(t.add(TEXT_TAG, ("text", text[pos:end]), bold=r.bold))
+        return ids
+
+    blocks: List[str] = []
+    for b in bs:
+        ats = any(b.start <= at < b.end for _, _, at in left)
+        if b.kind == "code" or (not ats and b.has_code()):
+            blocks.append(t.add(MARKDOWN_TAG, ("md", b.markdown())))
+            continue
+        lines = b.runs()
+        if b.kind in ("paragraph", "heading"):
+            kids: List[str] = []
+            for i, line in enumerate(lines):
+                if i:
+                    kids.append(t.add(TEXT_TAG, ("text", "\n")))
+                kids += runs(line)
+            blocks.append(t.add(P_TAG, None, kids))
+        elif b.kind == "quote":
+            blocks.append(t.add(QUOTE_TAG, None, [t.add(P_TAG, None, runs(line)) for line in lines]))
+        else:
+            items = [t.add(LI_TAG, None, runs(line)) for line in lines]
+            prop = ("ol", b.number) if b.kind == "numbers" else ("ul",)
+            blocks.append(t.add(OL_TAG if b.kind == "numbers" else UL_TAG, prop, items))
+    if len(used) != len(left):
+        raise ValueError("an @ is not in the words")
+    if not blocks:
+        raise ValueError("no words")
+    t.root = t.add(DOCS_TAG, None, blocks)
+    return t
+
+
+def tree_words(t: _Tree) -> str:
+    """The words of a post's rich text as rich_text reads them back (the same walk: each element before its children,
+    a block after words starts a new line; a link reads "words address"): its echo's text, and its innerText."""
+    out: List[str] = []
+    gap = False
+    seen: Set[str] = set()
+
+    def visit(eid: str, depth: int = 0) -> None:
+        nonlocal gap
+        if eid in seen or eid not in t.els or depth > 20:
+            return
+        seen.add(eid)
+        el = t.els[eid]
+        if el["tag"] in BLOCK_TAGS:
+            gap = bool(out)
+        p = el["prop"]
+        w = ""
+        if p and p[0] in ("text", "md"):
+            w = p[1]
+        elif p and p[0] == "at":
+            w = "@" + (p[2] or p[1])
+        elif p and p[0] == "a":
+            href, words = p[1].strip(), p[2].strip()
+            href = href if URL_RE.match(href) else ""
+            w = "%s %s" % (words, href) if href and words and words != href else (href or words)
+        # (a container is no piece of words, nor a link or a Markdown block without any: only what rich_pieces keeps)
+        if p is not None and (p[0] in ("text", "at") or w.strip()):
+            if gap and w:
+                out.append("\n")
+                gap = False
+            out.append(w)
+        for k in el["kids"]:
+            visit(k, depth + 1)
+
+    visit(t.root)
+    text = "".join(out)
+    return text if text.strip() else ""
+
+
+def as_post(pkt, t: _Tree):
+    """LarkAgentX's text packet (build_send_message_packet, its place already decided: a thread, a topic, a quote)
+    made a POST of the rich text t, its @s listed (atUserIdList) so Feishu tells them."""
+    from larkx.proto import lark_all_pb2
+
+    E = lark_all_pb2.entities.RichTextElement
+    req = lark_all_pb2.messages.PutMessageRequest()
+    req.ParseFromString(pkt.payload)
+    req.type = POST
+    req.content.ClearField("richText")
+    rich = req.content.richText
+    els = rich.elements
+    if any(el["bold"] for el in t.els.values()):
+        els.styles.add(name=BOLD_STYLE[0], value=BOLD_STYLE[1])
+    for eid, el in t.els.items():
+        e = els.dictionary[eid]
+        e.tag = el["tag"]
+        p = el["prop"]
+        if p is None:
+            prop = b""  # a container's property is set, empty (unset: the gateway refuses the packet)
+        elif p[0] == "text":
+            prop = E.TextProperty(content=p[1]).SerializeToString()
+        elif p[0] == "at":
+            prop = E.AtProperty(userId=str(p[1]), content="@" + (p[2] or p[1])).SerializeToString()
+            rich.atIds.append(eid)
+        elif p[0] == "a":
+            prop = E.AnchorProperty(href=p[1], content=p[2], textContent=p[2], isCustom=True,
+                                    scene=ANCHOR_CUSTOM_EDIT).SerializeToString()
+            rich.anchorIds.append(eid)
+        elif p[0] == "md":
+            prop = E.MarkdownProperty(content=p[1]).SerializeToString()
+            rich.markdownIds.append(eid)
+        elif p[0] == "ol":
+            prop = E.OLProperty(type=0, start=int(p[1])).SerializeToString()
+        else:
+            prop = E.ULProperty(type=0).SerializeToString()
+        e.property = prop
+        e.childIds.extend(el["kids"])
+        if el["bold"]:
+            e.style[BOLD_STYLE[0]] = BOLD_STYLE[1]
+            els.styleRefs[BOLD_STYLE[0]].styleIds.append(0)
+    rich.elementIds.append(t.root)
+    rich.innerText = tree_words(t) or " "  # (set: the gateway refuses a rich text without it)
+    rich.version = 1
+    del req.atUserIdList[:]
+    for uid in t.people():
         req.atUserIdList.append(int(uid))
     pkt.payload = req.SerializeToString()
     return pkt
@@ -2402,6 +2592,7 @@ class LarkXBackend(Backend):
 
     #: send takes mentions: real @s, Feishu tells those people
     can_mention = True
+    can_format = True  # send's rich=True: the Markdown subset as a POST (post_tree, as_post)
     #: chats may be thread-first (a topic group, a group in topic mode): Chat.topic says which
     topic_groups = True
 
@@ -2460,10 +2651,19 @@ class LarkXBackend(Backend):
             raise SendRejected("%s收下了图片，但回答里没有图片的凭据，图片没有发出" % self.region.label)
         return token
 
+    def formatted_words(self, text: str, mentions: list) -> str:
+        """Backend.formatted_words: the post's words as they read back (tree_words)."""
+        try:
+            text, spans = self._mention_list(text, mentions, True)
+            return tree_words(post_tree(text, spans))
+        except (SendRejected, ValueError):
+            return ""
+
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None, _image: str = "",
-             _client=None) -> str:
-        """Backend.send. mentions [(user id, name, offset)]: real @s (with_mentions). A group in topic mode
+             to_chat: bool = False, mentions: Optional[List[Tuple[str, str]]] = None, rich: bool = False,
+             _image: str = "", _client=None) -> str:
+        """Backend.send. mentions [(user id, name, offset)]: real @s (with_mentions). rich: the text in the Markdown
+        subset, sent as a POST (post_tree, as_post; its @s made there), placed as a text would be. A group in topic mode
         (topic_mode) takes a reply only into its topic, the thread way, and a new message (a topic of its own) only
         from a newer client: a new message it refused so goes once more that way (newer_post), and only that one.
         _image: an uploaded picture's cryptoToken (send_image): the message is that picture, in the same place, sent
@@ -2477,7 +2677,13 @@ class LarkXBackend(Backend):
         for v in (reply_to, root):
             if v and not v.isdigit():
                 raise SendRejected("要回复的%s消息 id 不对" % self.region.label)
-        text, people = self._mention_list(text, mentions)
+        text, people = self._mention_list(text, mentions, rich and not _image)
+        tree = None
+        if rich and not _image:
+            try:
+                tree = post_tree(text, people)
+            except ValueError:
+                raise SendRejected("这条消息的格式没法照写的样子发出（@ 的人要写在普通文字里，不能在代码或链接里）")
         client, _ = self._session()
         if client is None:
             raise SendRejected("还没有登录%s" % self.region.label)
@@ -2493,6 +2699,8 @@ class LarkXBackend(Backend):
                 pkt = b.build_send_message_packet(text, chat_id, rid)
             if _image:
                 return as_image(pkt, _image)
+            if tree is not None:
+                return as_post(pkt, tree)
             return with_mentions(pkt, text, people) if people else pkt
 
         new_in_group = False  # a new message to a group (one in topic mode takes it from a newer client only)
@@ -2591,9 +2799,10 @@ class LarkXBackend(Backend):
             raise BackendError("%s的回答里没有消息 id，不确定是否发出" % self.region.label, "unknown")
         return msg_id
 
-    def _mention_list(self, text: str, mentions) -> Tuple[str, List[Tuple[str, str, int]]]:
+    def _mention_list(self, text: str, mentions, rich: bool = False) -> Tuple[str, List[Tuple[str, str, int]]]:
         """send's text and mentions checked: [(user id, name, offset)] where the text writes "@name" at offset (the
-        core's, mention_spans), or [(user id, name)] placed here the same way; each user id canonical, at most
+        core's, mention_spans), or [(user id, name)] placed here the same way (rich: a formatted text's way, none in
+        code or a link, those not written on a line of their own in front); each user id canonical, at most
         MENTIONS_MOST people (SendRejected else)."""
         spans: List[Tuple[str, str, int]] = []
         pairs: List[Tuple[str, str]] = []
@@ -2613,7 +2822,10 @@ class LarkXBackend(Backend):
         if pairs:
             if spans:
                 raise SendRejected("要 @ 的人不对")
-            text, spans = mention_spans(text, pairs)
+            if rich:
+                text, spans = mention_spans(text, pairs, markup.no_mentions(text), "\n")
+            else:
+                text, spans = mention_spans(text, pairs)
         if len({uid for uid, _, _ in spans}) > MENTIONS_MOST:
             raise SendRejected("一条消息最多 @ %d 个人" % MENTIONS_MOST)
         return text, spans
@@ -3086,6 +3298,11 @@ def rich_pieces(rich: dict, P) -> List[Tuple[str, str]]:
             words = code_block_words(tag, prop)
             if words:
                 out.append(("code", words))
+            continue
+        if tag == MARKDOWN_TAG and prop:  # its Markdown as written (a bot's post, a formatted send's code)
+            words = next((w for n, w in wire_fields(prop) if n == 1), "")
+            if words.strip():
+                out.append(("text", words))
             continue
         if tag in TEXT_TAGS and prop:
             try:

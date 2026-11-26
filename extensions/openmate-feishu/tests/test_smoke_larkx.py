@@ -177,6 +177,37 @@ back = {"elementIds": list(rt.elementIds), "elements": {"dictionary": {k: {"tag"
 out["mentions"] = [els, [rt.elements.dictionary[k].tag for k in rt.atIds], list(lr.atUserIdList), rt.innerText,
                    pr.content.richText.innerText, larkagentx.rich_text(back, b.lx.P), lr.rootId, lr.isReplyInThread,
                    len(set(rt.elementIds)) == len(rt.elementIds), pkt.cmd]
+from openmate_core import markup
+src = "**结论**：看 [文档](https://example.com/d)\n- 一项 @张三\n- 二项\n\n3. 三\n\n改 `a.py`\n\n```py\nx = 1\n```"
+text, spans = mention_spans(src, [("7001", "张三"), ("7002", "李四")], markup.no_mentions(src), "\n")
+tree = larkagentx.post_tree(text, spans)
+pkt = larkagentx.as_post(b.lx.builders.build_send_message_packet(text, "900", "rid", root_id="80"), tree)
+lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
+pr = P.PutMessageRequest(); pr.ParseFromString(pkt.payload)
+rt = lr.content.richText
+d = rt.elements.dictionary
+def shape(k):
+    el = d[k]
+    kids = [shape(c) for c in el.childIds]
+    if el.tag == E.TEXT:
+        tp = E.TextProperty(); tp.ParseFromString(el.property); return ["text", tp.content, dict(el.style)]
+    if el.tag == E.AT:
+        ap = E.AtProperty(); ap.ParseFromString(el.property); return ["at", ap.userId, ap.content]
+    if el.tag == E.A:
+        an = E.AnchorProperty(); an.ParseFromString(el.property)
+        return ["a", an.href, an.content, an.textContent, an.isCustom, an.scene]
+    if el.tag == 49:
+        mp = E.MarkdownProperty(); mp.ParseFromString(el.property); return ["md", mp.content]
+    if el.tag == E.OL:
+        op = E.OLProperty(); op.ParseFromString(el.property); return ["ol", op.start, kids]
+    return [E.Tag.Name(el.tag), el.HasField("property"), el.property.hex(), kids]
+back = {"elementIds": list(rt.elementIds), "elements": {"dictionary": {k: {"tag": d[k].tag, "property": d[k].property,
+        "childIds": list(d[k].childIds)} for k in d}}}
+out["formatted"] = [lr.type, lr.chatId, lr.rootId, lr.parentId, lr.isReplyInThread, list(lr.atUserIdList),
+               [shape(k) for k in rt.elementIds], [d[k].tag for k in rt.atIds], [d[k].tag for k in rt.anchorIds],
+               [d[k].tag for k in rt.markdownIds], [[x.name, x.value] for x in rt.elements.styles],
+               {k: list(v.styleIds) for k, v in rt.elements.styleRefs.items()}, rt.innerText, rt.version,
+               larkagentx.rich_text(back, b.lx.P), larkagentx.tree_words(tree), pr.content.richText.innerText, pkt.cmd]
 import types
 from larkx import client as lxc
 sent_headers = []
@@ -305,6 +336,19 @@ class RealLarkAgentXTest(unittest.TestCase):
             [["at", "7002", "@李四"], ["text", " 请 "], ["at", "7001", "@张三"], ["text", " 看"]],
             [5, 5], [7002, 7001], "@李四 请 @张三 看", "@李四 请 @张三 看",
             "@李四 请 @张三 看", "80", False, True, 5], "real @s, read back by LarkAgentX's classes and our own reader")
+        bold = {"fontWeight": "bold"}
+        words = "@李四\n结论：看 文档 https://example.com/d\n一项 @张三\n二项\n三\n改 `a.py`\n```py\nx = 1\n```"
+        self.assertEqual(out["formatted"], [
+            2, "900", "80", "80", True, [7002, 7001],
+            [["DOCS", True, "", [
+                ["P", True, "", [["at", "7002", "@李四"], ["text", "\n", {}], ["text", "结论", bold], ["text", "：看 ", {}],
+                                 ["a", "https://example.com/d", "文档", "文档", True, 3]]],
+                ["UL", True, "0800", [["LI", True, "", [["text", "一项 ", {}], ["at", "7001", "@张三"]]],
+                                  ["LI", True, "", [["text", "二项", {}]]]]],
+                ["ol", 3, [["LI", True, "", [["text", "三", {}]]]]],
+                ["md", "改 `a.py`"], ["md", "```py\nx = 1\n```"]]]],
+            [5, 5], [6], [49, 49], [["fontWeight", "bold"]], {"fontWeight": [0]}, words, 1, words, words, words, 5],
+            "a formatted text: a POST in the place a text would go, its tree as the web client's, read back the same")
         self.assertEqual(out["recall"], [9, ["id"], "101"], "the delete-message request: the message's id alone")
         self.assertEqual(out["newer_post"], [True, ["ok", "ok", "ok"], ["5.7.0", "8.7.11", "5.7.0"], ["3.9.32"], ["5"]],
                          "LarkAgentX's own post, through the headered requests: a newer command version on that post only")

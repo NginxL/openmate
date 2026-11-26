@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from . import modelimages, views
 from .backend import BackendError
+from . import markup
 from .textutil import clip, local_stamp, mention_spans, one_line
 from .wire import RPCError
 
@@ -99,10 +100,29 @@ MENTIONS_MOST = 20  # people one message @-s at most
 _USER_ID = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")  # what a user id looks like on any platform (the backend checks its own)
 
 
+# what the send tools say of the Markdown subset (markup) where the backend can_format
+FORMAT_WORDS = ("完整内容。可以用 Markdown 的这几种写法排版，发出去按%s的格式显示：**粗体**；[文字](https://链接)（只认 http/https，"
+                "裸链接照原样发）；以「- 」开头的行是无序列表，「1. 」开头的是有序列表（不支持嵌套）；`行内代码`；```围栏代码块```"
+                "（开头的 ``` 后可写语言）；「# 」开头的行显示成加粗的一行；「> 」开头的是引用；空一行另起一段。"
+                "别的写法（单个 *、表格、图片等）照原样发。一种都不用就按纯文本发")
+
+
+def _text_words(app) -> str:
+    """The text field's description: the Markdown subset where the backend can_format, plain text else."""
+    if getattr(app.backend, "can_format", False):
+        return FORMAT_WORDS % app.platform.name
+    return "完整内容（纯文本）"
+
+
+def _rich(app, text: str) -> bool:
+    """Whether the text goes as formatted text: it uses the subset (markup.formatted) and the backend can_format."""
+    return bool(getattr(app.backend, "can_format", False)) and markup.formatted(text)
+
+
 def write_tools(app) -> List[dict]:
     c, p = app.cid, app.platform.name
     send = {"chat": {"type": "string", "description": "会话 id"},
-            "text": {"type": "string", "description": "完整内容（纯文本）"},
+            "text": {"type": "string", "description": _text_words(app)},
             "reply_to": {"type": "string", "description": "要回复的消息 id，可选"}}
     what = "以我的身份在%s会话（私聊或群）里发一条消息，可以回复某条消息。每次都要我在手机上确认全文和发给谁。" % p
     if getattr(app.backend, "can_mention", False):
@@ -116,7 +136,7 @@ def write_tools(app) -> List[dict]:
         {"name": c + "_send", "description": what, "input_schema": _obj(send, ["chat", "text"])},
         {"name": c + "_send_dm", "description": "以我的身份私聊一个%s用户（没有私聊会话时先建一个）。每次都要我在手机上确认全文和发给谁。" % p,
          "input_schema": _obj({"user": {"type": "string", "description": "对方的用户 id（%s_search 给出）" % c},
-                               "text": {"type": "string", "description": "完整内容（纯文本）"}}, ["user", "text"])},
+                               "text": {"type": "string", "description": _text_words(app)}}, ["user", "text"])},
     ]
 
 
@@ -563,9 +583,13 @@ def _send_card(app, a: dict) -> tuple:
     text = _check_text(_need(a, "text", "消息内容"))
     reply_to = str(a.get("reply_to") or "").strip()
     mentions = _mentions(app, a, chat_id)
+    rich = _rich(app, text)
     spans: List[tuple] = []
     if mentions:  # the text as it will read: one not written goes in front (the card, the send and its echo agree)
-        text, spans = mention_spans(text, mentions)
+        if rich:  # never an @ in code or in a link's words; those in front on a line of their own
+            text, spans = mention_spans(text, mentions, markup.no_mentions(text), "\n")
+        else:
+            text, spans = mention_spans(text, mentions)
         text = _check_text(text)
     p = app.platform.name
     chat = app.store.get_chat(chat_id) if app.store is not None else None
@@ -610,19 +634,31 @@ def _send_card(app, a: dict) -> tuple:
         lines.append("在这个话题群里开一个新话题")
     if mentions:
         lines.append("会 @ 并提醒：" + "、".join("%s（%s）" % (n, u) for u, n in mentions))
+    if rich:
+        lines.append(_rich_line(app, text))
     lines += ["——", text]
-    return chat_id, text, reply_to, visible, "\n".join(lines), spans
+    return chat_id, text, reply_to, visible, "\n".join(lines), spans, rich
+
+
+def _rich_line(app, text: str) -> str:
+    """The card's word on a formatted text: what shows formatted (the text below it is as written)."""
+    return "按%s富文本发送：下面的%s会按格式显示（这里是写的原文，链接的地址就是括号里的）" % (
+        app.platform.name, "、".join(markup.features(text)))
 
 
 def _dm_card(app, a: dict) -> tuple:
     user = _need(a, "user", "用户 id")
     text = _check_text(_need(a, "text", "消息内容"))
+    rich = _rich(app, text)
     name = ""
     if app.store is not None:
         name = app.store.name(user)
     who = "%s（%s）" % (name, user) if name else "用户 %s" % user
-    summary = "以你的身份私聊 %s（%s）\n——\n%s" % (who, app.platform.name, text)
-    return user, text, name or user, summary
+    head = "以你的身份私聊 %s（%s）" % (who, app.platform.name)
+    if rich:
+        head += "\n" + _rich_line(app, text)
+    summary = "%s\n——\n%s" % (head, text)
+    return user, text, name or user, summary, rich
 
 
 def describe(app, params: dict) -> dict:
@@ -630,10 +666,10 @@ def describe(app, params: dict) -> dict:
     a = _args(params)
     c = app.cid
     if name == c + "_send":
-        _, _, _, visible, summary, _ = _send_card(app, a)
+        _, _, _, visible, summary, _, _ = _send_card(app, a)
         return {"action": {"name": name, "visible": visible}, "summary": summary}
     if name == c + "_send_dm":
-        _, _, visible, summary = _dm_card(app, a)
+        _, _, visible, summary, _ = _dm_card(app, a)
         return {"action": {"name": name, "visible": visible}, "summary": summary}
     raise RPCError("没有这个写操作：%s" % name)
 
@@ -656,7 +692,7 @@ def do(app, params: dict) -> dict:
 
     if name == c + "_send":
         try:
-            chat_id, text, reply_to, visible, _, mentions = _send_card(app, a)
+            chat_id, text, reply_to, visible, _, mentions, rich = _send_card(app, a)
             root = None
             if reply_to:
                 quoted = app.store.message(chat_id, reply_to)
@@ -673,12 +709,12 @@ def do(app, params: dict) -> dict:
 
         def send():
             as_asked()
-            mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None)
+            mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None, rich=rich)
             return {"text": "已发送到%s" % visible, "message_ref": mid}
 
         return _result(app.send_once(key, name, send))
     if name == c + "_send_dm":
-        user, text, who, _ = _dm_card(app, a)
+        user, text, who, _, rich = _dm_card(app, a)
         earlier = app.store.send_get(key)
         if earlier is None:
             # The chat first, before the request id is taken: a failure here leaves the id free for a retry.
@@ -694,7 +730,7 @@ def do(app, params: dict) -> dict:
 
         def send():
             as_asked()  # again: opening the chat asked the service, and the account may have changed meanwhile
-            mid = app.send_as_user(chat_id, text)
+            mid = app.send_as_user(chat_id, text, rich=rich)
             return {"text": "已私聊 %s" % who, "message_ref": mid}
 
         return _result(app.send_once(key, name, send))

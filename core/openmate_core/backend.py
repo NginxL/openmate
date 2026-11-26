@@ -399,10 +399,21 @@ class Backend(abc.ABC):
         into root's thread and also into the chat's main stream, quoting reply_to (the core passes it only when true,
         and only for a message the backend read as "thread_chat"). A backend with can_mention also takes mentions
         [(user id, name, offset)]: real @s of those people, each "@name" at offset in text (textutil.mention_spans;
-        the core passes it only when there are some). Raise SendRejected only when it surely did not go out."""
+        the core passes it only when there are some). A backend with can_format also takes rich=True (passed only
+        then): the text is in the Markdown subset (markup), sent formatted. Raise SendRejected only when it surely did
+        not go out."""
 
     #: Whether send takes mentions (real @s that tell those people); the send tool offers them only then
     can_mention: bool = False
+
+    #: Whether send takes rich=True: the text is in the Markdown subset (markup) and goes formatted (the send tools
+    #: say the subset, and pass rich only for a text that uses it, only then)
+    can_format: bool = False
+
+    def formatted_words(self, text: str, mentions: list) -> str:
+        """A formatted text (rich=True, its mentions as send's) as the backend will read its own message back: what
+        its echo is known by. Only asked where can_format; "" leaves the text as written."""
+        return ""
 
     #: Whether chats may be thread-first (Chat.topic: every message opens a topic or replies in one); the send card
     #: asks chat_info only then

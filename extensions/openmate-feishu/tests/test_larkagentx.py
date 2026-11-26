@@ -1072,6 +1072,109 @@ class SendTest(Base):
 # ---------------------------------------------------------------- reads
 
 
+    def patch_posts(self):
+        """as_post on the fake packet (a dict; the real one: the smoke test): the tree it would carry."""
+        real = larkagentx.as_post
+        larkagentx.as_post = lambda pkt, tree: dict(pkt, post=tree)
+        self.addCleanup(setattr, larkagentx, "as_post", real)
+
+    def test_a_formatted_text_goes_as_a_post_where_a_text_would(self):
+        b = self.b
+        self.patch_packets()
+        self.patch_posts()
+        rich = "**结论**：\n- 一\n- 二"
+        b.send("500", rich, rich=True)
+        tree = self.last()["post"]
+        self.assertEqual([el["tag"] for el in tree.els.values()].count(larkagentx.LI_TAG), 2)
+        self.assertNotIn("mentions", self.last(), "its @s are in the tree, never with_mentions'")
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("", False))
+        b.send("500", rich, reply_to="90", root="90", rich=True)
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"], "post" in self.last()), ("90", True, True),
+                         "into the thread, as a text")
+        b.send("500", rich, reply_to="85", rich=True)
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("85", False), "a quote, as a text")
+        b.send("502", rich, reply_to="60", root="60", rich=True)
+        self.assertEqual((self.last()["root"], self.last()["reply_in_thread"]), ("60", False), "a topic group's own way")
+        b.send("500", "**粗** @张三 看", mentions=[("7001", "张三", 6)], rich=True)
+        ats = [el["prop"] for el in self.last()["post"].els.values() if el["tag"] == larkagentx.AT_TAG]
+        self.assertEqual(ats, [("at", "7001", "张三")], "the @ at its place")
+        self.assertEqual(self.last()["post"].people(), ["7001"])
+        b.send("500", "看 `x` 一下", mentions=[("7001", "张三")], rich=True)
+        tree = self.last()["post"]
+        self.assertEqual([el["prop"] for el in tree.els.values() if el["tag"] == larkagentx.AT_TAG][0][1], "7001",
+                         "named only: placed here the formatted way, in front")
+        b.send("500", "普通 @张三", mentions=[("7001", "张三", 3)])
+        self.assertNotIn("post", self.last(), "not formatted: a text, as before")
+        self.assertEqual(self.last()["mentions"], [("7001", "张三", 3)])
+        S.post_answers = [self.refused(), self.as_sent]  # a group in topic mode: the retry is a post too
+        S.chats["514"] = {"id": "514", "type": 2, "chatMode": 1}
+        b.send("514", rich, rich=True)
+        first, again = S.posts[-2], S.posts[-1]
+        self.assertEqual(("post" in first, "post" in again, again["newer"]),
+                         (True, True, {"x-command-version": larkagentx.NEWER_COMMAND_VERSION}))
+
+    def test_a_formatted_text_that_cannot_be_made_is_surely_not_sent(self):
+        b = self.b
+        self.patch_posts()
+        n = len(S.posts)
+        with self.assertRaises(SendRejected) as e:  # an @ placed in code: never there, never anywhere else
+            b.send("500", "`@张三`", mentions=[("7001", "张三", 1)], rich=True)
+        self.assertIn("@", e.exception.message)
+        self.assertEqual(len(S.posts), n, "nothing posted")
+
+    def test_formatted_words_are_what_reads_back(self):
+        b = self.b
+        self.assertEqual(b.formatted_words("**粗** [文档](https://example.com/d)\n- 一", []),
+                         "粗 文档 https://example.com/d\n一")
+        self.assertEqual(b.formatted_words("看 **这里**", [("7001", "张三")]), "@张三\n看 这里", "front: a line of its own")
+
+
+class PostTreeTest(unittest.TestCase):
+    """The formatted send's rich text, in plain Python (post_tree, tree_words); its protobuf: the smoke test."""
+
+    def tree(self, text, spans=()):
+        t = larkagentx.post_tree(text, list(spans))
+        return t, {eid: (el["tag"], el["prop"], el["kids"], el["bold"]) for eid, el in t.els.items()}
+
+    def test_blocks_runs_and_ids(self):
+        t, els = self.tree("先看 **结论** 和 [文档](https://example.com/x)\n第二行\n\n1. 甲\n2. 乙\n\n> 引用")
+        root = els[t.root]
+        self.assertEqual(root[0], larkagentx.DOCS_TAG)
+        self.assertEqual([els[k][0] for k in root[2]], [larkagentx.P_TAG, larkagentx.OL_TAG, larkagentx.QUOTE_TAG])
+        para = [els[k] for k in els[root[2][0]][2]]
+        self.assertEqual([(tag, prop, bold) for tag, prop, _, bold in para], [
+            (1, ("text", "先看 "), False), (1, ("text", "结论"), True), (1, ("text", " 和 "), False),
+            (6, ("a", "https://example.com/x", "文档"), False), (1, ("text", "\n"), False), (1, ("text", "第二行"), False)])
+        self.assertEqual(els[root[2][1]][1], ("ol", 1))
+        self.assertEqual(list(t.els), [str(i) for i in range(1, len(t.els) + 1)], "numbered from 1 as made")
+        self.assertEqual(larkagentx.tree_words(t), "先看 结论 和 文档 https://example.com/x\n第二行\n甲\n乙\n引用")
+
+    def test_code_goes_as_markdown_unless_its_block_has_an_at(self):
+        t, els = self.tree("```py\nprint(1)\n```\n- 改了 `a.py`\n- 好")
+        root = els[t.root]
+        self.assertEqual([els[k][:2] for k in root[2]], [(49, ("md", "```py\nprint(1)\n```")),
+                                                         (49, ("md", "- 改了 `a.py`\n- 好"))])
+        text = "@张三 改了 `a.py`"
+        t, els = self.tree(text, [("7001", "张三", 0)])
+        para = [els[k][1] for k in els[els[t.root][2][0]][2]]
+        self.assertEqual(para, [("at", "7001", "张三"), ("text", " 改了 "), ("text", "`a.py`")], "the code as written")
+
+    def test_mentions_must_be_in_words(self):
+        with self.assertRaises(ValueError):
+            larkagentx.post_tree("[@张三](https://example.com/x)", [("7001", "张三", 1)])
+        with self.assertRaises(ValueError):
+            larkagentx.post_tree("看看", [("7001", "张三", 9)])
+        with self.assertRaises(ValueError):
+            larkagentx.post_tree("\n\n", [])
+
+    def test_a_markdown_element_is_read(self):
+        words = "**粗** `x`".encode("utf-8")
+        prop = b"\x0a" + bytes([len(words)]) + words
+        rich = {"elementIds": ["d"], "elements": {"dictionary": {
+            "d": {"tag": 22, "property": b"", "childIds": ["m"]}, "m": {"tag": 49, "property": prop}}}}
+        self.assertEqual(larkagentx.rich_text(rich, None), "**粗** `x`", "a bot's Markdown post reads as written")
+
+
 class ReadTest(Base):
     def setUp(self):
         super().setUp()

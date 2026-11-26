@@ -421,6 +421,69 @@ class ActionTest(unittest.TestCase):
         self.assertEqual(self.h.sent(), [])
 
 
+class FormattedSendTest(unittest.TestCase):
+    """A text in the Markdown subset goes formatted where the backend can_format; the card says so, plain is plain."""
+
+    def setUp(self):
+        self.h = Harness(self)
+        self.h.sign_in()
+
+    def describe(self, name, args):
+        return self.h.c("actions.describe", name=CID + "_" + name, args=args)["summary"]
+
+    def test_the_tools_say_the_subset_only_where_the_backend_formats(self):
+        actions = {a["name"]: a for a in self.h.c("actions.list")["tools"]}
+        for name in ("send", "send_dm"):
+            words = actions[CID + "_" + name]["input_schema"]["properties"]["text"]["description"]
+            for part in ("**粗体**", "[文字](https://链接)", "「- 」", "「1. 」", "`行内代码`", "```围栏代码块```", "纯文本"):
+                self.assertIn(part, words, name)
+        self.h.world.format_ok = False
+        actions = {a["name"]: a for a in self.h.c("actions.list")["tools"]}
+        self.assertEqual(actions[CID + "_send"]["input_schema"]["properties"]["text"]["description"], "完整内容（纯文本）")
+
+    def test_a_formatted_send_card_and_send(self):
+        text = "**结论**：可以上线\n- 看 [文档](https://example.com/d)\n- 跑 `make test`"
+        args = {"chat": "chat_example_team", "text": text}
+        card = self.describe("send", args)
+        self.assertIn("富文本发送：下面的粗体、链接、列表、代码会按格式显示", card)
+        self.assertTrue(card.endswith("——\n" + text), "the text as written, its links' addresses in it")
+        self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-rich")
+        self.assertEqual((self.h.sent()[-1]["text"], self.h.sent()[-1]["rich"]), (text, True))
+        plain = {"chat": "chat_example_team", "text": "你好\n版本 1.5，2*3*4"}
+        self.assertNotIn("富文本", self.describe("send", plain))
+        self.h.c("actions.do", name=CID + "_send", args=plain, request_id="req-plain")
+        self.assertEqual(self.h.sent()[-1]["rich"], False, "plain: sent as before")
+
+    def test_a_formatted_dm(self):
+        args = {"user": "user_example_c", "text": "1. 先看\n2. 再改"}
+        card = self.describe("send_dm", args)
+        self.assertIn("下面的列表会按格式显示", card)
+        self.h.c("actions.do", name=CID + "_send_dm", args=args, request_id="req-rich-dm")
+        self.assertEqual((self.h.sent()[-1]["text"], self.h.sent()[-1]["rich"]), (args["text"], True))
+        self.h.world.format_ok = False
+        self.assertNotIn("富文本", self.describe("send_dm", args))
+        self.h.c("actions.do", name=CID + "_send_dm", args=dict(args, text="1. 再看"), request_id="req-plain-dm")
+        self.assertEqual(self.h.sent()[-1]["rich"], False, "a backend that cannot: as written, plain")
+
+    def test_mentions_in_a_formatted_text(self):
+        text = "**请看**：@示例同事甲 跑一下 `@示例同事乙 的脚本`"
+        args = {"chat": "chat_example_team", "text": text, "at": ["user_example_a", "user_example_b"]}
+        card = self.describe("send", args)
+        self.assertTrue(card.endswith("——\n@示例同事乙\n" + text), "one only in code: in front, on its own line")
+        self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-rich-at")
+        s = self.h.sent()[-1]
+        self.assertEqual((s["text"], s["rich"]), ("@示例同事乙\n" + text, True))
+        self.assertEqual([(u, s["text"][at:at + len(n) + 1]) for u, n, at in s["mentions"]],
+                         [("user_example_b", "@示例同事乙"), ("user_example_a", "@示例同事甲")])
+        self.assertLess(s["mentions"][1][2], s["text"].index("`"), "the one written in the words, there")
+
+    def test_rich_is_refused_where_the_backend_cannot(self):
+        from openmate_core.backend import SendRejected
+        self.h.world.format_ok = False
+        with self.assertRaises(SendRejected):
+            self.h.app.send_as_user("chat_example_team", "**x**", rich=True)
+
+
 class FilteredMessagesTest(unittest.TestCase):
     """matefeishu_messages with since / until / query: the reads the assistant used to script with lark-cli loops."""
 

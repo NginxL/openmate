@@ -87,6 +87,7 @@ class FixtureWorld:
         self.send_fail: Optional[str] = None  # "rejected" | "uncertain" for the next send
         self.send_fail_always: Optional[str] = None
         self.images_ok = False  # the backend can send pictures (an /agent reply's image)
+        self.format_ok = True  # the backend sends formatted texts (rich=True: the Markdown subset)
         self.image_threads = False  # …where a text with the same reply_to and root would go (Backend.image_threads)
         self.avatars_ok = False  # chat_info says a chat's picture (Backend.has_avatars)
         self.info_asked: List[str] = []  # chat_info's calls, in order
@@ -470,8 +471,12 @@ class FixtureBackend(Backend):
         with self.world.lock:
             return chat_id in self.world.topic_mode_chats
 
+    @property
+    def can_format(self) -> bool:
+        return self.world.format_ok
+
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-             to_chat: bool = False, mentions: Optional[list] = None) -> str:
+             to_chat: bool = False, mentions: Optional[list] = None, rich: bool = False) -> str:
         w = self.world
         if w.send_delay:
             time.sleep(w.send_delay)
@@ -487,7 +492,7 @@ class FixtureBackend(Backend):
         m = w.push(chat_id, "me", text, parent_id=reply_to or "", root_id=root or "")
         with w.lock:
             w.sent.append({"chat": chat_id, "text": text, "reply_to": reply_to, "root": root, "to_chat": to_chat,
-                           "id": m.id, "mentions": list(mentions or [])})
+                           "id": m.id, "mentions": list(mentions or []), "rich": rich})
         return m.id
 
     @property

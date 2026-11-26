@@ -202,6 +202,26 @@ class PicturesOutTest(unittest.TestCase):
         send(h, ref="twice", text="", kind="push", images=same)
         self.assertEqual(len(h.world.images), 2)
 
+    def test_a_formatted_send_into_the_channel_chat_is_known_by_the_words_it_reads_back_as(self):
+        h = channel(self)
+        backend = h.app.backend
+        backend.formatted_words = lambda text, mentions: "结论\n一"  # (Feishu's: tree_words of the post)
+        seen = []
+        real = backend.send
+
+        def send_and_look(chat, text, *a, **kw):
+            seen.append(sorted(k[1] for k in h.app.channel._outs))  # what an echo before its id would be known by
+            # its echo comes before its id, read the way Feishu reads a post back (not as written)
+            return real(chat, "结论\n一" if kw.get("rich") else text, *a, **kw)
+
+        backend.send = send_and_look
+        mid = h.app.send_as_user(SOLO, "**结论**\n- 一", rich=True)
+        self.assertEqual(seen, [["结论\n一"]])
+        self.assertEqual(h.app.store.channel_msg(SOLO, mid)["dir"], "echo")
+        self.assertEqual(h.app.channel._outs, {}, "done: known by its id")
+        h.app.send_as_user(SOLO, "普通的话")
+        self.assertEqual(seen[-1], ["普通的话"], "plain: by its text, as before")
+
     def test_a_wechat_picture_marks_nothing_but_its_id_as_before(self):
         w = channel(self, platform=openmate_wechat.platform(), agent_reply_header=" ")
         w.world.images_ok = True

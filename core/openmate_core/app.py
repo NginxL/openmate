@@ -1617,9 +1617,11 @@ class ConnectorApp:
             raise SendRejected("正在换%s账号，这条没有发出，请稍后再发" % self.platform.name)
 
     def send_as_user(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
-                     to_chat: bool = False, mentions: Optional[List[Tuple[str, str, int]]] = None) -> str:
+                     to_chat: bool = False, mentions: Optional[List[Tuple[str, str, int]]] = None,
+                     rich: bool = False) -> str:
         """mentions [(user id, name, offset)] (textutil.mention_spans): real @s, each "@name" at offset in text, only
-        where the backend can_mention (SendRejected else)."""
+        where the backend can_mention (SendRejected else). rich: the text is in the Markdown subset (markup) and goes
+        formatted, only where the backend can_format (SendRejected else)."""
         if not self.signed_in:
             raise SendRejected("还没有登录%s" % self.platform.name)
         self._not_handing_off()
@@ -1627,22 +1629,33 @@ class ConnectorApp:
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if mentions and not getattr(self.backend, "can_mention", False):
             raise SendRejected("%s这里不能 @人" % self.platform.name)
+        if rich and not getattr(self.backend, "can_format", False):
+            raise SendRejected("%s这里不能发带格式的消息" % self.platform.name)
+        # what its echo will read: a formatted text reads as its words (the backend says them), not as written
+        heard = text
+        if rich and self.channel is not None:
+            try:
+                heard = self.backend.formatted_words(text, list(mentions or ())) or text
+            except Exception:
+                heard = text
         if self.channel is not None:
-            self.channel.outgoing(chat_id, text)  # its echo in the 渠道's chat is no line of the user's
+            self.channel.outgoing(chat_id, heard)  # its echo in the 渠道's chat is no line of the user's
         # only when set: a backend that never reads "thread_chat" or takes no @s need not know the words
         extra: Dict[str, Any] = {}
         if to_chat and root:
             extra["to_chat"] = True
         if mentions:
             extra["mentions"] = list(mentions)
+        if rich:
+            extra["rich"] = True
         try:
             mid = self.backend.send(chat_id, text, reply_to or None, root or None, **extra)
         except SendRejected:
             if self.channel is not None:
-                self.channel.outgoing(chat_id, text, failed=True)  # surely not sent: its text stands for nothing
+                self.channel.outgoing(chat_id, heard, failed=True)  # surely not sent: its text stands for nothing
             raise
         if self.channel is not None:
-            self.channel.outgoing(chat_id, text, str(mid or ""))  # known by its id from now on
+            self.channel.outgoing(chat_id, heard, str(mid or ""))  # known by its id from now on
         return mid
 
     def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "",
