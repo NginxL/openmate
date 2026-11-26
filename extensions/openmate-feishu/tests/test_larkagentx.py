@@ -1170,6 +1170,15 @@ class PostTreeTest(unittest.TestCase):
         t, els = self.tree(text, [("1", "A`B", 0), ("2", "Ann", 10)])
         self.assertEqual([el[1] for el in els.values() if el[0] == larkagentx.AT_TAG], [("at", "1", "A`B"), ("at", "2", "Ann")])
 
+    def test_names_masked_for_reading_are_written_as_they_are(self):
+        text = "@Ann [profile](https://example.org/@Ann)\n\n跑 `@Ann` 的\n\n```\n@Ann\n```"
+        t, els = self.tree(text, [("1", "Ann", 0)])
+        props = [el[1] for el in els.values() if el[1]]
+        self.assertIn(("a", "https://example.org/@Ann", "profile"), props)
+        self.assertIn(("md", "跑 `@Ann` 的"), props)
+        self.assertIn(("md", "```\n@Ann\n```"), props)
+        self.assertFalse(any("\x02" in str(p) for p in props))
+
     def test_mentions_must_be_in_words(self):
         with self.assertRaises(ValueError):  # (in a bare address: never split for an @)
             larkagentx.post_tree("**看** https://e.org/@张三", [("7001", "张三", 20)])

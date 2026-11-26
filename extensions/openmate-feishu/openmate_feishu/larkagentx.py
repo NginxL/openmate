@@ -626,9 +626,9 @@ def post_tree(text: str, spans) -> _Tree:
     for b in bs:
         ats = any(b.start <= at < b.end for _, _, at in left)
         if b.kind == "code" or (not ats and b.has_code()):
-            blocks.append(t.add(MARKDOWN_TAG, ("md", b.markdown())))
+            blocks.append(t.add(MARKDOWN_TAG, ("md", b.markdown(text))))  # (its words as written: names too)
             continue
-        lines = b.runs()
+        lines = b.runs(text)
         if b.kind in ("paragraph", "heading"):
             kids: List[str] = []
             for i, line in enumerate(lines):

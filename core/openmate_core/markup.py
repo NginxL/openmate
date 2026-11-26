@@ -26,19 +26,20 @@ NUMBERED = re.compile(r"^[ \t]*(\d{1,9})[.)][ \t]+(\S.*?)[ \t]*$")
 SETEXT = re.compile(r"^[-=*_][-=*_ \t]*$")
 RULE = re.compile(r"^ {0,3}([-*_])([ \t]*\1){2,}[ \t]*$")  # "---", "* * *": words as written, never a list
 CODE_SPAN = re.compile(r"`[^`\n]+`")
-_TARGET = r"((?i:https?)://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round brackets may be in an address
+_TARGET = r"(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round brackets may be in an address
 LINK = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\(" + _TARGET + r"\)")
 # an image, its title too: words as written, never a link
 IMAGE = re.compile(r"!\[[^\[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)")
 # a bare address: up to a space, a quote, <, >, ` or CJK or fullwidth punctuation (Chinese words and fullwidth
 # letters in its path are in it), without the sentence marks and stars at its end ("**see https://x.org**." is
 # bold: _trim_url): as written (the service links it), no markup or @ in it
-URL = re.compile(r"(?i:https?)://[^\s<>\"'`\x01\x03\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
+URL = re.compile(r"(?i:https?)://[^\s<>\"'`\x01\x03\x04\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
 URL_TAIL = ".,:;!?*"
 MASK = "\x01"  # stands for code's words, an address: never markup, wherever the stars are
 IMAGE_MASK = "\x03"  # stands for an image, its text and address: words, never a link
+LINK_MASK = "\x04"  # stands for a link's address (LINK's, http or https in lower case): its link's
 # on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](its address, masked)
-INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x01+)\)")
+INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x04+)\)")
 MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|&])")
 NBSP = "\u00a0"
 
@@ -73,14 +74,16 @@ def _masked(line: str) -> str:
     for x in IMAGE.finditer(once):
         blank(x.start(), x.end(), IMAGE_MASK)  # (its own mark: never one run with an address beside it)
     once = "".join(m)
-    # a bare address that starts before a "[words](address)" and runs through it keeps it: the link is in its words
-    bare = [(u.start(), u.start() + len(_trim_url(u.group()))) for u in URL.finditer(once)]
+    # a bare address that starts outside any "[words](address)" and runs through one keeps it: the link is in its words
+    candidates = [(x.start(), x.end()) for x in LINK.finditer(once)]
+    bare = [(u.start(), u.start() + len(_trim_url(u.group()))) for u in URL.finditer(once)
+            if not any(a <= u.start() < b for a, b in candidates)]
     hidden = list(once)  # the links whole as MASK: no bare address starts in one, nor runs on from one
     for x in LINK.finditer(once):
         if any(a < x.start() < b for a, b in bare):
             continue
         hidden[x.start():x.end()] = MASK * (x.end() - x.start())
-        blank(x.start(2), x.end(2))  # its address is one piece: a "**" in it closes no bold
+        blank(x.start(2), x.end(2), LINK_MASK)  # its address is one piece: a "**" in it closes no bold
     for u in URL.finditer("".join(hidden)):
         blank(u.start(), u.start() + len(_trim_url(u.group())))
     return "".join(m)
@@ -178,25 +181,33 @@ class Block(dict):
     end = property(lambda self: self["end"])
     number = property(lambda self: int(self.get("number", 1)))  # a numbered list's first number
 
-    def runs(self) -> List[List[Run]]:
-        """Each line's runs (a heading's are bold); a line that is a rule ("*****", "---") is words as written."""
-        return [[Run("text", words, at, "", False, at, at + len(words))] if RULE.match(words)
-                else inline(words, at, self.kind == "heading") for words, at in self.lines]
+    def runs(self, src: Optional[str] = None) -> List[List[Run]]:
+        """Each line's runs (a heading's are bold); a line that is a rule ("*****", "---") is words as written. src:
+        the text the blocks were read from with its @s' names masked (without_names): the runs' words and addresses
+        are taken from it, as written."""
+        out = [[Run("text", words, at, "", False, at, at + len(words))] if RULE.match(words)
+               else inline(words, at, self.kind == "heading") for words, at in self.lines]
+        if src is None:
+            return out
+        return [[r._replace(words=src[r.at:r.at + len(r.words)],
+                            url=src[r.end - 1 - len(r.url):r.end - 1] if r.kind == "link" else
+                            src[r.at:r.at + len(r.url)] if r.url else "") for r in line] for line in out]
 
     def has_code(self) -> bool:
         """Whether a line of it has `code`."""
         return any(r.kind == "code" for line in self.runs() for r in line)
 
-    def markdown(self) -> str:
+    def markdown(self, src: Optional[str] = None) -> str:
         """The block as Markdown on its own, made from its runs (literal words escaped, each line as one, a list's
-        items unindented): what a backend that renders Markdown shows for it, as the other blocks show."""
+        items unindented): what a backend that renders Markdown shows for it, as the other blocks show. src: as
+        runs'."""
         k = self.kind
         if k == "code":
-            body = self["body"]
+            body = self["body"] if src is None else src[self["body_at"]:self["body_at"] + len(self["body"])]
             ticks = max([len(t) for t in re.findall(r"`{3,}", body)] + [2]) + 1  # a fence the body never closes
             return "%s%s\n%s%s%s" % ("`" * ticks, self.get("lang") or "", body, "\n" if body else "", "`" * ticks)
         # a line of only - = * _ is words, in a quote or a list too (never a heading's underline)
-        lines = [(lambda w: "\\" + w if SETEXT.match(w) else w)(_md_line(runs)) for runs in self.runs()]
+        lines = [(lambda w: "\\" + w if SETEXT.match(w) else w)(_md_line(runs)) for runs in self.runs(src)]
         if k == "quote":
             return "\n".join("> " + w for w in lines)
         if k == "bullets":
@@ -242,7 +253,8 @@ def blocks(text: str) -> List[Block]:
                 j += 1
             body = "\n".join(lines[i + 1:j])
             last = min(j, n - 1)  # not closed: it runs to the end
-            out.append(Block(kind="code", lang=fence.group(2).lower(), body=body, start=offs[i], end=end_of(last)))
+            out.append(Block(kind="code", lang=fence.group(2).lower(), body=body, start=offs[i], end=end_of(last),
+                             body_at=offs[i + 1] if i + 1 < n else end_of(i)))
             i = j + 1
             continue
         if not line.strip():
