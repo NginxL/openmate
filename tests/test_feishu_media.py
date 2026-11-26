@@ -477,6 +477,38 @@ class HintTest(unittest.TestCase):
         self.assertIn("消息里的图片和文件用 %s_media 看" % CID, instructions)
         self.assertIn("不要用 lark-cli", instructions)
 
+    def test_a_conversation_on_another_computer_has_no_hint(self):
+        from test_agent import computers, reading_of
+
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 17.0)), "devbox": (True, reading_of(64, 0.5))})
+        pic = h.world.push(TEAM, "user_example_a", "", type="IMAGE", media=[Media("image", ref="img:example-4")])
+        stored(h, TEAM, pic)
+        ask(h, "/agent 这个是什么", root_id=pic.id, parent_id=pic.id)
+        body = started(h)["body"]
+        self.assertEqual(body.get("machine_id"), "devbox")
+        self.assertIn("[图片]", body["prompt"])
+        self.assertNotIn(CID + "_media", body["prompt"], "it downloads to this computer, not devbox: no hint")
+        self.assertIn("消息里的图片和文件在这里看不到", body["prompt"])
+
+    def test_on_another_computer_pictures_come_through_a_hub_that_takes_them(self):
+        from test_agent import computers, reading_of
+
+        h = agent(self, hub_capabilities=["inbox_group", "tool_images"])
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 17.0)), "devbox": (True, reading_of(64, 0.5))})
+        pic = h.world.push(TEAM, "user_example_a", "", type="IMAGE", media=[Media("image", ref="img:example-5")])
+        stored(h, TEAM, pic)
+        ask(h, "/agent 这个是什么", root_id=pic.id, parent_id=pic.id)
+        body = started(h)["body"]
+        self.assertEqual(body.get("machine_id"), "devbox")
+        self.assertIn("[图片]（看图：%s_media message=%s）" % (CID, pic.id), body["prompt"], "the picture reaches it")
+        self.assertIn("%s_media 能把消息里的图片直接给你看" % CID, body["prompt"])
+        self.assertIn("你读不到", body["prompt"], "the files it downloads stay on this computer")
+        f = h.world.push(TEAM, "user_example_a", "", type="FILE", media=[Media("file", ref="file:y", name="b.pdf")])
+        stored(h, TEAM, f)
+        ask(h, "/agent 这个文件呢", root_id=f.id, parent_id=f.id)
+        self.assertNotIn("下载文件：", started(h, 2)["body"]["prompt"], "a file stays on this computer: no hint")
+
     def test_an_auto_reply_has_only_its_reply_tool_and_no_hint(self):
         h = agent(self)
         h.hub.request("ui.action", {"contribution": "chats", "action": {"id": "autoreply"}, "state": "",

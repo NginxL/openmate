@@ -180,6 +180,25 @@ class HubAPI:
             raise HubError(0, "hub 没有给出会话 id")
         return sess
 
+    def assistant_machine(self, timeout: float = 10.0) -> str:
+        """The computer the assistant runs on (assistant.ask): where a conversation started without a machine goes."""
+        doc = self.request("GET", "/api/v1/assistant", timeout=timeout)
+        a = (doc.get("assistant") if isinstance(doc, dict) and isinstance(doc.get("assistant"), dict) else doc) or {}
+        return str(a.get("machine_id") or "") if isinstance(a, dict) else ""
+
+    def machines(self, timeout: float = 10.0) -> List[dict]:
+        """The user's computers (machines.read), in their configured order."""
+        doc = self.request("GET", "/api/v1/machines", timeout=timeout)
+        items = doc.get("machines") if isinstance(doc, dict) else None
+        return [m for m in items if isinstance(m, dict) and m.get("id")] if isinstance(items, list) else []
+
+    def machine_metrics(self, machine_id: str, timeout: float = 10.0) -> dict:
+        """One computer's readings (machines.read): {system: {cores, …}, latest: {t, load, mem_used, mem_total, …}};
+        the hub leaves `latest` out when no sample arrived in the last 30 seconds."""
+        doc = self.request("GET", "/api/v1/machines/%s/metrics" % _seg(machine_id), query={"range": "1h"}, timeout=timeout)
+        m = doc.get("metrics") if isinstance(doc, dict) else None
+        return m if isinstance(m, dict) else {}
+
     def send_message(self, machine_id: str, session_id: str, text: str, client_msg_id: str = "") -> dict:
         body: Dict[str, Any] = {"text": text}
         if client_msg_id:

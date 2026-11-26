@@ -40,7 +40,7 @@ import uuid
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from . import images, views
+from . import images, modelimages, placement, views
 from .backend import BackendError
 from .hub import HubError
 from .textutil import clip, local_stamp, strip_leading_mentions
@@ -300,6 +300,8 @@ class AgentRunner:
         # 「@自己 …」: the user's own message that @-mentions the user is a request too (where the platform offers it)
         self.self_mention = bool(getattr(app.platform, "self_mention", False)) and bool(cfg.get("agent_self_mention", True))
         self.machine = str(cfg.get("agent_machine") or "").strip()
+        # no computer set: a new conversation goes to a less loaded one while the assistant's is busy (placement.py)
+        self.balance = bool(cfg.get("agent_balance", True))
         self.launcher = str(cfg.get("agent_launcher") or "").strip()
         self.suffix = parse_suffix(cfg.get("agent_reply_suffix"))
         self.header = parse_header(cfg.get("agent_reply_header"))
@@ -337,6 +339,8 @@ class AgentRunner:
         except Exception:
             self._cut_off = None
         self._run_locks: Dict[str, threading.RLock] = {}
+        self._placing: Dict[Tuple[str, str], list] = {}  # _place: one at a time per thread ([lock, users])
+        self._placing_mu = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -1103,6 +1107,18 @@ class AgentRunner:
         self._start_go(run, row, prev, epoch)
 
     def _start_go(self, run: dict, row: dict, prev: Optional[dict], epoch: Optional[int] = None) -> None:
+        if prev is None and not run.get("start_op"):
+            # where a new conversation starts, chosen before its first message: on another computer it is told what
+            # it cannot do there (_instructions); kept with the run at once (another request of its thread follows
+            # it) and with the operation (_start_op), so every try asks the same
+            if "start_machine" in run:
+                placed = str(run.get("start_machine") or "")
+            else:
+                placed = self._place(run)
+            run = dict(run, start_machine=placed, start_remote=placed if placed and not self.machine else "")
+        elif prev is not None:
+            run = dict(run, remote=str(prev.get("remote") or ""))  # the conversation's computer, for its instructions
+            self._keep_remote(run["id"], run["remote"])  # before it is sent: a reply may come before the send's answer
         if run.get("start_prompt"):
             prompt = run["start_prompt"]  # the very request sent before
         else:
@@ -1127,7 +1143,11 @@ class AgentRunner:
         else:
             # a new conversation is started once: one operation id and the very same request on every try, and after
             # a restart too (the hub answers a repeat with the first answer), never a second start under a new ref
+            # where it starts is chosen once too, kept with the operation: every try and a resume ask the same
             run, op, prompt = self._start_op(run, prompt)
+        # (one kept before start_machine was: agent_machine, agent_launcher as they are now)
+        machine = str(run.get("start_machine", self.machine) or "")
+        launcher = str(run.get("start_launcher", self.launcher) or "")
         tries = 1
         maybe = False
         first_try = 0.0  # when a try first went to the hub: the conversation may have it from then on
@@ -1165,7 +1185,7 @@ class AgentRunner:
                     attempt = time.time()
                     self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
-                              "ours_seen": False, "continued": prev["id"]}
+                              "ours_seen": False, "continued": prev["id"], "remote": str(prev.get("remote") or "")}
                 elif run.get("kind") in GUEST_KINDS:
                     if not self._guest_supported():
                         log.warning("%s: the hub has no guest conversations; nothing started", run.get("kind"))
@@ -1174,17 +1194,17 @@ class AgentRunner:
                     if not self._may_submit(run, epoch):
                         return
                     attempt = time.time()
-                    sess = self.hub.start_conversation(prompt, self.purpose, False, self.machine, self.launcher,
+                    sess = self.hub.start_conversation(prompt, self.purpose, False, machine, launcher,
                                                        guest_tools=["%s_agent_reply" % self.app.cid], op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
-                              "ours_seen": True, "guest": True}
+                              "ours_seen": True, "guest": True, "remote": str(run.get("start_remote") or "")}
                 else:
                     if not self._may_submit(run, epoch):
                         return
                     attempt = time.time()
-                    sess = self.hub.start_conversation(prompt, self.purpose, True, self.machine, self.launcher, op_id=op)
+                    sess = self.hub.start_conversation(prompt, self.purpose, True, machine, launcher, op_id=op)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
-                              "ours_seen": True}
+                              "ours_seen": True, "remote": str(run.get("start_remote") or "")}
                 break
             except HubError as e:
                 log.warning("/agent could not start: HTTP %s %s", e.status, e.code)
@@ -1254,6 +1274,67 @@ class AgentRunner:
                  ", try %d" % tries if tries > 1 else "")
         self._wake.set()
 
+    def _place(self, run: dict) -> str:
+        """The computer a new conversation of this run starts on ("" is the assistant's, as a start without one):
+        agent_machine when set; without it and with agent_balance, by load (placement.choose), a thread's earlier
+        conversation's computer first, so one task keeps to one computer."""
+        if self.machine or not self.balance or self.launcher:
+            # (a launcher set by hand may be on the assistant's computer only: it stays there)
+            return self.machine
+        key = (run["chat_id"], run["thread_key"])
+        with self._placing_mu:
+            entry = self._placing.setdefault(key, [threading.Lock(), 0])
+            entry[1] += 1  # its users: dropped when the last is done, never while one waits
+        lock = entry[0]
+        try:
+            with lock:  # one placement at a time in a thread: two of its requests never choose apart
+                machine, why = self._choose(run)
+                with self._lock(run["id"]):  # kept with the run before the next placement looks at the thread
+                    cur = self.store.run_get(run["id"])
+                    if cur is not None and cur.get("state") == "starting" and "start_machine" not in cur:
+                        cur["start_machine"] = machine
+                        self.store.run_put(cur)
+        finally:
+            with self._placing_mu:
+                entry[1] -= 1
+                if entry[1] <= 0 and self._placing.get(key) is entry:
+                    del self._placing[key]
+        log.info("/agent: a new conversation on %s: %s", machine or "the assistant's computer", why)
+        return machine
+
+    def _reserved(self, machine: str) -> Optional[str]:
+        """The computer a thread's other request is starting on, when the list shows it online and taking assistant
+        conversations; None (placed anew) when the list does not (offline, gone, merged, moved to another manager: a
+        fresh placement knows the current ids); as it is when the list cannot be read or is empty."""
+        try:
+            listed = {str(m["id"]): m for m in self.hub.machines(timeout=placement.ASK_TIMEOUT)}
+        except Exception:
+            return machine
+        if not listed:
+            return machine
+        m = listed.get(machine)
+        return machine if m is not None and m.get("online") and placement.eligible(m) else None
+
+    def _choose(self, run: dict):
+        sticky = ""
+        guest = run.get("kind") in GUEST_KINDS  # someone else's conversations are not the user's task, nor the reverse
+        try:
+            for r in self.store.runs_in_thread(run["chat_id"], run["thread_key"]):  # newest first
+                if r["id"] == run["id"] or r.get("state") == "failed" or (r.get("kind") in GUEST_KINDS) != guest:
+                    continue  # (a failed one may have been refused there)
+                if r.get("machine_id"):
+                    sticky = str(r["machine_id"])
+                    break
+                if r.get("state") == "starting" and "start_machine" in r:  # one still starting: where it was placed
+                    there = str(r["start_machine"] or "")
+                    now = self._reserved(there) if there else ""
+                    if now is None:
+                        break  # the list says it is away now: placed anew (home, or another idle one)
+                    return now, "这个话题的另一个请求正开在%s：也开在那里" % (now or "助手所在的电脑上")
+        except Exception:
+            log.exception("/agent: the thread's earlier computer could not be read")
+        return placement.choose(self.hub, sticky)
+
     def _may_submit(self, run: dict, epoch: Optional[int]) -> bool:
         """Right before the request goes to the hub: not stopped, and still the account's it was claimed for (another
         account's sign-in wiped it while the hub was waited for or asked)."""
@@ -1279,7 +1360,8 @@ class AgentRunner:
 
     def _start_op(self, run: dict, prompt: str):
         """(run, op id, prompt) of a new conversation's start: made once and kept with the run, so every try (and a
-        resume after a restart) sends the same operation and the same body."""
+        resume after a restart) sends the same operation and the same body: with the prompt, the computer _start_go
+        placed it on (start_machine, start_remote) and the launcher."""
         with self._lock(run["id"]):
             cur = self.store.run_get(run["id"])
             if cur is None:  # gone (another account's sign-in wiped it): the start loop ends at its first check
@@ -1287,6 +1369,9 @@ class AgentRunner:
             if not cur.get("start_op"):
                 cur["start_op"] = str(uuid.uuid4())
                 cur["start_prompt"] = prompt
+                cur["start_machine"] = str(run.get("start_machine", self.machine) or "")
+                cur["start_remote"] = str(run.get("start_remote") or "")
+                cur["start_launcher"] = self.launcher
                 self.store.run_put(cur)
         return cur, cur["start_op"], cur.get("start_prompt") or prompt
 
@@ -1307,6 +1392,15 @@ class AgentRunner:
                 cur["start_op"] = str(uuid.uuid4())
                 self.store.run_put(cur)
                 return cur, cur["start_op"]
+
+    def _keep_remote(self, run_id: str, remote: str) -> None:
+        if not remote:
+            return
+        with self._lock(run_id):
+            cur = self.store.run_get(run_id)
+            if cur is not None and cur.get("state") == "starting" and cur.get("remote") != remote:
+                cur["remote"] = remote
+                self.store.run_put(cur)
 
     def _retry_as(self, run_id: str, ref: str) -> Optional[dict]:
         with self._lock(run_id):
@@ -1446,7 +1540,8 @@ class AgentRunner:
                 if cur is None or cur["state"] != "starting":
                     return True  # stopped meanwhile, or wiped by another account's sign-in
                 cur.update({"machine_id": prev.get("machine_id") or "", "session_id": prev.get("session_id") or "",
-                            "continued": prev["id"], "asked": asked["id"], "forwarding": True})
+                            "continued": prev["id"], "asked": asked["id"], "forwarding": True,
+                            "remote": str(prev.get("remote") or "")})
                 if not self.store.run_put(cur):
                     return True
         target = self._forward_target(prev)
@@ -1459,7 +1554,7 @@ class AgentRunner:
             cur.pop("forwarding", None)
             cur.pop("forward_pending", None)
             stopped = self._stopped_since(cur, float(cur["created"]))
-            for k in ("machine_id", "session_id", "continued", "asked"):  # its own once it is sent, as before
+            for k in ("machine_id", "session_id", "continued", "asked", "remote"):  # its own once it is sent, as before
                 cur.pop(k, None)
             if stopped:
                 cur["state"], cur["stopped_at"] = "stopped", time.time()
@@ -1720,6 +1815,8 @@ class AgentRunner:
 
     def _instructions(self, run: dict) -> str:
         c, p = self.app.cid, self.app.platform.name
+        remote = str(run.get("start_remote") or run.get("remote") or "")  # placed on another computer than this one
+        shown = self._pictures_shown()  # the media tool gives a picture to the model itself: it sees it anywhere
         if run.get("kind") == "doc":
             body = "\n".join([
                 "%s在%s文档《%s》的评论里 @ 了我。文档和知识库里的评论，我一律让 AI 代答：请你直接代我回复这条评论，不需要我确认。" % (
@@ -1753,17 +1850,44 @@ class AgentRunner:
             "- 只回复一次最终结果：%s不能编辑消息，中途进度不要发（会以我的身份在群里刷屏）。" % p,
         ]) + ([
             "- 需要流程图、步骤图、表格这类图示时，可以画成一张 PNG（比如先手写 SVG，再用无头 Chrome 渲染成 PNG），存到 /tmp 下，在最终回复时把它的绝对路径填进 image：文字照常写，图片紧跟着单独发出。只能带一张，最多 10 MB；文字里不要贴图片路径。",
-        ] if self._can_send_images() else []) + [
+        ] if self._can_send_images() and not remote else []) + [
             "- 不要用 %s_send 回复这条请求；要给别人发消息，照常走手机确认，结果不确定时不要重发。" % c,
             "- 下面的上下文是自动整理的，可能不全；缺什么就用 %s_messages、%s_search、知识库等工具自己查。" % (c, c),
         ] + ([
             "- 消息里的图片和文件用 %s 看（给消息 id，上下文里写着「看图：%s message=…」）：它只读，下载到本机后直接读文件；不要用 lark-cli 去找或下载。" % (
                 self._media_tool(), self._media_tool()),
-        ] if self._media_tool() else []))
+        ] if self._media_tool() and not remote else [
+            "- 消息里的图片用 %s 看（给消息 id，上下文里写着「看图：%s message=…」）：它把图片直接给你看；不要用 lark-cli 去找或下载。" % (
+                self._media_tool(), self._media_tool()),
+        ] if self._media_tool() and shown else []) + ([
+            "- 这个会话开在电脑 %s 上（助手所在的电脑当时太忙），不在扩展所在的电脑：%s的文件都存在扩展那台电脑上，你读不到；回复也不能带图片，只回文字。需要看文件或出图时，在回复里说明。" % (
+                remote, "%s 能把消息里的图片直接给你看，但它下载" % self._media_tool() if shown and self._media_tool()
+                else "消息里的图片和文件在这里看不到，下载"),
+        ] if remote else []))
         return _block("instructions", "/agent 说明", body)
 
     def _media_tool(self) -> str:
         return str(getattr(self.app.platform, "media_tool", "") or "")
+
+    def _hint_tool(self, run: dict, guest: bool):
+        """row -> the media tool a context line names for its picture or file ("": none). A guest has only the reply
+        tool; a conversation on another computer cannot read what the tool downloads here, so it is named only for a
+        picture, and only where the tool hands the picture itself to the model."""
+        tool = "" if guest else self._media_tool()
+        remote = run.get("start_remote") or run.get("remote")
+        pictures = self._pictures_shown()
+
+        def hint(r: dict) -> str:
+            if not tool or not remote:
+                return tool
+            media = [m for m in (r.get("media") or []) if isinstance(m, dict)]
+            pic = lambda m: m.get("kind") in ("image", "sticker") or str(m.get("mime") or "").lower().startswith("image/")  # noqa: E731
+            return tool if pictures and media and all(pic(m) for m in media) else ""
+        return hint
+
+    def _pictures_shown(self) -> bool:
+        """The media tool hands a picture to the model itself (the hub takes pictures in a tool's answer)."""
+        return modelimages.CAPABILITY in getattr(self.app, "hub_capabilities", ())
 
     def build_prompt(self, run: dict, row: dict, prev: Optional[dict], epoch: Optional[int] = None) -> str:
         app = self.app
@@ -1797,13 +1921,15 @@ class AgentRunner:
                 title = "上次请求之后的消息"
         rows = [r for r in rows if views.has_content(r) and r["position"] <= int(row["position"]) or r["id"] == row["id"]]
         guest = run.get("kind") in GUEST_KINDS  # someone else asked: only what the group itself said, nothing of mine
-        tool = "" if guest else self._media_tool()  # a guest has only the reply tool: no hint it cannot follow
-        lines = [clip(views.log_line(r, tz, me, mark if r["id"] == row["id"] else "", tool), 2000) for r in rows]
+        # a guest has only the reply tool, and a conversation on another computer cannot read what the tool downloads
+        # here: no hint either cannot follow
+        hint = self._hint_tool(run, guest)
+        lines = [clip(views.log_line(r, tz, me, mark if r["id"] == row["id"] else "", hint(r)), 2000) for r in rows]
         quoted = store.message(chat_id, row["parent_id"]) if row.get("parent_id") else None
         tail: List[str] = []
         if quoted is not None:
             tail.append(_block("context", "引用的消息",
-                               clip(views.log_line(quoted, tz, me, media_tool=tool), 4000) + "（id=%s）" % quoted["id"]))
+                               clip(views.log_line(quoted, tz, me, media_tool=hint(quoted)), 4000) + "（id=%s）" % quoted["id"]))
         if prev is None and not guest:
             kb = self._kb_context(chat_id)
             if kb:
@@ -2403,6 +2529,7 @@ class AgentRunner:
         if not progress and not self._clean_answer(text, run).strip():
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
         pic = None
+        skipped = ""  # why the picture of this reply does not go while its text does
         replied = int(run.get("replies") or 0) + int(run.get("reply_inflight") or 0) > 0
         if image and not (replied and not self._can_edit()):  # answered here already: one reply, nothing to check
             if progress:
@@ -2411,7 +2538,11 @@ class AgentRunner:
                 raise RPCError("自动代答和文档代答不能发图片，只回文字")
             if not self._can_send_images():
                 raise RPCError("%s这里现在不能发图片：请只回文字（不带 image）" % self.app.platform.name)
-            pic = images.take(image, self.app.data_dir)  # checked before the text goes: nothing is half sent
+            remote = run.get("remote") or run.get("start_remote")  # (start_remote: asked before the start's answer)
+            if remote:  # its /tmp is that computer's: a path here is another file, or none. The text still goes
+                skipped = "；图片没有发：这个会话开在电脑 %s 上，它存的图片这里读不到（不用再发这条回复）" % remote
+            else:
+                pic = images.take(image, self.app.data_dir)  # checked before the text goes: nothing is half sent
         if progress and run.get("kind") != "doc":  # a document's comment has no progress message
             if not self._can_edit():  # every update would be one more message in the chat, as the user
                 return "%s不能编辑消息，进度不发；做完后不带 progress 回复一次最终结果" % self.app.platform.name
@@ -2485,12 +2616,14 @@ class AgentRunner:
                 return "已回复到%s（消息 id=%s）" % (self.app.platform.name, sent_id or "未知")
             cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
             cur["replies"] = int(cur.get("replies") or 0) + 1
+            if skipped:
+                cur["image_note"] = skipped  # asked again, the same reply says it again
             if sent_id:
                 cur["reply_ids"] = (cur.get("reply_ids") or []) + [sent_id]
             self.store.run_put(cur)
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
-        note = self._send_image(cur, pic, named_key) if pic is not None else ""
+        note = self._send_image(cur, pic, named_key) if pic is not None else skipped
         return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, sent_id or "未知", note)
 
     def _send_image(self, run: dict, pic: tuple, reply_key: str = "") -> str:

@@ -124,7 +124,13 @@
         "type": "string",
         "format": "machine",
         "title": "/agent 在哪台电脑上跑",
-        "description": "不设置就用助手所在的电脑。"
+        "description": "不设置就用助手所在的电脑；它忙时按负载开到别的电脑上（见「忙时分到空闲的电脑」）。设置了就总在这台电脑上跑。"
+      },
+      "agent_balance": {
+        "type": "boolean",
+        "title": "忙时分到空闲的电脑",
+        "description": "没设置「/agent 在哪台电脑上跑」时：新的 /agent 照旧开在助手所在的电脑上；那台电脑忙（1 分钟负载超过 CPU 核数的 75%，或可用内存不到 2 GiB）时，开到负载最低、也不忙的另一台在线电脑上。已经开着的 /agent 会话不会换电脑；每条新的 /agent 按当时的负载选电脑。设置了「/agent 用哪个启动器」时不分流；Persona 里「Lark /agent」用的启动器要在别的电脑上也能用（内置的 claude 哪台都有）。",
+        "default": true
       },
       "agent_launcher": {
         "type": "string",
@@ -280,7 +286,8 @@
       "agents.control",
       "agents.read",
       "assistant.ask",
-      "kb.read"
+      "kb.read",
+      "machines.read"
     ]
   }
 }

@@ -67,6 +67,25 @@ class OfferTest(Pictures):
         self.assertEqual(len(h.sent()), before + 1)
 
 
+class RemoteTest(Pictures):
+    def test_a_conversation_on_another_computer_sends_no_picture(self):
+        from test_agent import computers, reading_of
+
+        h = wechat(self)
+        h.world.images_ok = True
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 17.0)), "devbox": (True, reading_of(64, 0.5))})
+        run = running(h, ask(h, "/agent 画一下流程"))
+        self.assertEqual(run["remote"], "devbox")
+        prompt = h.http.starts()[-1]["body"]["prompt"]
+        self.assertNotIn("填进 image", prompt, "its /tmp is not this computer's")
+        self.assertIn("回复也不能带图片", prompt)
+        before = len(h.sent())
+        out = h.tool("agent_reply", request=run["id"], text="流程如下", image=self.picture())
+        self.assertIn("图片没有发", out)
+        self.assertEqual(len(h.sent()), before + 1, "the text went")
+        self.assertEqual(h.world.images, [], "no picture: this computer's file of that name is another one")
+
+
 class SendTest(Pictures):
     def test_text_then_the_picture_once_and_recorded(self):
         h = wechat(self)

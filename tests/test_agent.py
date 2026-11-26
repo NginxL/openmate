@@ -16,11 +16,12 @@ SUFFIX = "> 🤖 AI 代答，仅供参考"
 RUN_ID = re.compile(r"omr_[0-9a-f]{20}")
 
 
-def agent(test, timing=None, **cfg):
+def agent(test, timing=None, hub_capabilities=None, **cfg):
     # these tests check the end mark (the style before 0.4); DefaultsTest checks today's: a header, a reaction
     config = {"agent": True, "agent_reply_suffix": SUFFIX, "agent_reply_header": " ", "agent_ack_reaction": ""}
     config.update(cfg)
-    h = Harness(test, config=config, timing=timing)
+    more = {"hub_capabilities": hub_capabilities} if hub_capabilities is not None else {}
+    h = Harness(test, config=config, timing=timing, **more)
     h.sign_in()
     wait_until(lambda: h.app._catchup_done.is_set(), what="catch-up")
     return h
@@ -1852,6 +1853,341 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual([fill_header("· {model}", m, "") for m in ("claude-opus-5-5", "gemini-4-neon", "gpt-6-1-sol")],
                          ["· Opus 5.5", "· Gemini 4 Neon", "· GPT-6.1 Sol"], "a Claude model by its own name in a mark")
         self.assertEqual(fill_header("> 🤖 AI 回复 · {model} · {effort}", "gpt-6-astra", ""), "> 🤖 AI 回复 · GPT-6 Astra")
+
+
+GiB = 1 << 30
+
+
+def reading_of(cores, load, free_gib=32.0, total_gib=64.0, fresh=True):
+    """A computer's metrics as the hub gives them (GET /api/v1/machines/{id}/metrics)."""
+    total = int(total_gib * GiB)
+    latest = {"t": time.time() if fresh else time.time() - 3600, "load": load, "mem_used": total - int(free_gib * GiB),
+              "mem_total": total}
+    return {"online": True, "system": {"cores": cores}, "latest": latest}
+
+
+def computers(h, home, **machines):
+    """The hub's computers: home is the assistant's; each machine is (online, metrics or None)."""
+    h.http.assistant_mid = home
+    h.http.machine_list = [{"id": mid, "online": online, "claude_version": "2.1.330"} for mid, (online, _) in machines.items()]
+    h.http.metrics = {mid: m for mid, (_, m) in machines.items() if m is not None}
+
+
+def placement_asks(h):
+    with h.http.lock:
+        return [r for r in h.http.requests if r["method"] == "GET" and r["path"] == "/api/v1/machines"]
+
+
+class LoadPlacementTest(unittest.TestCase):
+    """No computer set: a new /agent starts on the assistant's computer unless it is busy, then on the least loaded idle
+    other one; a follow-up stays with its conversation, and a new conversation in a thread goes back to its computer."""
+
+    @property
+    def BUSY(self):  # 0.89 per core, read just now
+        return reading_of(18, 16.0)
+
+    def test_an_idle_home_starts_as_before(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 3.0)), "devbox": (True, reading_of(64, 0.5))})
+        m = ask(h, "/agent 平常的一件事")
+        body = started(h)["body"]
+        self.assertNotIn("machine_id", body, "home is not busy: the start names no computer, as before")
+        self.assertEqual(running(h, m)["machine_id"], "mac-example")
+        self.assertEqual(len(placement_asks(h)), 1)
+
+    def test_a_busy_home_goes_to_the_least_loaded_idle_computer(self):
+        h = agent(self)
+        computers(h, "mac-example", **{
+            "mac-example": (True, self.BUSY),
+            "devbox-busy": (True, reading_of(64, 60.0)),          # 0.94 per core: busy too
+            "devbox-short": (True, reading_of(64, 1.0, free_gib=1.0)),  # idle, but too little memory
+            "devbox-away": (False, reading_of(64, 0.1)),          # offline
+            "devbox-quiet": (True, reading_of(64, 0.1, fresh=False)),  # no fresh reading
+            "devbox-small": (True, reading_of(8, 2.0)),           # 0.25 per core
+            "devbox-big": (True, reading_of(64, 6.4)),            # 0.10 per core: the least loaded
+        })
+        m = ask(h, "/agent 一件重活")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox-big")
+        run = running(h, m)
+        self.assertEqual((run["machine_id"], run["start_machine"]), ("devbox-big", "devbox-big"))
+
+    def test_too_little_memory_at_home_is_busy(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0, free_gib=1.5)),
+                                       "devbox": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 内存不够的时候")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+
+    def test_home_stays_when_every_other_computer_is_busy_or_unread(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(8, 7.0)),
+                                       "devbox-2": (True, None)})
+        ask(h, "/agent 都忙")
+        self.assertNotIn("machine_id", started(h)["body"])
+
+    def test_without_readings_or_the_permission_it_starts_as_before(self):
+        h = agent(self)  # no placement routes: an older hub, or machines.read not granted (404)
+        ask(h, "/agent 读不到")
+        self.assertNotIn("machine_id", started(h)["body"])
+        h2 = agent(self)
+        computers(h2, "mac-example", **{"mac-example": (True, None), "devbox": (True, reading_of(64, 0.5))})
+        ask(h2, "/agent 家里没有读数")
+        self.assertNotIn("machine_id", started(h2)["body"], "home without a reading is never left")
+
+    def test_a_follow_up_stays_with_its_conversation(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        first = ask(h, "/agent 第一个问题")
+        run1 = running(h, first)
+        self.assertEqual(run1["machine_id"], "devbox")
+        sid = run1["session_id"]
+        h.http.add(sid, "assistant", "text", "第一个回答")
+        h.http.end_turn(sid)
+        wait_until(lambda: replies(h), what="first answer")
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0)), "devbox": (True, self.BUSY)})
+        ask(h, "/agent 接着问", root_id=first.id)
+        wait_until(lambda: h.http.posts("/api/v1/sessions/devbox/%s/messages" % sid), what="continued where it runs")
+        self.assertEqual(len(h.http.starts()), 1)
+        self.assertEqual(len(placement_asks(h)), 1, "a follow-up is never placed")
+
+    def test_a_new_conversation_in_a_thread_goes_back_to_its_computer(self):
+        h = agent(self, timing=fast(agent_keep=0.4))
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        first = ask(h, "/agent 第一个问题")
+        run1 = running(h, first)
+        h.http.add(run1["session_id"], "assistant", "text", "第一个回答")
+        h.http.end_turn(run1["session_id"])
+        wait_until(lambda: replies(h), what="first answer")
+        time.sleep(0.5)  # past agent_keep: the thread's next request opens a new conversation
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0)), "devbox": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 过了一阵又来问", root_id=first.id)
+        second = started(h, 2)["body"]
+        self.assertEqual(second.get("machine_id"), "devbox", "the thread's files and context are on that computer")
+        # an offline thread computer: placed anew (home is idle now)
+        h.http.machine_list = [{"id": "mac-example", "online": True}, {"id": "devbox", "online": False}]
+        h.http.metrics["devbox"] = dict(reading_of(64, 0.5), online=False)
+        time.sleep(0.5)
+        ask(h, "/agent 那台电脑关了", root_id=first.id)
+        self.assertNotIn("machine_id", started(h, 3)["body"])
+
+    def test_two_requests_of_a_thread_start_on_one_computer(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5)),
+                                       "devbox-2": (True, reading_of(64, 3.0))})
+        h.http.start_pending = 50  # the first start's answer keeps saying "under way"
+        first = ask(h, "/agent 第一个")
+        wait_until(lambda: h.http.starts(), what="the first start asked")
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 30.0)),
+                                       "devbox-2": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 第二个", root_id=first.id, parent_id=first.id)
+        wait_until(lambda: len({r["op"] for r in h.http.starts()}) >= 2, what="the second start asked")
+        self.assertEqual({r["body"].get("machine_id") for r in h.http.starts()}, {"devbox"},
+                         "the thread's computer while its first is still starting")
+
+    def test_a_thread_does_not_follow_its_starting_request_to_an_away_computer(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        h.http.start_pending = 50  # the first start's answer keeps saying "under way"
+        first = ask(h, "/agent 第一个")
+        wait_until(lambda: h.http.starts(), what="the first start asked")
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0)), "devbox": (False, None)})
+        ask(h, "/agent 第二个", root_id=first.id, parent_id=first.id)
+        wait_until(lambda: len({r["op"] for r in h.http.starts()}) >= 2, what="the second start asked")
+        second = [r for r in h.http.starts() if r["op"] != h.http.starts()[0]["op"]][0]
+        self.assertNotIn("machine_id", second["body"], "devbox is away: the second goes home")
+
+    def test_a_failed_request_does_not_hold_the_thread_to_its_computer(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        h.http.refuse_on["devbox"] = (403, "permission_denied", "")
+        first = ask(h, "/agent 第一个")
+        wait_until(lambda: run_of(h, first)["state"] == "failed", what="failed")
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0)), "devbox": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 再来一次", root_id=first.id, parent_id=first.id)
+        self.assertNotIn("machine_id", started(h, 2)["body"], "home is idle: the refusal holds nothing")
+
+    def test_a_launcher_set_by_hand_stays_home(self):
+        h = agent(self, agent_launcher="example-launcher")
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 指定了启动器")
+        body = started(h)["body"]
+        self.assertNotIn("machine_id", body)
+        self.assertEqual(body["launcher"], "example-launcher")
+        self.assertEqual(placement_asks(h), [])
+
+    def test_home_by_its_current_id_is_never_another_computer(self):
+        h = agent(self)
+        computers(h, "mac-old-id", **{"mac-example": (True, reading_of(18, 0.1))})  # read idle by its current id
+        h.http.metrics["mac-old-id"] = dict(self.BUSY, machine_id="mac-example")  # busy through its old one
+        ask(h, "/agent 只有一台电脑")
+        self.assertNotIn("machine_id", started(h)["body"])
+
+    def test_a_set_computer_is_never_placed(self):
+        h = agent(self, agent_machine="mac-2")
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 指定了电脑")
+        self.assertEqual(started(h)["body"]["machine_id"], "mac-2")
+        self.assertEqual(placement_asks(h), [])
+
+    def test_balance_off_starts_as_before(self):
+        h = agent(self, agent_balance=False)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        ask(h, "/agent 不分流")
+        self.assertNotIn("machine_id", started(h)["body"])
+        self.assertEqual(placement_asks(h), [])
+
+    def test_readings_a_computer_does_not_send(self):
+        h = agent(self)
+        windows = reading_of(16, 0.0, free_gib=1.0)
+        windows["latest"].pop("load")  # Windows sends no load: its memory alone makes it busy
+        mac_unread = reading_of(64, 0.1)
+        mac_unread["latest"]["mem_used"] = 0  # a Mac's total before its first used-memory reading: not chosen
+        computers(h, "mac-example", **{"mac-example": (True, windows), "devbox-unread": (True, mac_unread),
+                                       "devbox": (True, reading_of(8, 1.0))})
+        ask(h, "/agent 内存紧张的 Windows")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+
+    def test_a_computer_the_hub_says_takes_no_conversation_is_never_chosen(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox-work": (True, reading_of(64, 0.1)),
+                                       "devbox-pending": (True, reading_of(64, 0.1)), "devbox-old": (True, reading_of(64, 0.1)),
+                                       "devbox": (True, reading_of(64, 3.2))})
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox-work": (True, reading_of(64, 0.1)),
+                                       "devbox-pending": (True, reading_of(64, 0.1)), "devbox-old": (True, reading_of(64, 0.1)),
+                                       "devbox-bare": (True, reading_of(64, 0.1)), "devbox": (True, reading_of(64, 3.2))})
+        for m in h.http.machine_list:
+            m.update({"devbox-work": {"trust": "work"}, "devbox-pending": {"trust": "pending"},
+                      "devbox-old": {"node_incompatible": True}, "devbox-bare": {"claude_version": ""}}.get(m["id"], {}))
+        ask(h, "/agent 挑能用的")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+
+    def test_a_thread_whose_computer_was_renamed_goes_to_its_current_id(self):
+        h = agent(self, timing=fast(agent_keep=0.4))
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox-old-id": (True, reading_of(64, 0.5))})
+        first = ask(h, "/agent 第一个问题")
+        run1 = running(h, first)
+        h.http.add(run1["session_id"], "assistant", "text", "第一个回答")
+        h.http.end_turn(run1["session_id"])
+        wait_until(lambda: replies(h), what="first answer")
+        time.sleep(0.5)
+        # merged: listed by its new id; the old one still answers, for the new id
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0)), "devbox": (True, reading_of(64, 0.5))})
+        h.http.metrics["devbox-old-id"] = dict(reading_of(64, 0.5), machine_id="devbox")
+        ask(h, "/agent 又来问", root_id=first.id)
+        self.assertEqual(started(h, 2)["body"].get("machine_id"), "devbox")
+
+    def test_a_thread_on_home_by_its_new_id_stays_home(self):
+        h = agent(self, timing=fast(agent_keep=0.4))
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 1.0)), "devbox": (True, reading_of(64, 0.5))})
+        first = ask(h, "/agent 第一个问题")
+        run1 = running(h, first)  # started with no machine: the hub answers home's current id, mac-example
+        h.http.add(run1["session_id"], "assistant", "text", "第一个回答")
+        h.http.end_turn(run1["session_id"])
+        wait_until(lambda: replies(h), what="first answer")
+        time.sleep(0.5)
+        h.http.assistant_mid = "mac-old-id"  # the assistant's setting names home by an id kept after a merge
+        h.http.metrics["mac-old-id"] = dict(self.BUSY, machine_id="mac-example")  # busy: only the thread keeps it home
+        ask(h, "/agent 又来问", root_id=first.id)
+        self.assertNotIn("machine_id", started(h, 2)["body"], "home: as a start without placement, never 'remote'")
+
+    def test_home_by_an_id_the_list_does_not_show(self):
+        h = agent(self)
+        computers(h, "mac-old-id", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        h.http.metrics["mac-old-id"] = self.BUSY  # merged entries: the hub still reads the computer by its old id
+        ask(h, "/agent 旧 id")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+
+    def test_a_start_that_fails_there_is_never_started_again_elsewhere(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        h.http.refuse_on["devbox"] = (403, "permission_denied", "none")  # (an answer may be lost: never run twice)
+        m = ask(h, "/agent 那台电脑不收")
+        wait_until(lambda: run_of(h, m)["state"] == "failed", what="failed")
+        self.assertEqual({r["body"].get("machine_id") for r in h.http.starts()}, {"devbox"})
+
+    def test_a_conversation_on_another_computer_is_told_its_limits(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        first = ask(h, "/agent 在别的电脑上")
+        run = running(h, first)
+        prompt = started(h)["body"]["prompt"]
+        self.assertIn("这个会话开在电脑 devbox 上", prompt)
+        self.assertEqual(run["remote"], "devbox")
+        h.http.add(run["session_id"], "assistant", "text", "答了")
+        h.http.end_turn(run["session_id"])
+        wait_until(lambda: replies(h), what="answer")
+        second = ask(h, "/agent 接着问", root_id=first.id)
+        self.assertEqual(running(h, second)["remote"], "devbox", "a follow-up's conversation is still on devbox")
+        sent = h.http.posts("/api/v1/sessions/devbox/%s/messages" % run["session_id"])[-1]["body"]["text"]
+        self.assertIn("这个会话开在电脑 devbox 上", sent)
+        self.assertNotIn("看图：", sent, "no hint of a download it cannot read")
+        self.assertNotIn("matefeishu_media", sent)
+
+    def test_a_try_again_keeps_the_computer_it_chose(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5)),
+                                       "devbox-2": (True, reading_of(64, 30.0))})
+        h.http.lost_starts = 1  # the first answer is lost: the same operation is asked again
+        m = ask(h, "/agent 网络抖了一下")
+        wait_until(lambda: len(h.http.starts()) >= 2, what="asked again")
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, self.BUSY),
+                                       "devbox-2": (True, reading_of(64, 0.5))})
+        running(h, m)
+        bodies = [r["body"] for r in h.http.starts()]
+        self.assertEqual({b.get("machine_id") for b in bodies}, {"devbox"}, "one operation, one computer")
+        self.assertEqual(len(placement_asks(h)), 1)
+
+
+class PlacementReadingTest(unittest.TestCase):
+    def test_reading(self):
+        from openmate_core import placement
+
+        now = time.time()
+        self.assertEqual(placement.reading(reading_of(8, 2.0, free_gib=4.0, total_gib=16.0), now), (0.25, 4 * GiB))
+        self.assertIsNone(placement.reading(reading_of(8, 2.0, fresh=False), now), "a stale reading is none")
+        self.assertIsNone(placement.reading(dict(reading_of(8, 2.0), online=False), now))
+        self.assertIsNone(placement.reading({"online": True, "system": {"cores": 8}}, now), "no latest sample")
+        self.assertIsNone(placement.reading({"online": True, "system": {"cores": 0}, "latest": {"load": 1}}, now))
+        no_load = reading_of(8, 2.0, free_gib=3.0, total_gib=16.0)
+        no_load["latest"].pop("load")
+        self.assertEqual(placement.reading(no_load, now), (None, 3 * GiB))
+        no_used = reading_of(8, 2.0)
+        no_used["latest"]["mem_used"] = 0
+        self.assertEqual(placement.reading(no_used, now), (0.25, None))
+        self.assertTrue(placement.busy((0.76, 8 * GiB)))
+        self.assertTrue(placement.busy((0.1, GiB)))
+        self.assertTrue(placement.busy((None, GiB)))
+        self.assertFalse(placement.busy((0.75, 2 * GiB)))
+        self.assertFalse(placement.busy((0.5, None)))
+
+    def test_a_slow_hub_is_not_waited_out(self):
+        from openmate_core import placement
+
+        class Slow:
+            def __init__(self):
+                self.t = 0.0
+                self.asked = []
+
+            def clock(self):
+                return self.t
+
+            def assistant_machine(self, timeout):
+                return "home"
+
+            def machines(self, timeout):
+                return [{"id": m, "online": True, "claude_version": "2.1.330"} for m in ("home", "a", "b", "c")]
+
+            def machine_metrics(self, mid, timeout):
+                self.asked.append(mid)
+                self.t += timeout  # each answer takes all it may
+                return reading_of(18, 17.0) if mid == "home" else reading_of(64, 0.5)
+
+        hub = Slow()
+        machine, why = placement.choose(hub, clock=hub.clock)
+        self.assertLessEqual(hub.t, placement.BUDGET)
+        self.assertGreater(len(hub.asked), 1, "home and at least one other were read")
+        self.assertLess(len(hub.asked), 4, "the budget cuts the readings short")
+        self.assertIn(machine, ("", "a", "b"))
 
 
 if __name__ == "__main__":

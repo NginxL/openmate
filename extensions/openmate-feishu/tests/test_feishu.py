@@ -66,7 +66,8 @@ class ManifestTest(unittest.TestCase):
     def test_permissions(self):
         perms = MANIFEST["permissions"]
         self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask",
-                                                "extensions.call:openmate-wechat", "inbox.read", "kb.read", "todos.read"])
+                                                "extensions.call:openmate-wechat", "inbox.read", "kb.read", "machines.read",
+                                                "todos.read"])  # machines.read: /agent's placement by load
         self.assertEqual(perms["network"], ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com",
                                             "larkoffice.com", "*.larkoffice.com", "config:starkmesh_url:http"])
         props = MANIFEST["configuration"]["properties"]
@@ -81,7 +82,7 @@ class ManifestTest(unittest.TestCase):
         props = MANIFEST["configuration"]["properties"]
         self.assertEqual(list(props), ["larkx_python", "larkx_commit", "region", "http_proxy", "agent", "agent_prefix",
                                        "agent_self_mention",
-                                       "agent_machine", "agent_launcher", "agent_forward", "channel_chat", "agent_reply_header", "agent_mark_position",
+                                       "agent_machine", "agent_balance", "agent_launcher", "agent_forward", "channel_chat", "agent_reply_header", "agent_mark_position",
                                        "agent_mark_effort",
                                        "agent_ack_reaction",
                                        "agent_done_reaction", "agent_fail_reaction",

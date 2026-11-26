@@ -243,6 +243,11 @@ class FakeHubHTTP:
         self.interactions: List[dict] = []  # GET /api/v1/interactions (agents.read): the cards waiting for an answer
         self.interactions_status: Optional[int] = None  # an HTTP status that route answers instead
         self.history: List[dict] = []  # GET /api/v1/interactions/history: [{interaction: {id, machine_id, …}, status}]
+        # placement (machines.read, assistant.ask): None leaves the route out (an older hub, or no permission: 404)
+        self.assistant_mid: Optional[str] = None  # GET /api/v1/assistant's machine_id
+        self.machine_list: Optional[List[dict]] = None  # GET /api/v1/machines: [{id, online}]
+        self.metrics: Dict[str, dict] = {}  # machine id → GET /api/v1/machines/{id}/metrics's metrics
+        self.refuse_on: Dict[str, Any] = {}  # machine id → (status, code, delivered) a start there is refused with
         self._n = itertools.count(1)
         hub = self
 
@@ -389,6 +394,14 @@ class FakeHubHTTP:
                     return rec["status"], rec["answer"]
                 if self.start_fail:
                     return self.start_fail, {"error": "refused"}
+                refusal_on = self.refuse_on.get((body or {}).get("machine_id") or "")
+                if refusal_on:  # that computer cannot take it (a launcher it lacks; away): nothing ran
+                    answer = {"error": "这台电脑开不了这个会话", "code": refusal_on[1]}
+                    if refusal_on[2]:  # the hub's word that nothing ran (an away node's is also retryable)
+                        answer.update(delivered=refusal_on[2], retryable=refusal_on[0] == 503)
+                    if op:
+                        self.ops[op] = {"body": body, "state": "done", "status": refusal_on[0], "answer": answer}
+                    return refusal_on[0], answer
                 if self.machine_offline > 0:
                     self.machine_offline -= 1
                     refusal = {"error": "示例电脑离线了", "code": "node_unreachable", "retryable": True, "delivered": "none"}
@@ -426,6 +439,14 @@ class FakeHubHTTP:
                 s["stopped"], s["working"] = True, False
                 tasks = s.get("tasks") or []
                 return 200, {"conversation": was, "tasks": tasks, "already": not was and not tasks}
+            if method == "GET" and p == "/api/v1/assistant" and self.assistant_mid is not None:
+                return 200, {"assistant": {"machine_id": self.assistant_mid}}
+            if method == "GET" and p == "/api/v1/machines" and self.machine_list is not None:
+                return 200, {"machines": [dict(m) for m in self.machine_list]}
+            if method == "GET" and len(parts) == 5 and parts[:3] == ["api", "v1", "machines"] and parts[4] == "metrics":
+                if parts[3] in self.metrics:
+                    return 200, {"metrics": dict(self.metrics[parts[3]]), "range": query.get("range"), "step": 10}
+                return 404, {"error": "unknown machine"}
             if method == "GET" and p == "/api/v1/assistant/reporters":
                 return 200, {"reporters": [dict({"session_id": sid, "machine_id": s["machine"], "at": "2026-11-19T00:00:00Z"},
                                                 **({"stopped_at": "2026-11-19T00:00:01Z", "stopped_by": "lark"}
