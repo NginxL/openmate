@@ -247,6 +247,9 @@ class FakeHubHTTP:
         self.assistant_mid: Optional[str] = None  # GET /api/v1/assistant's machine_id
         self.machine_list: Optional[List[dict]] = None  # GET /api/v1/machines: [{id, online}]
         self.metrics: Dict[str, dict] = {}  # machine id → GET /api/v1/machines/{id}/metrics's metrics
+        # machine id → how many sessions it has working a turn (GET /api/v1/sessions?state=working lists them, with a
+        # session done but unseen beside each, as the hub's working list holds those too); None: that list refused (403)
+        self.working: Optional[Dict[str, int]] = {}
         self.refuse_on: Dict[str, Any] = {}  # machine id → (status, code, delivered) a start there is refused with
         self._n = itertools.count(1)
         hub = self
@@ -478,6 +481,17 @@ class FakeHubHTTP:
                 if self.todos_status:
                     return self.todos_status, {"error": "refused", "code": "forbidden"}
                 return 200, {"todos": [dict(t) for t in self.todos]}
+            if method == "GET" and p == "/api/v1/sessions" and query.get("state") == "working" \
+                    and not query.get("session_id"):
+                if self.working is None:
+                    return 403, {"error": "refused", "code": "forbidden"}
+                rows = []
+                for wmid, n in self.working.items():
+                    rows += [{"session_id": "%s-working-%d" % (wmid, i), "machine_id": wmid, "status": "working",
+                              "state": "working"} for i in range(n)]
+                    rows.append({"session_id": "%s-done" % wmid, "machine_id": wmid, "status": "done",
+                                 "state": "working"})
+                return 200, {"sessions": rows, "total": len(rows), "has_more": False}
             if method == "GET" and p == "/api/v1/sessions":
                 sid, mid = query.get("session_id"), query.get("machine_id")
                 s = self.sessions.get(sid or "")

@@ -73,7 +73,7 @@ class RemoteTest(Pictures):
 
         h = wechat(self)
         h.world.images_ok = True
-        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 17.0)), "devbox": (True, reading_of(64, 0.5))})
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 20.0)), "devbox": (True, reading_of(64, 0.5))})
         run = running(h, ask(h, "/agent 画一下流程"))
         self.assertEqual(run["remote"], "devbox")
         prompt = h.http.starts()[-1]["body"]["prompt"]

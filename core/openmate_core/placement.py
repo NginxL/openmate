@@ -6,8 +6,12 @@ itself. Only a NEW conversation is placed: a follow-up goes to its conversation 
 in a thread that already had one starts on that thread's computer again (its files and context are there), as long
 as the thread's runs are kept (store.prune_runs: 3 days, 200 runs).
 
-Busy: the 1-minute load is over BUSY_LOAD_PER_CORE times the computer's cores, or less than MIN_FREE_BYTES of memory is
-free. Another computer is chosen only with both readings fresh and neither busy; home without any reading stays home.
+Busy: the 1-minute load is over BUSY_LOAD_PER_CORE times the computer's cores, less than MIN_FREE_BYTES of memory is
+free, or BUSY_WORKING or more of its sessions are working a turn: the lines Persona's own admission gate holds a busy
+computer to (assistant.admission: load_per_core, min_memory_bytes, max_claude_procs), so a /agent spills where an
+assistant task would. The working count is one read of the hub's session list (agents.read) for every computer at
+once; an unread count is no count, never a busy one. Another computer is chosen only with both load and memory
+readings fresh and none of the three busy; home without a load or memory reading stays home.
 Nothing here ever stops a start, it only picks where: any error, and a hub too slow (BUDGET), is the old behaviour.
 Pictures an Agent leaves are read on the extension's computer, taken to be the assistant's (as before placement): a
 conversation placed elsewhere is told it cannot attach one. The launcher Persona gives `/agent` (its "Lark /agent"
@@ -23,12 +27,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger("openmate.placement")
 
-BUSY_LOAD_PER_CORE = 0.75
+BUSY_LOAD_PER_CORE = 1.0
 MIN_FREE_BYTES = 2 << 30
+BUSY_WORKING = 8  # sessions working a turn at once
 FRESH_SECONDS = 120.0  # a reading older than this (by its own time) is no reading
 BUDGET = 8.0  # seconds placement may take in all: the request waits for it, and a restart meanwhile loses it
 ASK_TIMEOUT = 4.0  # one hub request
@@ -78,15 +83,18 @@ def eligible(machine: dict) -> bool:
             and not machine.get("node_incompatible"))
 
 
-def busy(r: Reading) -> bool:
+def busy(r: Reading, working: Optional[int] = None) -> bool:
     lpc, free = r
-    return (lpc is not None and lpc > BUSY_LOAD_PER_CORE) or (free is not None and free < MIN_FREE_BYTES)
+    return ((lpc is not None and lpc > BUSY_LOAD_PER_CORE) or (free is not None and free < MIN_FREE_BYTES)
+            or (working is not None and working >= BUSY_WORKING))
 
 
-def _words(r: Reading) -> str:
+def _words(r: Reading, working: Optional[int] = None) -> str:
     lpc, free = r
-    return "负载 %s/核，可用内存 %s" % ("%.2f" % lpc if lpc is not None else "未知",
-                                     "%.1f GiB" % (free / float(1 << 30)) if free is not None else "未知")
+    return "负载 %s/核，可用内存 %s，在干活的会话 %s" % (
+        "%.2f" % lpc if lpc is not None else "未知",
+        "%.1f GiB" % (free / float(1 << 30)) if free is not None else "未知",
+        "%d 个" % working if working is not None else "未知")
 
 
 def choose(hub, sticky: str = "", clock=time.monotonic) -> Tuple[str, str]:
@@ -112,6 +120,15 @@ def choose(hub, sticky: str = "", clock=time.monotonic) -> Tuple[str, str]:
         m = metrics(mid)
         return reading(m) if m is not None else None
 
+    def working_counts() -> Optional[Dict[str, int]]:
+        left = deadline - clock()
+        if left < 0.5:
+            return None
+        try:
+            return hub.working_sessions(timeout=min(ASK_TIMEOUT, left))
+        except Exception:  # an older hub, or without agents.read: the load and memory lines alone
+            return None
+
     if not home:
         return "", "不知道助手在哪台电脑上：照旧交给 Persona"
     home_m = metrics(home)  # (home by any id the hub knows it by: an id kept after two entries were merged is unlisted)
@@ -130,17 +147,24 @@ def choose(hub, sticky: str = "", clock=time.monotonic) -> Tuple[str, str]:
     here = reading(home_m) if home_m is not None else None
     if here is None:
         return "", "%s 没有最近的负载读数（或不在线）：照旧用它" % home
-    if not busy(here):
-        return "", "%s 不忙（%s）" % (home, _words(here))
+    working = working_counts()  # every computer's, one read: a computer missing from a read list has none working
+
+    def at(mid: str) -> Optional[int]:
+        return None if working is None else working.get(mid, 0)
+
+    here_working = None if working is None else max(working.get(home, 0), working.get(home_now, 0) if home_now else 0)
+    if not busy(here, here_working):
+        return "", "%s 不忙（%s）" % (home, _words(here, here_working))
     best: Optional[Tuple[float, str, Reading]] = None
     for mid in online:
         if mid in (home, home_now):
             continue
         r = read(mid)
-        if r is None or r[0] is None or r[1] is None or busy(r):
-            continue  # another computer only with both readings, neither busy
+        if r is None or r[0] is None or r[1] is None or busy(r, at(mid)):
+            continue  # another computer only with both readings, none of its lines busy
         if best is None or r[0] < best[0]:
             best = (r[0], mid, r)
     if best is None:
-        return "", "%s 忙（%s），别的电脑也都忙、没有读数或来不及读：还用它" % (home, _words(here))
-    return best[1], "%s 忙（%s）：开到 %s（%s）" % (home, _words(here), best[1], _words(best[2]))
+        return "", "%s 忙（%s），别的电脑也都忙、没有读数或来不及读：还用它" % (home, _words(here, here_working))
+    return best[1], "%s 忙（%s）：开到 %s（%s）" % (home, _words(here, here_working), best[1],
+                                                 _words(best[2], at(best[1])))

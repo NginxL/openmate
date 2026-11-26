@@ -481,7 +481,7 @@ class HintTest(unittest.TestCase):
         from test_agent import computers, reading_of
 
         h = agent(self)
-        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 17.0)), "devbox": (True, reading_of(64, 0.5))})
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 20.0)), "devbox": (True, reading_of(64, 0.5))})
         pic = h.world.push(TEAM, "user_example_a", "", type="IMAGE", media=[Media("image", ref="img:example-4")])
         stored(h, TEAM, pic)
         ask(h, "/agent 这个是什么", root_id=pic.id, parent_id=pic.id)
@@ -495,7 +495,7 @@ class HintTest(unittest.TestCase):
         from test_agent import computers, reading_of
 
         h = agent(self, hub_capabilities=["inbox_group", "tool_images"])
-        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 17.0)), "devbox": (True, reading_of(64, 0.5))})
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 20.0)), "devbox": (True, reading_of(64, 0.5))})
         pic = h.world.push(TEAM, "user_example_a", "", type="IMAGE", media=[Media("image", ref="img:example-5")])
         stored(h, TEAM, pic)
         ask(h, "/agent 这个是什么", root_id=pic.id, parent_id=pic.id)

@@ -7,8 +7,10 @@ asks for (docs/extensions/extensions.md "Hub API: scopes"):
     agents.control  POST /api/v1/sessions/{mid}/{sid}/messages (a conversation's, or a task's Agent's), …/interrupt
     agents.read     GET  /api/v1/sessions/{mid}/{sid}/items, …/items/{item}/full,
                     GET  /api/v1/sessions?machine_id=&session_id= (the session's status),
+                    GET  /api/v1/sessions?state=working (placement: how many sessions each computer has working),
                     GET  /api/v1/interactions, …/interactions/history (the questions waiting now, and how one
                     ended: the 渠道 takes back one answered elsewhere)
+    machines.read   GET  /api/v1/machines, …/machines/{id}/metrics (placement: which computers, and how loaded)
     kb.read         GET  /api/v1/kb/chats/{id}/context
     inbox.read      GET  /api/v1/inbox (the 今天 page)
     todos.read      GET  /api/v1/todos (the 今天 page; /agent: the open task its conversation handed out)
@@ -198,6 +200,22 @@ class HubAPI:
         doc = self.request("GET", "/api/v1/machines/%s/metrics" % _seg(machine_id), query={"range": "1h"}, timeout=timeout)
         m = doc.get("metrics") if isinstance(doc, dict) else None
         return m if isinstance(m, dict) else {}
+
+    def working_sessions(self, timeout: float = 10.0) -> Dict[str, int]:
+        """machine id → how many of its sessions are working a turn right now (agents.read), the count Persona's
+        admission gate holds against max_claude_procs; a computer with none is absent. One page of the hub's working
+        list: its state=working also lists sessions done but not yet seen, so only status working counts, and a longer
+        list is cut short (a count can come out low, never high)."""
+        doc = self.request("GET", "/api/v1/sessions", query={"state": "working", "limit": 200}, timeout=timeout)
+        items = doc.get("sessions") if isinstance(doc, dict) else None
+        if not isinstance(items, list):
+            raise HubError(0, "hub 的会话列表不是列表")
+        out: Dict[str, int] = {}
+        for s in items:
+            if isinstance(s, dict) and s.get("status") == "working" and s.get("machine_id"):
+                mid = str(s["machine_id"])
+                out[mid] = out.get(mid, 0) + 1
+        return out
 
     def send_message(self, machine_id: str, session_id: str, text: str, client_msg_id: str = "") -> dict:
         body: Dict[str, Any] = {"text": text}

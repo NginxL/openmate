@@ -1883,8 +1883,8 @@ class LoadPlacementTest(unittest.TestCase):
     other one; a follow-up stays with its conversation, and a new conversation in a thread goes back to its computer."""
 
     @property
-    def BUSY(self):  # 0.89 per core, read just now
-        return reading_of(18, 16.0)
+    def BUSY(self):  # 1.11 per core (over the 1.0 line), read just now
+        return reading_of(18, 20.0)
 
     def test_an_idle_home_starts_as_before(self):
         h = agent(self)
@@ -1899,7 +1899,7 @@ class LoadPlacementTest(unittest.TestCase):
         h = agent(self)
         computers(h, "mac-example", **{
             "mac-example": (True, self.BUSY),
-            "devbox-busy": (True, reading_of(64, 60.0)),          # 0.94 per core: busy too
+            "devbox-busy": (True, reading_of(64, 70.0)),          # 1.09 per core: busy too
             "devbox-short": (True, reading_of(64, 1.0, free_gib=1.0)),  # idle, but too little memory
             "devbox-away": (False, reading_of(64, 0.1)),          # offline
             "devbox-quiet": (True, reading_of(64, 0.1, fresh=False)),  # no fresh reading
@@ -1918,9 +1918,53 @@ class LoadPlacementTest(unittest.TestCase):
         ask(h, "/agent 内存不够的时候")
         self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
 
+    def test_a_home_at_one_per_core_or_under_stays(self):
+        # the line is Persona's own (assistant.admission load_per_core 1.0): 0.89 or exactly 1.0 per core is not busy
+        for load in (16.0, 18.0):
+            h = agent(self)
+            computers(h, "mac-example", **{"mac-example": (True, reading_of(18, load)),
+                                           "devbox": (True, reading_of(64, 0.5))})
+            ask(h, "/agent 不算忙")
+            self.assertNotIn("machine_id", started(h)["body"], "%.2f per core is not over 1.0" % (load / 18))
+
+    def test_eight_sessions_working_at_home_is_busy(self):
+        # the third line, Persona's max_claude_procs: a quiet load does not hide eight sessions working a turn
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 3.0)), "devbox": (True, reading_of(64, 0.5))})
+        h.http.working = {"mac-example": 8}
+        ask(h, "/agent 会话太多")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox")
+        h2 = agent(self)
+        computers(h2, "mac-example", **{"mac-example": (True, reading_of(18, 3.0)), "devbox": (True, reading_of(64, 0.5))})
+        h2.http.working = {"mac-example": 7, "devbox": 1}  # sessions done but unseen are listed too: never counted
+        ask(h2, "/agent 还行")
+        self.assertNotIn("machine_id", started(h2)["body"], "seven working is under the line")
+
+    def test_a_computer_with_eight_sessions_working_is_not_chosen(self):
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY),
+                                       "devbox-big": (True, reading_of(64, 6.4)),     # the least loaded, but full
+                                       "devbox-small": (True, reading_of(8, 2.0))})
+        h.http.working = {"devbox-big": 8}
+        ask(h, "/agent 换一台")
+        self.assertEqual(started(h)["body"].get("machine_id"), "devbox-small")
+
+    def test_without_the_session_list_the_load_lines_alone(self):
+        # an older hub or no agents.read: the working count is unread, never taken as busy
+        h = agent(self)
+        computers(h, "mac-example", **{"mac-example": (True, reading_of(18, 3.0)), "devbox": (True, reading_of(64, 0.5))})
+        h.http.working = None
+        ask(h, "/agent 读不到会话")
+        self.assertNotIn("machine_id", started(h)["body"])
+        h2 = agent(self)
+        computers(h2, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(64, 0.5))})
+        h2.http.working = None
+        ask(h2, "/agent 读不到会话但很忙")
+        self.assertEqual(started(h2)["body"].get("machine_id"), "devbox")
+
     def test_home_stays_when_every_other_computer_is_busy_or_unread(self):
         h = agent(self)
-        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(8, 7.0)),
+        computers(h, "mac-example", **{"mac-example": (True, self.BUSY), "devbox": (True, reading_of(8, 9.0)),
                                        "devbox-2": (True, None)})
         ask(h, "/agent 都忙")
         self.assertNotIn("machine_id", started(h)["body"])
@@ -2154,11 +2198,15 @@ class PlacementReadingTest(unittest.TestCase):
         no_used = reading_of(8, 2.0)
         no_used["latest"]["mem_used"] = 0
         self.assertEqual(placement.reading(no_used, now), (0.25, None))
-        self.assertTrue(placement.busy((0.76, 8 * GiB)))
+        self.assertTrue(placement.busy((1.01, 8 * GiB)))
         self.assertTrue(placement.busy((0.1, GiB)))
         self.assertTrue(placement.busy((None, GiB)))
-        self.assertFalse(placement.busy((0.75, 2 * GiB)))
+        self.assertFalse(placement.busy((1.0, 2 * GiB)), "the line is Persona's load_per_core 1.0: over it, not at it")
+        self.assertFalse(placement.busy((0.9, 8 * GiB)))
         self.assertFalse(placement.busy((0.5, None)))
+        self.assertTrue(placement.busy((0.1, 8 * GiB), 8), "eight sessions working a turn: Persona's max_claude_procs")
+        self.assertFalse(placement.busy((0.1, 8 * GiB), 7))
+        self.assertFalse(placement.busy((0.1, 8 * GiB), None), "an unread count is no count")
 
     def test_a_slow_hub_is_not_waited_out(self):
         from openmate_core import placement
@@ -2180,7 +2228,7 @@ class PlacementReadingTest(unittest.TestCase):
             def machine_metrics(self, mid, timeout):
                 self.asked.append(mid)
                 self.t += timeout  # each answer takes all it may
-                return reading_of(18, 17.0) if mid == "home" else reading_of(64, 0.5)
+                return reading_of(18, 20.0) if mid == "home" else reading_of(64, 0.5)
 
         hub = Slow()
         machine, why = placement.choose(hub, clock=hub.clock)
