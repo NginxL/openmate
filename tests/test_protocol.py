@@ -4,11 +4,14 @@ try:  # first: every temporary directory of this run in one, removed at its end
     import _runtmp  # noqa: F401
 except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
     pass
+import dataclasses
 import json
 import os
 import unittest
 
 from harness import CID, EXT, ROOT, Harness, HubSideError, wait_until
+
+import openmate_feishu  # noqa: E402  (on the path through harness)
 
 
 class HandshakeTest(unittest.TestCase):
@@ -63,6 +66,24 @@ class HandshakeTest(unittest.TestCase):
         self.assertEqual(e.exception.code, "no_contribution")
         # the contribution may be left out when there is only one
         self.assertIn("state", h.hub.request("connector.status", {}))
+
+    def test_usage_query(self):
+        # the sidebar's usage bars (contributes.usage): Feishu answers for its StarkMesh pool (here not set up, so it
+        # says so); another contribution is not its; a platform without usage_query does not know the method
+        h = Harness(self)
+        q = {"contribution": "starkmesh", "query_id": "q1", "base_url": "http://127.0.0.1:8790", "tz": "Asia/Shanghai",
+             "lang": "zh-Hans"}
+        res = h.hub.request("usage.query", q)
+        self.assertEqual([(a["id"], a["provider"]) for a in res["accounts"]], [("starkmesh-pool", "claude")])
+        self.assertIn("还没有接上 StarkMesh", res["accounts"][0]["notice"])
+        self.assertNotIn("windows", res["accounts"][0])
+        with self.assertRaises(HubSideError) as e:
+            h.hub.request("usage.query", dict(q, contribution="someone-elses"))
+        self.assertEqual(e.exception.code, "no_contribution")
+        h2 = Harness(self, platform=dataclasses.replace(openmate_feishu.platform(), usage_query=None))
+        with self.assertRaises(HubSideError) as e:
+            h2.hub.request("usage.query", q)
+        self.assertEqual(e.exception.code, "unknown_method")
 
     def test_error_answers_have_a_message(self):
         h = Harness(self)

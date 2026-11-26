@@ -8,7 +8,7 @@
   "homepage": "https://github.com/NginxL/openmate",
   "icon": "assets/icon.png",
   "tags": ["飞书", "Lark", "聊天", "收件箱", "知识库", "OpenMate"],
-  "engines": {"persona": ">=202611110000", "extension_protocol": 1},
+  "engines": {"persona": ">=202611220000", "extension_protocol": 1},
   "runtime": {"command": "bin/openmate-feishu"},
   "activation_events": ["on_startup"],
   "contributes": {
@@ -53,6 +53,9 @@
       {"id": "calendar", "title": "日程", "placement": "nav_page", "icon": "calendar"},
       {"id": "starkmesh", "title": "中转站", "placement": "nav_page", "icon": "wallet"},
       {"id": "starkmesh-card", "title": "中转站", "placement": "overview_card", "opens": "starkmesh"}
+    ],
+    "usage": [
+      {"id": "starkmesh", "name": "StarkMesh"}
     ]
   },
   "configuration": {
@@ -281,7 +284,8 @@
   "permissions": {
     "network": ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com", "larkoffice.com", "*.larkoffice.com",
                 "config:starkmesh_url:http"],
-    "hub": ["agents.control", "agents.read", "assistant.ask", "extensions.call:openmate-wechat", "inbox.read", "kb.read", "machines.read", "todos.read"]
+    "hub": ["agents.control", "agents.read", "assistant.ask", "extensions.call:openmate-wechat", "inbox.read", "kb.read", "machines.read", "todos.read"],
+    "launcher_keys": true
   },
   "host_integrations": [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}]
 }

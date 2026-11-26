@@ -50,6 +50,7 @@ def platform(manifest_path: str = "") -> Platform:
         login_hint_scanned="已扫码，请在飞书手机 App 上点“确认登录”",
         login_hint_expired="二维码过期了，已换一张新的，请重新扫码",
         ui_pages=_agenda_pages,
+        usage_query=_starkmesh_usage,  # the sidebar's usage bars: the StarkMesh pool, from the 中转站 page's read
         legacy_blocked_texts=(DLP_BLOCKED_TEXT,),  # what told a blocked message before 0.11.29 stored the mark
         tools=_media_tools,  # matefeishu_media: a message's pictures and files as local files (read-only)
         media_tool=CONNECTOR_ID + "_media",
@@ -60,6 +61,19 @@ def _media_tools(app):
     from .media import media_tools
 
     return media_tools(app)
+
+
+def _starkmesh_usage(ui, params):
+    # usage.query: the 中转站 page answers from its own fresh read (one read of StarkMesh for the page, its cards and this)
+    from openmate_core.wire import RPCError
+
+    from . import starkmesh
+
+    contribution = str(params.get("contribution") or "")
+    page = ui.pages.get(starkmesh.PAGE)
+    if contribution not in ("", starkmesh.USAGE_ID) or page is None:
+        raise RPCError("没有用量来源 %s" % contribution, "no_contribution")
+    return page.usage(params)
 
 
 def _agenda_pages(app):

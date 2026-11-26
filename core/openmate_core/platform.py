@@ -34,6 +34,9 @@ class Platform:
     login_hint_expired: str = "二维码过期了，已换一张新的，请重新扫码"
     #: the platform's own pages and cards, besides the core's chats page and card: app → {contribution id: ui.Page}
     ui_pages: Optional[Callable[[Any], Dict[str, Any]]] = None
+    #: the sidebar's usage bars (manifest contributes.usage; the hub's usage.query): (the UI, params) → {"accounts": [...]}
+    #: as docs/extensions/extensions.md "Usage extensions" has it; None: the platform contributes no usage
+    usage_query: Optional[Callable[[Any, dict], dict]] = None
     #: the contribution ids of the core's chats page and its card. Contribution ids are one namespace per hub, so a
     #: second platform installed beside another needs its own (Feishu keeps "chats", the id its users' layouts know)
     chats_page: str = "chats"

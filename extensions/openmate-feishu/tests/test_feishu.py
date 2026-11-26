@@ -41,7 +41,7 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(MANIFEST["name"], "飞书（OpenMate）")
         self.assertEqual(MANIFEST["publisher"], "NginxL")
         self.assertEqual(MANIFEST["homepage"], "https://github.com/NginxL/openmate")
-        self.assertEqual(MANIFEST["engines"], {"persona": ">=202611110000", "extension_protocol": 1})
+        self.assertEqual(MANIFEST["engines"], {"persona": ">=202611220000", "extension_protocol": 1})  # usage (#12434)
         self.assertEqual(MANIFEST["activation_events"], ["on_startup"])
         self.assertTrue(re.match(r"^\d+\.\d+\.\d+$", MANIFEST["version"]))
         self.assertTrue(os.access(os.path.join(EXT_DIR, MANIFEST["runtime"]["command"]), os.X_OK))
@@ -77,6 +77,11 @@ class ManifestTest(unittest.TestCase):
                 self.assertEqual(props[field].get("format"), "uri", entry)
                 self.assertNotIn("default", props[field], "the hub drops an extension whose network address has a default")
         self.assertEqual(MANIFEST["host_integrations"], [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}])
+        # the sidebar's usage bars (StarkMesh's pool): the hub asks a usage contribution only with launcher_keys; the
+        # answer never uses a launcher's key (StarkMeshPage.usage), and the hub has the usage point from 2026-11-21
+        self.assertEqual(MANIFEST["contributes"]["usage"], [{"id": "starkmesh", "name": "StarkMesh"}])
+        self.assertIs(perms["launcher_keys"], True)
+        self.assertEqual(set(perms), {"hub", "network", "launcher_keys"}, "no other permission")
 
     def test_configuration(self):
         props = MANIFEST["configuration"]["properties"]

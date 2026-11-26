@@ -227,6 +227,13 @@ class ConnectorApp:
                 raise RPCError("扩展还在启动，请稍后再试")
             ui = self._ui()
             return ui.render(params) if method == "ui.render" else ui.action(params)
+        if method == "usage.query":  # the sidebar's usage bars (contributes.usage): the platform's usage_query answers
+            answer = getattr(self.platform, "usage_query", None)
+            if answer is None:
+                raise RPCError("未知方法 %s" % method, "unknown_method")
+            if not self.ready.wait(STARTUP_WAIT):
+                raise RPCError("扩展还在启动，请稍后再试", "busy")
+            return answer(self._ui(), params)
         if method.startswith("channel."):  # Persona's 渠道 (channel.py)
             if not self.ready.wait(STARTUP_WAIT):
                 raise RPCError("扩展还在启动，请稍后再试", "busy")

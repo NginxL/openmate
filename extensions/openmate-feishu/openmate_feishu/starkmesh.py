@@ -14,6 +14,8 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import math
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -37,9 +39,16 @@ WINDOWS = (("five_hour", "5 小时"), ("seven_day", "本周"), ("seven_day_fable
 ACCOUNT_WINDOWS = (("five_hour", "5 小时"), ("seven_day", "7D"), ("seven_day_fable", "Fable 7D"))  # an account's bars
 PERMISSIONS = "accounts.read、accounts.usage.read、accounts.stats.read、dashboard.read"
 ACCOUNTS_MOST = 40  # accounts listed on the page (four items each at most): a page holds 300
-ACCOUNT_PAGES = 5  # pages of 200 accounts read at most
+ACCOUNT_PAGES = 10  # pages of PAGE_SIZE accounts read at most (1000 accounts)
+PAGE_SIZE = 100  # the most the read-only key gets a page (StarkMesh answers a larger page_size with 20)
+USAGE_BATCH = 100  # the most accounts the read-only key may ask the usage of at once (more: HTTP 400)
 PAGE_WAIT = 12.0  # the page waits this long at most for a first read; the 今天 page's block CARD_WAIT
 CARD_WAIT = 2.0
+SUBSCRIPTION_TYPES = ("oauth", "setup-token")  # the account types with 5 小时 and weekly windows (API Key, Bedrock, Vertex: none)
+USAGE_ID = "starkmesh"  # the usage contribution (manifest contributes.usage): the sidebar's usage bars
+USAGE_WAIT = 20.0  # usage.query waits this long at most for a first read (the manager gives a source 45 s)
+USAGE_POOL = "starkmesh-pool"  # the one account it answers: the pool, not each account (below)
+USAGE_WINDOWS = (("five_hour", "5h", ""), ("seven_day", "7d", ""), ("seven_day_fable", "7d", "Fable"))
 
 
 class StarkMeshError(Exception):
@@ -121,13 +130,74 @@ class StarkMeshAPI:
         return d
 
 
+def _iso(t: float, up: bool = False) -> str:
+    """t in UTC to the second; up: rounded up (an end said early would drop a window that is still on)."""
+    t = math.ceil(t) if up else math.floor(t)
+    return _dt.datetime.fromtimestamp(t, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+_FRACTION = re.compile(r"(T\d\d:\d\d:\d\d)\.(\d+)")
+
+
 def _ts(v) -> Optional[float]:
     if not v:
         return None
+    # Python before 3.11 reads only 3 or 6 fractional digits; the gateway may write another number of them
+    text = _FRACTION.sub(lambda m: m.group(1) + "." + (m.group(2) + "000000")[:6], str(v).replace("Z", "+00:00"), count=1)
     try:
-        return _dt.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        return _dt.datetime.fromisoformat(text).timestamp()
     except ValueError:
         return None
+
+
+WINDOW_SECONDS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400, "seven_day_fable": 7 * 86400}
+
+
+def renewed(u: dict, key: str, t: Optional[float], now: float) -> bool:
+    """Whether window key (reset time t, or None) has started again since its number. StarkMesh keeps one sample time
+    for the account (updated_at, whole seconds), not one per window, and may update a window's number without its reset
+    time. So: once the period the sample was taken in must have ended, it has; with a passed reset, also when the
+    sample was taken before the reset's second (or not said when). A sample in or after the reset's second may be the
+    new period's: kept, never shown less used than it may be."""
+    sampled = _ts(u.get("updated_at"))
+    over = bool(sampled) and now >= sampled + 1 + WINDOW_SECONDS.get(key, 0)  # (+1: the second's lost fraction)
+    if not t:  # no end said (the gateway drops a 5 小时 end once it is over, or never had one): kept until surely over
+        return over
+    if t > now:
+        return False
+    return not sampled or sampled < math.floor(t) or over
+
+
+def reset_of(a: dict, key: str, w: dict) -> Optional[float]:
+    """When window key of account a resets (epoch seconds), or None. StarkMesh's passive snapshot may leave a 5 小时
+    window's resets_at out while the account list still has the session window's end."""
+    t = _ts(w.get("resets_at"))
+    if not t and key == "five_hour":
+        t = _ts(a.get("session_window_end"))
+    return t
+
+
+def expired(a: dict, now: float) -> bool:
+    """The account's credentials have expired and StarkMesh pauses it for that (auto_pause_on_expired; expires_at): it
+    refuses the account at once, before its pause worker sets schedulable off. Only when the flag is said: the read-only
+    key's answer leaves it out, and an account with it off is still scheduled (not said: the pause worker's
+    schedulable decides, a little later)."""
+    if not a.get("auto_pause_on_expired"):
+        return False
+    v = a.get("expires_at")
+    t = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else _ts(v)
+    return bool(t) and now >= t
+
+
+FABLE_MODEL = "claude-fable-5"  # StarkMesh's scope for Fable in an account's extra.model_rate_limits
+
+
+def fable_blocked(a: dict, now: float) -> bool:
+    """StarkMesh keeps the account but sends it no Fable until then (extra.model_rate_limits, e.g. credits required)."""
+    limits = (a.get("extra") or {}).get("model_rate_limits") if isinstance(a.get("extra"), dict) else None
+    hold = limits.get(FABLE_MODEL) if isinstance(limits, dict) else None
+    t = _ts(hold.get("rate_limit_reset_at")) if isinstance(hold, dict) else None
+    return bool(t) and t > now
 
 
 def usable(a: dict, now: float) -> bool:
@@ -179,24 +249,38 @@ class Snapshot:
         self.ok = [a for a in accounts if usable(a, now)]
         self.ok_claude = [a for a in self.claude if usable(a, now)]
 
-    def window(self, key: str) -> Optional[dict]:
-        """{left: 号 left, of: accounts counted, ratio, reset: seconds to the soonest reset} or None (no snapshot)."""
-        left, of, resets = 0.0, 0, []
-        for a in self.ok_claude:
-            w = (self.usage.get(str(a.get("id"))) or {}).get(key)
+    def window(self, key: str, at: Optional[float] = None, keep: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+        """{left: 号 left, of: accounts counted, ratio, reset: seconds to the soonest reset, last: to the latest} or None
+        (no snapshot), as of at (default: when it was read). A window whose reset time has passed has started again:
+        nothing of it is used (the gateway's snapshot is passive, so it still has the last period's number until the
+        account is used again)."""
+        now = self.now if at is None else at
+        left, of, resets, open_ended = 0.0, 0, [], False
+        counted = self.ok_claude if at is None else [a for a in self.claude if usable(a, now)]
+        for a in counted if keep is None else [a for a in counted if keep(a)]:
+            u = self.usage.get(str(a.get("id"))) or {}
+            w = u.get(key)
             if not isinstance(w, dict):
                 continue
             util = float(w.get("utilization") or 0.0)
+            t = reset_of(a, key, w)
+            if not t and w.get("remaining_seconds"):
+                t = self.now + float(w["remaining_seconds"])  # counted from the read
+            if renewed(u, key, t, now):
+                util = 0.0
+            elif t and t <= now:
+                t = None  # sampled after that reset: the number is kept, its end not known
             left += max(0.0, 1.0 - min(util, 100.0) / 100.0)
             of += 1
-            t = _ts(w.get("resets_at"))
-            if t and t > self.now:
-                resets.append(t - self.now)
-            elif w.get("remaining_seconds"):
-                resets.append(float(w["remaining_seconds"]))
+            if t and t > now:
+                resets.append(t - now)
+            elif not t and util > 0:
+                open_ended = True  # used, with no reset said: the pool's window has no known end
         if not of:
             return None
-        return {"left": left, "of": of, "ratio": left / of, "reset": min(resets) if resets else None}
+        return {"left": left, "of": of, "ratio": left / of, "reset": min(resets) if resets else None,
+                "last": max(resets) if resets and not open_ended else None,
+                "dated": len(resets) == of}  # every counted account has a reset ahead (none renewed, none undated)
 
 
 def tone_of(ratio: float) -> Tuple[str, str]:
@@ -217,6 +301,9 @@ class StarkMesh:
         self.api = api or StarkMeshAPI(app)
         self.clock = clock
         self._fresh = Fresh(self._read, AHEAD, STALE, clock=clock, spawn=spawn, name="StarkMesh")
+        # (the newest read that came in, when a read last failed or None once one is in again), for usage.query: one
+        # tuple, set at once and read at once, so a read coming in between never pairs the old read with no failure
+        self.state: Tuple[Optional[Snapshot], Optional[float]] = (None, None)
 
     @property
     def configured(self) -> bool:
@@ -232,13 +319,33 @@ class StarkMesh:
         except NotYet:
             raise StarkMeshError("正在读取 StarkMesh，稍后自动刷新", "loading")
 
+    @property
+    def failed_at(self) -> Optional[float]:
+        return self.state[1]
+
+    @property
+    def last_read(self) -> Optional[Snapshot]:
+        return self.state[0]
+
     def _read(self) -> Snapshot:
+        # reads take turns (Fresh's lock), so the failure below changes a state no other read is changing
+        try:
+            snap = self._read_once()
+        except Exception:
+            self.state = (self.state[0], self.clock())
+            raise
+        self.state = (snap, None)
+        return snap
+
+    def _read_once(self) -> Snapshot:
         accounts: List[dict] = []
         seen = set()
         total = 0
+        full = False  # whether the last page read was full (more may follow)
         for page in range(1, ACCOUNT_PAGES + 1):  # every page, each account once (a gateway may ignore page)
-            data = self.api.call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": 200}) or {}
+            data = self.api.call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": PAGE_SIZE}) or {}
             items = [a for a in (data.get("items") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+            full = len(items) >= PAGE_SIZE
             new = []
             for a in items:  # each id once, within a page too
                 if str(a.get("id")) not in seen:
@@ -246,21 +353,28 @@ class StarkMesh:
                     new.append(a)
             accounts += new
             total = int(data.get("total") or 0) if isinstance(data, dict) else 0
-            if not new or (total and len(accounts) >= total) or (not total and len(items) < 200):
+            if not new or (total and len(accounts) >= total) or (not total and len(items) < PAGE_SIZE):
                 break
+        cut = not total and full  # the last page read was full (or repeated a full one) and no count said: maybe more
         ids = [int(a["id"]) for a in accounts if str(a.get("platform") or "") == "anthropic" and a.get("id") is not None]
         usage: Dict[str, dict] = {}
+        failed_ids: set = set()
         missed = 0
-        for i in range(0, len(ids), 200):  # the usage of every account, 200 at a time; a batch that fails is passed
+        for i in range(0, len(ids), USAGE_BATCH):  # the usage of every account, a batch at a time; one that fails is passed
             try:
                 got = self.api.call("POST", "/api/v1/admin/accounts/usage/batch",
-                                    body={"account_ids": ids[i:i + 200], "force": False, "refresh_claude": False}) or {}
+                                    body={"account_ids": ids[i:i + USAGE_BATCH], "force": False, "refresh_claude": False}) or {}
             except StarkMeshError as e:
-                if e.kind == "auth" or i == 0 and len(ids) <= 200:
+                if e.kind == "auth" or i == 0 and len(ids) <= USAGE_BATCH:
                     raise
-                missed += len(ids[i:i + 200])
+                missed += len(ids[i:i + USAGE_BATCH])
+                failed_ids.update(str(x) for x in ids[i:i + USAGE_BATCH])
+                if missed >= len(ids):  # not one batch came in: no usage at all is a failed read, not an empty one
+                    raise
                 continue
             usage.update({str(k): v for k, v in (got.get("usage") or {}).items() if isinstance(v, dict)})
+            if isinstance(got.get("errors"), dict):  # a batch that answered may still miss some accounts
+                failed_ids.update(str(k) for k in got["errors"])
         try:
             stats = self.api.call("GET", "/api/v1/admin/dashboard/stats") or {}
         except StarkMeshError as e:
@@ -270,6 +384,8 @@ class StarkMesh:
         snap = Snapshot(accounts, usage, stats if isinstance(stats, dict) else {}, self.clock())
         snap.total = max(total, len(accounts))  # the gateway's count, when it said one beyond what was read
         snap.usage_missed = missed  # accounts whose usage a failed batch left out
+        snap.usage_failed = failed_ids - set(usage)  # accounts the gateway could not say the usage of
+        snap.cut = cut
         return snap
 
 
@@ -353,10 +469,14 @@ class StarkMeshPage(Page):
             if not isinstance(w, dict):
                 continue
             left = max(0.0, min(100.0, 100.0 - float(w.get("utilization") or 0.0)))
-            t = _ts(w.get("resets_at"))
+            t = reset_of(a, key, w)
             if not t and w.get("remaining_seconds"):
                 t = s.now + float(w["remaining_seconds"])
-            if t:
+            if renewed(u, key, t, s.now):  # started again since the snapshot (Snapshot.window counts it so too)
+                left, reset = 100.0, "已重置" if t else "未开始"
+            elif t and t <= s.now:  # sampled after that reset: the number may be the new period's
+                reset = "重置时间未知"
+            elif t:
                 reset = _dt.datetime.fromtimestamp(t, self.app.tz).strftime("%m/%d %H:%M")
             else:  # a window with no reset time has not started: nothing used in it yet
                 reset = "未开始" if left >= 100.0 else "重置时间未知"
@@ -501,6 +621,129 @@ class StarkMeshPage(Page):
                                                      money(st.get("today_actual_cost", st.get("today_cost")))))
         return "\n".join(lines)
 
+    def usage(self, params: dict) -> dict:
+        """usage.query (contributes.usage): the sidebar's usage bars. The pool is one Claude account whose windows are the
+        page's 号 as a percentage: what the usable Claude accounts have used together. Not one row per account: the strip
+        draws the two tightest accounts, which would be the two most used accounts, not what is left to work with.
+
+        Whatever launcher the usage source names: Claude Code reaches StarkMesh outside Persona's launchers, so no
+        launcher has its address; neither that launcher's gateway nor its key (usage.http) is used. The StarkMesh read is
+        this extension's own, with its read-only admin key. A read that failed, or one that missed some accounts' usage,
+        is an error, so the manager keeps the last answer, faded, rather than drawing a part of the pool as the whole."""
+        from openmate_core.wire import RPCError
+
+        say = USAGE_TEXT.get(str(params.get("lang") or "").split("-")[0].lower(), USAGE_TEXT["zh"])
+        pool: Dict[str, Any] = {"id": USAGE_POOL, "provider": "claude", "name": say["name"]}
+        if not self.mesh.configured:
+            pool["notice"] = say["setup"]
+            return {"accounts": [pool]}
+        try:
+            s = self.mesh.read(USAGE_WAIT)
+        except StarkMeshError as e:
+            raise RPCError(e.message, "busy" if e.kind == "loading" else "unavailable")
+        newer, failed = self.mesh.state  # at once; reads take turns, so it is the newest that came in (not by the clock)
+        if newer is not None:
+            s = newer
+        if failed is not None:  # the newest read failed: this one is what was, not what is (told by the state, not the clock)
+            raise RPCError("StarkMesh 读不到，留着的是 %s 的数据" % when(s.now, self.app.tz), "unavailable")
+        now = self.mesh.clock()  # as of this query (its clock, even one set back since the read): resets, rate limits
+        live = lambda a: not expired(a, now)  # noqa: E731
+        ok = [a for a in s.claude if usable(a, now) and live(a)]
+        subs = [a for a in ok if str(a.get("type") or "") in SUBSCRIPTION_TYPES]  # the ones with windows
+        total = getattr(s, "total", len(s.accounts))
+        partial = (say["partial"].format(read=len(s.accounts), total=total) if total > len(s.accounts) else
+                   say["first"].format(read=len(s.accounts)) if getattr(s, "cut", False) else "")
+        pool["sampled_at"] = _iso(s.now)
+        if partial:  # a part of the pool is not the pool: no bars (the collapsed strip draws a bar without its words)
+            pool["headline"] = say["usable"].format(ok=len(ok), all=len(s.claude)) + partial
+            pool["notice"] = say["incomplete"] + partial
+            return {"accounts": [pool]}
+        missing = [a for a in subs if str(a.get("id")) in getattr(s, "usage_failed", ())]
+        if missing:
+            raise RPCError("有 %d 个号的用量这次没读到" % len(missing), "unavailable")
+        tz = _zone(params.get("tz")) or self.app.tz
+        windows, soonest = [], None
+        cover = []  # (window, counted, of): a bar that counts fewer accounts than could be in it, said in the headline
+        for key, label, model in USAGE_WINDOWS:
+            keep = live if key != "seven_day_fable" else (lambda a: live(a) and not fable_blocked(a, now))
+            w = s.window(key, now, keep)
+            if w is None:
+                if key in ("five_hour", "seven_day") and subs:  # none of them has a number for it: said too
+                    cover.append((say["w_" + key], len(subs)))
+                continue
+            if key in ("five_hour", "seven_day") and w["of"] < len(subs):  # some have no number for it: the bar would be
+                cover.append((say["w_" + key], len(subs) - w["of"]))  # some accounts' (maybe the least used), left out
+                continue
+            if key == "five_hour" and w["reset"]:
+                soonest = now + w["reset"]
+            note = say["left"].format(of=w["of"], left=w["left"])
+            if w["reset"]:
+                note += say["soonest"].format(at=clock_at(now + w["reset"], now, tz))
+            out: Dict[str, Any] = {"label": label, "used_percent": 100.0 * (1.0 - min(1.0, max(0.0, w["ratio"]))),  # unrounded:
+                                   "note": note}  # the web's warning lines (5%, 20% left) are read from it
+            if model:
+                out["model"] = model
+            if w["dated"] and w["last"] and w["last"] - w["reset"] <= 60:  # every counted account resets together: one end
+                out["resets_at"] = _iso(now + w["last"], up=True)  # (staggered or undated: none; the headline: the soonest)
+            windows.append(out)
+        pool["headline"] = (say["usable"].format(ok=len(ok), all=len(s.claude))
+                            + (say["soon5h"].format(at=clock_at(soonest, now, tz)) if soonest else "")
+                            + "".join(say["cover"].format(window=n, miss=m) for n, m in cover))
+        if windows:
+            pool["windows"] = windows
+        else:  # the sidebar shows the notice rather than the headline (with subscriptions, cover says which bars went)
+            pool["notice"] = (say["no_claude"] if not s.claude else say["none_usable"] if not ok else
+                              say["no_subscription"] if not subs else
+                              say["gaps"] + "".join(say["cover"].format(window=n, miss=m) for n, m in cover))
+        return {"accounts": [pool]}
+
+
+def _zone(name):
+    """The time zone of usage.query's tz (an IANA name), or None for none or one this Python does not know."""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(str(name))
+    except Exception:
+        return None
+
+
+def clock_at(t: float, now: float, tz) -> str:
+    """t as a clock time in tz: 15:40 today, 11/27 15:40 another day. A time, not a countdown: the bars keep an answer
+    until the next poll, and "in 1 minute" would be wrong by then."""
+    at, today = _dt.datetime.fromtimestamp(t, tz), _dt.datetime.fromtimestamp(now, tz)
+    return at.strftime("%H:%M") if at.date() == today.date() else at.strftime("%m/%d %H:%M")
+
+
+# the usage bars' words, by the query's lang (zh-Hans, en, ja; any other: Chinese, as the rest of the extension)
+USAGE_TEXT = {
+    "zh": {"name": "StarkMesh 号池", "usable": "可用 Claude 号 {ok}/{all}", "partial": "（只读到 {read}/{total} 个号）",
+           "first": "（只读了前 {read} 个号）", "incomplete": "号没有读全，额度条不画，详情看中转站页",
+           "left": "{of} 个可用号合计剩 {left:.2f} 号", "soonest": "，最早 {at} 有号重置",
+           "setup": "还没有接上 StarkMesh：在飞书（OpenMate）扩展的设置里填 StarkMesh 地址和只读管理密钥",
+           "no_claude": "读到的号里没有 Claude 号",
+           "no_subscription": "能用的 Claude 号都不是订阅号（API Key、Bedrock、Vertex 这类），没有 5 小时和每周额度",
+           "soon5h": "，5 小时最早 {at} 有号重置", "cover": "，{window}有 {miss} 个号没有快照，不画", "gaps": "有号还没有用量快照，额度条先不画", "w_five_hour": "5 小时", "w_seven_day": "每周",
+           "none_usable": "Claude 号现在都用不了（限流、暂停调度、凭据过期或出错），详情看中转站页"},
+    "en": {"name": "StarkMesh pool", "usable": "{ok} of {all} Claude accounts usable", "partial": " (read {read} of {total} accounts)",
+           "first": " (read the first {read} accounts only)", "incomplete": "Not every account was read, so no bars: see the 中转站 page",
+           "left": "{left:.2f} of {of} usable accounts left", "soonest": "; the first resets at {at}",
+           "setup": "StarkMesh is not set up: add its address and read-only admin key in the OpenMate Feishu extension's settings",
+           "no_claude": "No Claude account among the accounts read",
+           "no_subscription": "The usable Claude accounts are no subscriptions (API Key, Bedrock, Vertex and the like): no 5-hour or weekly quota",
+           "soon5h": "; first 5-hour reset at {at}", "cover": "; no {window} bar: {miss} without a snapshot", "gaps": "Some accounts have no usage snapshot yet, so no bars", "w_five_hour": "5-hour", "w_seven_day": "weekly",
+           "none_usable": "No Claude account can be used now (rate-limited, paused, expired or failing): see the 中转站 page"},
+    "ja": {"name": "StarkMesh プール", "usable": "使える Claude アカウント {ok}/{all}", "partial": "（{read}/{total} 件だけ読めました）",
+           "first": "（最初の {read} 件だけ読みました）", "incomplete": "全アカウントを読めなかったのでバーは出しません。詳しくは 中转站 ページへ",
+           "left": "使えるアカウント {of} 件で残り {left:.2f} 件分", "soonest": "、最初のリセットは {at}",
+           "setup": "StarkMesh が未設定です：飛書（OpenMate）拡張の設定で StarkMesh のアドレスと読み取り専用の管理キーを入力してください",
+           "no_claude": "読めたアカウントに Claude のものがありません",
+           "no_subscription": "使える Claude アカウントはサブスクリプションではありません（API Key・Bedrock・Vertex など）。5 時間・週の枠がありません",
+           "soon5h": "、5 時間枠の最初のリセットは {at}", "cover": "、{window}は {miss} 件のスナップショットがないので出しません", "gaps": "使用量スナップショットのないアカウントがあるのでバーは出しません", "w_five_hour": "5 時間枠", "w_seven_day": "週枠",
+           "none_usable": "今使える Claude アカウントがありません（レート制限・停止・認証期限切れ・エラー）。詳しくは 中转站 ページへ"},
+}
 
 CARD = "starkmesh-card"
 
