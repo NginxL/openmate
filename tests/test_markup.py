@@ -130,6 +130,16 @@ class SecondReviewTest(unittest.TestCase):
                          [("link", "https://a.com"), ("link", "https://b.com"), ("link", "https://c.com")])
         self.assertFalse(markup.formatted("见 [文档](HTTPS://e.org/d)"), "a link's address in lower case only")
 
+    def test_sixth_review(self):
+        t = "```\r\nabc\r\ndef\r\n```"
+        self.assertEqual(markup.blocks(t)[0].markdown(t), "```\nabc\ndef\n```")
+        self.assertEqual([(r.kind, r.url) for r in markup.inline("[A](https://a.org)和https://b.org/?q=[B](https://c.org)")],
+                         [("link", "https://a.org"), ("text", ""), ("url", "https://b.org/?q=[B](https://c.org)")])
+        self.assertFalse(markup.formatted('"[x](\u0004)"'), "a mark written in the text is none of the masks")
+        name = "@A`B\n\n`@A`B`"
+        md = markup.blocks(markup.without_names(name, ["A`B"]))[1].markdown(name)
+        self.assertEqual(md, "``@A`B``", "code fenced by more backticks than are in it")
+
     def test_words_that_stay_words(self):
         for text in ("*****", '![**map**](map.png "Map")'):
             self.assertFalse(markup.formatted(text), text)

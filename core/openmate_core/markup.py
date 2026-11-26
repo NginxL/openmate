@@ -38,6 +38,8 @@ URL_TAIL = ".,:;!?*"
 MASK = "\x01"  # stands for code's words, an address: never markup, wherever the stars are
 IMAGE_MASK = "\x03"  # stands for an image, its text and address: words, never a link
 LINK_MASK = "\x04"  # stands for a link's address (LINK's, http or https in lower case): its link's
+MASKS = (MASK, "\x02", IMAGE_MASK, LINK_MASK)
+SCHEME = re.compile(r"(?i)https?://")
 # on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](its address, masked)
 INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x04+)\)")
 MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|&])")
@@ -63,7 +65,7 @@ class Run(NamedTuple):
 def _masked(line: str) -> str:
     """The line with code's words, images and bare addresses as MASK: what no markup is read in (a "**" in code, in
     an address, closes no bold; an image is no link)."""
-    m = list(line)
+    m = ["\x00" if c in MASKS else c for c in line]  # (a mark written in the text is none of these)
 
     def blank(a: int, b: int, mark: str = MASK) -> None:
         m[a:b] = mark * (b - a)
@@ -76,8 +78,14 @@ def _masked(line: str) -> str:
     once = "".join(m)
     # a bare address that starts outside any "[words](address)" and runs through one keeps it: the link is in its words
     candidates = [(x.start(), x.end()) for x in LINK.finditer(once)]
-    bare = [(u.start(), u.start() + len(_trim_url(u.group()))) for u in URL.finditer(once)
-            if not any(a <= u.start() < b for a, b in candidates)]
+    bare: List[Tuple[int, int]] = []
+    for st in SCHEME.finditer(once):  # each address from its own start (one inside a link takes none after it)
+        p = st.start()
+        if any(a <= p < b for a, b in candidates) or (bare and p < bare[-1][1]):
+            continue
+        u = URL.match(once, p)
+        if u:
+            bare.append((p, p + len(_trim_url(u.group()))))
     hidden = list(once)  # the links whole as MASK: no bare address starts in one, nor runs on from one
     for x in LINK.finditer(once):
         if any(a < x.start() < b for a, b in bare):
@@ -148,8 +156,10 @@ def _md_line(runs: List[Run]) -> str:
     for bold, group in itertools.groupby(runs, key=lambda r: r.bold):
         parts = []
         for r in group:
-            if r.kind == "code":
-                parts.append("`%s`" % r.words)
+            if r.kind == "code":  # (fenced by more backticks than any run in its words)
+                ticks = "`" * (max([len(t) for t in re.findall(r"`+", r.words)] + [0]) + 1)
+                pad = " " if r.words.startswith("`") or r.words.endswith("`") else ""
+                parts.append("%s%s%s%s%s" % (ticks, pad, r.words, pad, ticks))
             elif r.kind == "link":
                 parts.append("[%s](%s)" % (_md_escape(r.words), r.url.replace("&", "\\&")))  # (no entity: "&copy;")
             elif r.kind == "url":
@@ -203,7 +213,10 @@ class Block(dict):
         runs'."""
         k = self.kind
         if k == "code":
-            body = self["body"] if src is None else src[self["body_at"]:self["body_at"] + len(self["body"])]
+            body = self["body"]
+            if src is not None:  # (as written: a name in it too; a CRLF as an LF, as the body reads)
+                body = "\n".join(line[:-1] if line.endswith("\r") else line
+                                  for line in src[self["body_at"]:self["body_end"]].split("\n")) if body else ""
             ticks = max([len(t) for t in re.findall(r"`{3,}", body)] + [2]) + 1  # a fence the body never closes
             return "%s%s\n%s%s%s" % ("`" * ticks, self.get("lang") or "", body, "\n" if body else "", "`" * ticks)
         # a line of only - = * _ is words, in a quote or a list too (never a heading's underline)
@@ -254,7 +267,8 @@ def blocks(text: str) -> List[Block]:
             body = "\n".join(lines[i + 1:j])
             last = min(j, n - 1)  # not closed: it runs to the end
             out.append(Block(kind="code", lang=fence.group(2).lower(), body=body, start=offs[i], end=end_of(last),
-                             body_at=offs[i + 1] if i + 1 < n else end_of(i)))
+                             body_at=offs[i + 1] if i + 1 < n else end_of(i),
+                             body_end=(offs[j] - 1) if j < n else len(text or "")))
             i = j + 1
             continue
         if not line.strip():
