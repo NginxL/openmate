@@ -77,6 +77,7 @@ KEEP = 7 * 86400.0  # what the channel remembers of its messages
 REFS_KEEP = 30 * 86400.0  # a ref's account: as long as the send journal keeps the ref
 MAIN = {"reply_to": "", "root": "", "to_chat": False}
 PICTURE = "\x00picture"  # outgoing's words for a picture being sent: its echo is a line of type IMAGE
+POSTED = "\x00post:"  # before outgoing's words for a formatted text: its echo is a POST (a typed TEXT of them is the user's)
 PICTURE_WINDOW = 120.0  # a picture sent whose outcome is not known stands for its echo this long from its start
 
 
@@ -374,19 +375,20 @@ class ChannelBridge:
     # ---------------------------------------------------------------- the program's own sends
 
     def outgoing(self, chat_id: str, text: str, message_id: Optional[str] = None, failed: bool = False,
-                 picture: bool = False) -> None:
+                 picture: bool = False, post: bool = False) -> None:
         """Something this program sends into a chat as the user (any send: the channel's, a tool's, an inbox reply):
         its echo in the channel chat is never a line of the user's. Called before the send with its text; after it
         with its id (known by that from then on; without one the text stands for it a while), or failed (surely not
         sent: the text stands for nothing). picture: a picture, whose echo (a line of type IMAGE, which may come
-        before its id is known) a picture being sent stands for."""
+        before its id is known) a picture being sent stands for. post: a formatted text, whose echo is a POST (a line
+        of the user's typed as TEXT with the same words is theirs)."""
         if not self.declared or chat_id != self.chat():
             return  # only the channel chat's lines are read as the user's
         if message_id and self.app.store is not None:  # known by its id first, then the text stands for it no more
             self.app.store.channel_msg_put(chat_id, message_id, "echo", owner=getattr(self.app, "_owner", ""))
         if picture and not self.declares_images_out:
             return  # a picture stands for its echo only where the channel sends some (WeChat's: by its id, as before)
-        key = (chat_id, PICTURE if picture else (text or "").strip())
+        key = (chat_id, PICTURE if picture else (POSTED if post else "") + (text or "").strip())
         now = time.monotonic()
         with self._mu:
             for k in [k for k, v in self._outs.items() if all(now - at > ECHO_WINDOW for at in v)]:
@@ -405,7 +407,8 @@ class ChannelBridge:
             return True
         now = time.monotonic()
         picture = (row.get("type") or "").upper() == "IMAGE"
-        said = PICTURE if picture else (row.get("text") or "").strip()
+        posted = (row.get("type") or "").upper() == "POST"
+        said = PICTURE if picture else (POSTED if posted else "") + (row.get("text") or "").strip()
         window = PICTURE_WINDOW if picture else ECHO_WINDOW  # a picture's echo comes within moments, or not at all
         with self._mu:
             return any(now - at < window for at in self._outs.get((chat, said), ()))

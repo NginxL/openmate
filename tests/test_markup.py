@@ -121,6 +121,14 @@ class SecondReviewTest(unittest.TestCase):
         self.assertFalse(markup.formatted("@**Ops** thanks", ["**Ops**"]), "a name is never markup")
         self.assertTrue(markup.formatted("@**Ops** **thanks**", ["**Ops**"]))
 
+    def test_fourth_review(self):
+        self.assertFalse(markup.formatted("https://example.org/search?q=[guide](https://docs.example.org)"),
+                         "a link inside a bare address is its words")
+        for text in ("**x** ![tile](icon.png)https://example.org/@Ann", "**x** HTTPS://example.org/@Ann"):
+            self.assertTrue(any(a <= text.index("@Ann") < b for a, b in markup.no_mentions(text)), text)
+        self.assertEqual([(r.kind, r.words) for r in markup.inline("见 [文档](HTTPS://e.org/d)")],
+                         [("text", "见 "), ("link", "文档")])
+
     def test_words_that_stay_words(self):
         for text in ("*****", '![**map**](map.png "Map")'):
             self.assertFalse(markup.formatted(text), text)

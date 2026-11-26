@@ -343,6 +343,7 @@ class AgentRunner:
         self._last_prune = 0.0
         self._posted: Dict[str, float] = {}  # hashes of what /agent posted lately: their echoes are never requests
         self._own: Dict[tuple, List[float]] = {}  # a tool's formatted sends (own_send): their echoes are none either
+        self._own_gen = 0  # one more at each forget: a send's end from the account before is none of the next one's
         self._asked: Dict[str, float] = {}  # run id → when its session's status was last asked
         self._handing: Dict[str, tuple] = {}  # run id → (chat, thread, asked at) of a follow-up being handed to an Agent
         self._handed = threading.Condition(self._mu)
@@ -465,13 +466,18 @@ class AgentRunner:
                 del self._posted[k]
             return self._digest(text) in self._posted
 
-    def own_send(self, chat_id: str, words: str, message_id: str = "", failed: bool = False) -> None:
+    def own_send(self, chat_id: str, words: str, message_id: str = "", failed: bool = False,
+                 gen: Optional[int] = None) -> int:
         """A formatted send of a tool's into the chat, known by the words it reads back as ("> /stop" reads "/stop",
         "**/agent** x" reads "/agent x"), so its echo is never a request or a stop: before the send (words alone),
         after it (its message id: the words stand for it no more, so the user's own line of the same words there is
-        theirs), or failed (surely not sent: they stand for nothing). Only in that chat, at most 10 minutes."""
+        theirs), or failed (surely not sent: they stand for nothing). Only in that chat, at most 10 minutes. Returns
+        the account's generation before the send; its end passes it back (gen), and one from before another account
+        signed in (forget) changes nothing of the new one's."""
         key = (chat_id, self._digest(words))
         with self._mu:
+            if gen is not None and gen != self._own_gen:
+                return self._own_gen
             self._prune_own()
             if message_id:
                 self._own_pop(key)
@@ -480,6 +486,7 @@ class AgentRunner:
                 self._own_pop(key)
             else:
                 self._own.setdefault(key, []).append(time.time())
+            return self._own_gen
 
     def _own_pop(self, key) -> None:
         sends = self._own.get(key) or []
@@ -535,6 +542,7 @@ class AgentRunner:
         with self._mu:
             self._posted.clear()
             self._own.clear()  # (the formatted sends of the account before: their echoes are none of this one's)
+            self._own_gen += 1
             self._handing.clear()  # that account's follow-ups being handed on hold up none of the next one's
             self._handed.notify_all()
 

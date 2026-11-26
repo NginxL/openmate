@@ -1640,10 +1640,9 @@ class ConnectorApp:
                 heard = self.backend.formatted_words(text, list(mentions or ())) or text
             except Exception:
                 heard = text
-        if agent is not None:
-            agent.own_send(chat_id, heard)
-        if self.channel is not None:
-            self.channel.outgoing(chat_id, heard)  # its echo in the 渠道's chat is no line of the user's
+        gen = agent.own_send(chat_id, heard) if agent is not None else None
+        if self.channel is not None:  # its echo in the 渠道's chat is no line of the user's (a formatted one: a POST)
+            self.channel.outgoing(chat_id, heard, post=rich)
         # only when set: a backend that never reads "thread_chat" or takes no @s need not know the words
         extra: Dict[str, Any] = {}
         if to_chat and root:
@@ -1656,14 +1655,14 @@ class ConnectorApp:
             mid = self.backend.send(chat_id, text, reply_to or None, root or None, **extra)
         except SendRejected:
             if self.channel is not None:
-                self.channel.outgoing(chat_id, heard, failed=True)  # surely not sent: its text stands for nothing
+                self.channel.outgoing(chat_id, heard, failed=True, post=rich)  # surely not sent: it stands for nothing
             if agent is not None:
-                agent.own_send(chat_id, heard, failed=True)
+                agent.own_send(chat_id, heard, failed=True, gen=gen)
             raise
         if self.channel is not None:
-            self.channel.outgoing(chat_id, heard, str(mid or ""))  # known by its id from now on
+            self.channel.outgoing(chat_id, heard, str(mid or ""), post=rich)  # known by its id from now on
         if agent is not None and mid:
-            agent.own_send(chat_id, heard, str(mid))
+            agent.own_send(chat_id, heard, str(mid), gen=gen)
         return mid
 
     def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "",

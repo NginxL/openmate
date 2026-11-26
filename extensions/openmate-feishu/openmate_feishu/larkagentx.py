@@ -588,13 +588,10 @@ def post_tree(text: str, spans) -> _Tree:
     words (inside code, a link, across markup): it cannot be made as written."""
     t = _Tree()
     left = sorted(spans or (), key=lambda s: s[2])
-    # each @'s name is one piece, whatever it is made of ("Sam`ops", "**x**" are names, never markup): the blocks are
-    # read with the names masked, and every run of words is taken from the text itself
-    masked = list(text)
-    for _, name, at in left:
-        if 0 <= at and at + 1 + len(name) <= len(text):
-            masked[at + 1:at + 1 + len(name)] = "\x02" * len(name)
-    bs = markup.blocks("".join(masked))
+    # each @'s name is one piece wherever it is written, whatever it is made of ("Sam`ops", "**x**" are names, never
+    # markup): the blocks are read with the names masked (as the card and the placing read them: without_names), and
+    # every run of words is taken from the text itself
+    bs = markup.blocks(markup.without_names(text, [name for _, name, _ in left]))
     used: Set[int] = set()
 
     def runs(line) -> List[str]:

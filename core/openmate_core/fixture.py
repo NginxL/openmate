@@ -489,7 +489,8 @@ class FixtureBackend(Backend):
             raise BackendError("发送超时", "unreachable")
         if chat_id not in w.chats:
             raise SendRejected("没有这个会话")
-        m = w.push(chat_id, "me", text, parent_id=reply_to or "", root_id=root or "")
+        extra = {"type": "POST"} if rich else {}  # (a formatted one comes back as a POST, as Feishu's does)
+        m = w.push(chat_id, "me", text, parent_id=reply_to or "", root_id=root or "", **extra)
         with w.lock:
             w.sent.append({"chat": chat_id, "text": text, "reply_to": reply_to, "root": root, "to_chat": to_chat,
                            "id": m.id, "mentions": list(mentions or []), "rich": rich})

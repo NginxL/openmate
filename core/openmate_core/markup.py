@@ -26,16 +26,17 @@ NUMBERED = re.compile(r"^[ \t]*(\d{1,9})[.)][ \t]+(\S.*?)[ \t]*$")
 SETEXT = re.compile(r"^[-=*_][-=*_ \t]*$")
 RULE = re.compile(r"^ {0,3}([-*_])([ \t]*\1){2,}[ \t]*$")  # "---", "* * *": words as written, never a list
 CODE_SPAN = re.compile(r"`[^`\n]+`")
-_TARGET = r"(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round brackets may be in an address
+_TARGET = r"((?i:https?)://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round brackets may be in an address
 LINK = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\(" + _TARGET + r"\)")
 # an image, its title too: words as written, never a link
 IMAGE = re.compile(r"!\[[^\[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)")
 # a bare address: up to a space, a quote, <, >, ` or CJK or fullwidth punctuation (Chinese words and fullwidth
 # letters in its path are in it), without the sentence marks and stars at its end ("**see https://x.org**." is
 # bold: _trim_url): as written (the service links it), no markup or @ in it
-URL = re.compile(r"https?://[^\s<>\"'`\x01\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
+URL = re.compile(r"(?i:https?)://[^\s<>\"'`\x01\x03\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
 URL_TAIL = ".,:;!?*"
-MASK = "\x01"  # stands for code's words, an address, an image's text: never markup, wherever the stars are
+MASK = "\x01"  # stands for code's words, an address: never markup, wherever the stars are
+IMAGE_MASK = "\x03"  # stands for an image, its text and address: words, never a link
 # on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](its address, masked)
 INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x01+)\)")
 MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|&])")
@@ -63,17 +64,21 @@ def _masked(line: str) -> str:
     an address, closes no bold; an image is no link)."""
     m = list(line)
 
-    def blank(a: int, b: int) -> None:
-        m[a:b] = MASK * (b - a)
+    def blank(a: int, b: int, mark: str = MASK) -> None:
+        m[a:b] = mark * (b - a)
 
     for c in CODE_SPAN.finditer(line):
         blank(c.start() + 1, c.end() - 1)
     once = "".join(m)
     for x in IMAGE.finditer(once):
-        blank(x.start(), x.end())
+        blank(x.start(), x.end(), IMAGE_MASK)  # (its own mark: never one run with an address beside it)
     once = "".join(m)
+    # a bare address that starts before a "[words](address)" and runs through it keeps it: the link is in its words
+    bare = [(u.start(), u.start() + len(_trim_url(u.group()))) for u in URL.finditer(once)]
     hidden = list(once)  # the links whole as MASK: no bare address starts in one, nor runs on from one
     for x in LINK.finditer(once):
+        if any(a < x.start() < b for a, b in bare):
+            continue
         hidden[x.start():x.end()] = MASK * (x.end() - x.start())
         blank(x.start(2), x.end(2))  # its address is one piece: a "**" in it closes no bold
     for u in URL.finditer("".join(hidden)):
@@ -95,7 +100,7 @@ def _words(line: str, masked: str, a: int, b: int, base: int, bold: bool) -> Lis
     for u in re.finditer(re.escape(MASK) + "+", masked[a:b]):
         ua, ub = a + u.start(), a + u.end()
         if not (URL.fullmatch(line[ua:ub]) and _trim_url(line[ua:ub]) == line[ua:ub]):
-            continue  # (an image's text: words)
+            continue  # (a link's address: in its run)
         if ua > pos:
             out.append(Run("text", line[pos:ua], base + pos, "", bold, base + pos, base + ua))
         out.append(Run("url", line[ua:ub], base + ua, line[ua:ub], bold, base + ua, base + ub))

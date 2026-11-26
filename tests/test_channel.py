@@ -216,7 +216,7 @@ class PicturesOutTest(unittest.TestCase):
 
         backend.send = send_and_look
         mid = h.app.send_as_user(SOLO, "**结论**\n- 一", rich=True)
-        self.assertEqual(seen, [["结论\n一"]])
+        self.assertEqual(seen, [["\x00post:结论\n一"]], "its words, as a POST's (a typed TEXT of them is the user's)")
         self.assertEqual(h.app.store.channel_msg(SOLO, mid)["dir"], "echo")
         self.assertEqual(h.app.channel._outs, {}, "done: known by its id")
         h.app.send_as_user(SOLO, "普通的话")

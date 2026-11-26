@@ -513,9 +513,13 @@ class FormattedSendTest(unittest.TestCase):
                      request_id="req-quoted-stop-2")
         self.assertFalse(agent._own_echo({"chat_id": "chat_example_team", "id": "y", "type": "POST", "text": "/stop"}),
                          "surely not sent: it stands for nothing")
-        agent.own_send("chat_example_team", "/stop")  # an uncertain one: pending, until another account signs in
+        gen = agent.own_send("chat_example_team", "/stop")  # an uncertain one: pending, until another account signs in
         agent.forget()
         self.assertFalse(agent._own_echo({"chat_id": "chat_example_team", "id": "z", "type": "POST", "text": "/stop"}))
+        agent.own_send("chat_example_team", "/stop")  # the next account's own, under way
+        agent.own_send("chat_example_team", "/stop", "late-id", gen=gen)  # the one before's end, late: changes nothing
+        self.assertTrue(agent._own_echo({"chat_id": "chat_example_team", "id": "z2", "type": "POST", "text": "/stop"}))
+        self.assertFalse(agent._own_echo({"chat_id": "chat_example_team", "id": "late-id", "type": "POST", "text": "x"}))
 
     def test_rich_is_refused_where_the_backend_cannot(self):
         from openmate_core.backend import SendRejected

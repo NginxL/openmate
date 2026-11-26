@@ -1165,6 +1165,11 @@ class PostTreeTest(unittest.TestCase):
         self.assertEqual([el[1] for el in els.values() if el[0] == larkagentx.AT_TAG], [("at", "7001", "Sam`ops")])
         self.assertEqual(larkagentx.tree_words(t), "@Sam`ops\nhello")
 
+    def test_a_name_written_twice_is_masked_both_times(self):
+        text = "@A`B @A`B @Ann `test`"
+        t, els = self.tree(text, [("1", "A`B", 0), ("2", "Ann", 10)])
+        self.assertEqual([el[1] for el in els.values() if el[0] == larkagentx.AT_TAG], [("at", "1", "A`B"), ("at", "2", "Ann")])
+
     def test_mentions_must_be_in_words(self):
         with self.assertRaises(ValueError):  # (in a bare address: never split for an @)
             larkagentx.post_tree("**看** https://e.org/@张三", [("7001", "张三", 20)])
