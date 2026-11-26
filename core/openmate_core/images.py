@@ -44,18 +44,19 @@ def kind_of(head: bytes) -> Tuple[str, str]:
     return "", ""
 
 
-def _open_inside(path: str) -> int:
+def _open_inside(path: str, source_dir: str) -> int:
     """The file at path, opened only through a temporary directory: that directory itself, then each name below it,
     one level at a time and never through a link (a directory swapped for a link meanwhile is refused, not followed).
     The open file's descriptor (non-blocking: a pipe never holds the reply)."""
     norm = os.path.normpath(path)
-    for shown, real in roots():
+    allowed = [(source_dir, source_dir)] if source_dir else roots()
+    for shown, real in allowed:
         if os.path.commonpath([norm, shown]) != shown or norm == shown:
             continue
         parts = os.path.relpath(norm, shown).split(os.sep)
         if any(p in ("", ".", "..") for p in parts):
             continue
-        fd = os.open(real, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
             for name in parts[:-1]:
                 nxt = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -69,15 +70,15 @@ def _open_inside(path: str) -> int:
     raise RPCError("图片要放在临时目录里（/tmp 下），其他位置的文件不会发出：%s" % path)
 
 
-def take(path: str, data_dir: str) -> Tuple[str, str, str]:
+def take(path: str, data_dir: str, *, source_dir: str = "") -> Tuple[str, str, str]:
     """(the checked copy's path, its SHA-256, the picture's file name). RPCError, said so the Agent can fix it, when the
     path is not a PNG or JPEG of at most IMAGE_MOST in a temporary directory of this computer (reached without a
-    link)."""
+    link). Only a caller that created its own private temporary directory may supply it as source_dir."""
     path = str(path or "").strip()
     if not path or not os.path.isabs(path):
         raise RPCError("image 要填图片的绝对路径（比如 /tmp/flow.png）")
     try:
-        fd = _open_inside(path)
+        fd = _open_inside(path, source_dir)
     except FileNotFoundError:
         raise RPCError("找不到这个图片文件：%s（图片要在运行扩展的这台电脑上）" % path)
     except OSError as e:

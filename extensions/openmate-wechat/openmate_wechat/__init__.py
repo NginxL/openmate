@@ -139,6 +139,7 @@ def platform(manifest_path: str = "") -> Platform:
         chats_page=CHATS_PAGE,
         chats_card=CHATS_CARD,
         can_edit=False,
+        render_cards=True,
         ack_auto=False,  # someone's @ of the user is answered straight away; /agent keeps its 接单提示
         mark_view=mark_view,
         archive_chat=archive_chat,

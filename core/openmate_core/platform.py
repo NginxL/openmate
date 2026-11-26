@@ -75,6 +75,8 @@ class Platform:
     #: chat lines models read (the messages tool, /agent's context) name it after each message that has some; ""
     #: names nothing (WeChat writes its local paths into the text itself)
     media_tool: str = ""
+    #: /agent can turn structured replies into pictures when the backend sends images but has no rich text.
+    render_cards: bool = False
 
 
 @dataclass

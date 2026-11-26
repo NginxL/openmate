@@ -12,7 +12,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from . import modelimages, views
+from . import cards, modelimages, views
 from .backend import BackendError
 from . import markup
 from .textutil import clip, local_stamp, mention_spans, one_line
@@ -59,8 +59,9 @@ def read_tools(app) -> List[dict]:
 
 def _agent_reply_tool(app, c: str, p: str) -> dict:
     """The /agent reply tool; progress (edited in place) only where the service can edit a message."""
+    words = cards.REPLY_WORDS if cards.enabled(app) else "要回复的内容（纯文本）"
     props = {"request": {"type": "string", "description": "这次 /agent 请求的 id（请求说明里给出）"},
-             "text": {"type": "string", "description": "要回复的内容（纯文本）"}}
+             "text": {"type": "string", "description": words}}
     if getattr(app.platform, "can_edit", True):
         props["progress"] = {"type": "boolean", "description": "true 表示这是中途进度：原地更新同一条进度消息，不另发新消息。最终结果不要带它"}
         what = "可以多次调用发进度，不要编造没做到的事。"
