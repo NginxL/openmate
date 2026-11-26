@@ -342,6 +342,7 @@ class AgentRunner:
         self._thread: Optional[threading.Thread] = None
         self._last_prune = 0.0
         self._posted: Dict[str, float] = {}  # hashes of what /agent posted lately: their echoes are never requests
+        self._own: Dict[tuple, List[float]] = {}  # a tool's formatted sends (own_send): their echoes are none either
         self._asked: Dict[str, float] = {}  # run id → when its session's status was last asked
         self._handing: Dict[str, tuple] = {}  # run id → (chat, thread, asked at) of a follow-up being handed to an Agent
         self._handed = threading.Condition(self._mu)
@@ -464,11 +465,41 @@ class AgentRunner:
                 del self._posted[k]
             return self._digest(text) in self._posted
 
-    def remember_sent(self, words: str) -> None:
-        """Words a send of the user's (a tool's formatted text, read back as its words) is about to show, so its echo
-        is never a request or a stop ("> /stop" reads back as "/stop")."""
+    def own_send(self, chat_id: str, words: str, message_id: str = "", failed: bool = False) -> None:
+        """A formatted send of a tool's into the chat, known by the words it reads back as ("> /stop" reads "/stop",
+        "**/agent** x" reads "/agent x"), so its echo is never a request or a stop: before the send (words alone),
+        after it (its message id: the words stand for it no more, so the user's own line of the same words there is
+        theirs), or failed (surely not sent: they stand for nothing). Only in that chat, at most 10 minutes."""
+        key = (chat_id, self._digest(words))
         with self._mu:
-            self._posted[self._digest(words)] = time.time()
+            self._prune_own()
+            if message_id:
+                self._own_pop(key)
+                self._own[("id", chat_id, str(message_id))] = [time.time()]
+            elif failed:
+                self._own_pop(key)
+            else:
+                self._own.setdefault(key, []).append(time.time())
+
+    def _own_pop(self, key) -> None:
+        sends = self._own.get(key) or []
+        if sends:
+            sends.pop(0)
+        if not sends:
+            self._own.pop(key, None)
+
+    def _prune_own(self) -> None:
+        now = time.time()
+        for k in [k for k, v in self._own.items() if all(now - at > 600 for at in v)]:
+            del self._own[k]
+
+    def _own_echo(self, row: dict) -> bool:
+        """Whether the row is the echo of a tool's formatted send (own_send)."""
+        chat = row.get("chat_id") or ""
+        with self._mu:
+            self._prune_own()
+            return (("id", chat, str(row.get("id") or "")) in self._own
+                    or (chat, self._digest(row.get("text") or "")) in self._own)
 
     def _remember_post(self, body: str, run: Optional[dict] = None) -> bool:
         """What is about to go out, so its echo is never a request; False (nothing remembered, and it must not go out)
@@ -590,7 +621,7 @@ class AgentRunner:
             # the 「Persona 渠道会话」's: handed to Persona's channel flow (channel.py), whether /agent is on or not; its
             # echoes are told by the channel's own record of what was sent there, not /agent's text cache
             return
-        if self._echo(text) or not self.enabled:
+        if self._echo(text) or self._own_echo(row) or not self.enabled:
             return
         if body.lower() in STOP_WORDS:
             self._take_stop(row, epoch)

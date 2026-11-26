@@ -484,11 +484,32 @@ class FormattedSendTest(unittest.TestCase):
         self.assertTrue(card.endswith("——\n@示例同事甲\n\n跑 `make test`"), card)
         self.assertNotIn("按原样显示", card)
 
-    def test_the_words_a_formatted_send_reads_back_as_are_no_request(self):
+    def test_the_words_a_formatted_send_reads_back_as_are_no_request_there_only(self):
+        agent = self.h.app.agent
         self.h.app.backend.formatted_words = lambda text, mentions: "/stop"  # ("> /stop" reads back so)
-        self.h.c("actions.do", name=CID + "_send", args={"chat": "chat_example_team", "text": "> /stop"},
-                 request_id="req-quoted-stop")
-        self.assertTrue(self.h.app.agent._echo("/stop"), "its echo is never a stop of /agent's")
+        seen = []
+        real = self.h.app.backend.send
+
+        def send(chat, text, *a, **kw):
+            seen.append(agent._own_echo({"chat_id": chat, "id": "echo-first", "text": "/stop"}))  # before its id
+            return real(chat, text, *a, **kw)
+
+        self.h.app.backend.send = send
+        res = self.h.c("actions.do", name=CID + "_send", args={"chat": "chat_example_team", "text": "> /stop"},
+                       request_id="req-quoted-stop")
+        mid = self.h.sent()[-1]["id"]
+        self.assertEqual(seen, [True], "its echo before its id is known: no stop")
+        self.assertTrue(agent._own_echo({"chat_id": "chat_example_team", "id": mid, "text": "/stop"}), "by its id after")
+        self.assertFalse(agent._own_echo({"chat_id": "chat_example_team", "id": "later", "text": "/stop"}),
+                         "the user's own /stop there afterwards is theirs")
+        self.assertFalse(agent._own_echo({"chat_id": "chat_example_dm_a", "id": "x", "text": "/stop"}), "nor elsewhere")
+        self.assertTrue(res["text"])
+        self.h.world.send_fail = "rejected"
+        with self.assertRaises(HubSideError):
+            self.h.c("actions.do", name=CID + "_send", args={"chat": "chat_example_team", "text": "> /stop"},
+                     request_id="req-quoted-stop-2")
+        self.assertFalse(agent._own_echo({"chat_id": "chat_example_team", "id": "y", "text": "/stop"}),
+                         "surely not sent: it stands for nothing")
 
     def test_rich_is_refused_where_the_backend_cannot(self):
         from openmate_core.backend import SendRejected

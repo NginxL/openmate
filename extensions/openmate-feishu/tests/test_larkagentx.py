@@ -1159,6 +1159,12 @@ class PostTreeTest(unittest.TestCase):
         para = [els[k][1] for k in els[els[t.root][2][0]][2]]
         self.assertEqual(para, [("at", "7001", "张三"), ("text", " 改了 "), ("text", "`a.py`")], "the code as written")
 
+    def test_a_name_is_one_piece_whatever_it_is_made_of(self):
+        text = "@Sam`ops\n\n**hello**"
+        t, els = self.tree(text, [("7001", "Sam`ops", 0)])
+        self.assertEqual([el[1] for el in els.values() if el[0] == larkagentx.AT_TAG], [("at", "7001", "Sam`ops")])
+        self.assertEqual(larkagentx.tree_words(t), "@Sam`ops\nhello")
+
     def test_mentions_must_be_in_words(self):
         with self.assertRaises(ValueError):
             larkagentx.post_tree("[@张三](https://example.com/x)", [("7001", "张三", 1)])

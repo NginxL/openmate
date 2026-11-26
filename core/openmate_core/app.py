@@ -1631,16 +1631,17 @@ class ConnectorApp:
             raise SendRejected("%s这里不能 @人" % self.platform.name)
         if rich and not getattr(self.backend, "can_format", False):
             raise SendRejected("%s这里不能发带格式的消息" % self.platform.name)
-        # what its echo will read: a formatted text reads as its words (the backend says them), not as written; those
-        # words are never a request or a stop of /agent's ("> /stop" reads back as "/stop")
+        # what its echo will read: a formatted text reads as its words (the backend says them), not as written; its
+        # echo is never a request or a stop of /agent's ("> /stop" reads back as "/stop": agent.own_send)
         heard = text
+        agent = self.agent if rich else None
         if rich:
             try:
                 heard = self.backend.formatted_words(text, list(mentions or ())) or text
             except Exception:
                 heard = text
-            if heard != text and self.agent is not None:
-                self.agent.remember_sent(heard)
+        if agent is not None:
+            agent.own_send(chat_id, heard)
         if self.channel is not None:
             self.channel.outgoing(chat_id, heard)  # its echo in the 渠道's chat is no line of the user's
         # only when set: a backend that never reads "thread_chat" or takes no @s need not know the words
@@ -1656,9 +1657,13 @@ class ConnectorApp:
         except SendRejected:
             if self.channel is not None:
                 self.channel.outgoing(chat_id, heard, failed=True)  # surely not sent: its text stands for nothing
+            if agent is not None:
+                agent.own_send(chat_id, heard, failed=True)
             raise
         if self.channel is not None:
             self.channel.outgoing(chat_id, heard, str(mid or ""))  # known by its id from now on
+        if agent is not None and mid:
+            agent.own_send(chat_id, heard, str(mid))
         return mid
 
     def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "",

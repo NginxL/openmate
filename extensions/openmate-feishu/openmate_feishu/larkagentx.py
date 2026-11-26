@@ -587,8 +587,14 @@ def post_tree(text: str, spans) -> _Tree:
     (mention_spans' with markup.no_mentions skipped). ValueError when it has no words, or an @ is not in a run of
     words (inside code, a link, across markup): it cannot be made as written."""
     t = _Tree()
-    bs = markup.blocks(text)
     left = sorted(spans or (), key=lambda s: s[2])
+    # each @'s name is one piece, whatever it is made of ("Sam`ops", "**x**" are names, never markup): the blocks are
+    # read with the names masked, and every run of words is taken from the text itself
+    masked = list(text)
+    for _, name, at in left:
+        if 0 <= at and at + 1 + len(name) <= len(text):
+            masked[at + 1:at + 1 + len(name)] = "\x02" * len(name)
+    bs = markup.blocks("".join(masked))
     used: Set[int] = set()
 
     def runs(line) -> List[str]:

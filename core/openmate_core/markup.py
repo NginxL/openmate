@@ -28,16 +28,18 @@ RULE = re.compile(r"^ {0,3}([-*_])([ \t]*\1){2,}[ \t]*$")  # "---", "* * *": wor
 CODE_SPAN = re.compile(r"`[^`\n]+`")
 _TARGET = r"(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round brackets may be in an address
 LINK = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\(" + _TARGET + r"\)")
-IMAGE = re.compile(r"!\[[^\[\]\n]*\]\([^\s()]*(?:\([^\s()]*\)[^\s()]*)*\)")  # words as written, never a link
-# a bare address (ASCII but space, quotes, <, > and `; stars inside it, not at its end, so "**see https://x**" is
-# bold): as written (the service links it), no markup or @ in it
-_URL_CHAR = r"\x21\x23-\x26\x28-\x29\x2b-\x3b\x3d\x3f-\x5f\x61-\x7e"
-URL = re.compile(r"https?://[%s*]*[%s]" % (_URL_CHAR, _URL_CHAR))
-# on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](address)
-INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|" + LINK.pattern)
-MASK = "\x01"  # stands for code's words, a bare address, an image's text: never markup, wherever the stars are
-MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|])")
-MD_LINE_START = re.compile(r"^([#+\-]|\d+[.)])")
+# an image, its title too: words as written, never a link
+IMAGE = re.compile(r"!\[[^\[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)")
+# a bare address: up to a space, a quote, <, >, ` or CJK punctuation (Chinese words in its path are in it), without
+# the sentence marks and stars at its end ("**see https://x.org**." is bold: _trim_url): as written (the service
+# links it), no markup or @ in it
+URL = re.compile("https?://[^\\s<>\"'`　-〿＀-￯]+")
+URL_TAIL = ".,:;!?*"
+MASK = "\x01"  # stands for code's words, an address, an image's text: never markup, wherever the stars are
+# on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](its address, masked)
+INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x01+)\)")
+MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|&])")
+NBSP = " "
 
 FEATURES = (("bold", "粗体"), ("link", "链接"), ("list", "列表"), ("code", "代码"), ("heading", "标题"), ("quote", "引用"))
 
@@ -70,11 +72,21 @@ def _masked(line: str) -> str:
     for x in IMAGE.finditer(once):
         blank(x.start(), x.end())
     once = "".join(m)
-    links = [(x.start(), x.end()) for x in LINK.finditer(once)]
+    links = []
+    for x in LINK.finditer(once):
+        links.append((x.start(), x.end()))
+        blank(x.start(2), x.end(2))  # its address is one piece: a "**" in it closes no bold
     for u in URL.finditer(once):
         if not any(a <= u.start() < b for a, b in links):
-            blank(u.start(), u.end())
+            blank(u.start(), u.start() + len(_trim_url(u.group())))
     return "".join(m)
+
+
+def _trim_url(url: str) -> str:
+    """A bare address without the sentence marks and stars at its end (nor a ")" it does not open)."""
+    while url and (url[-1] in URL_TAIL or (url[-1] == ")" and url.count(")") > url.count("("))):
+        url = url[:-1]
+    return url
 
 
 def _words(line: str, masked: str, a: int, b: int, base: int, bold: bool) -> List[Run]:
@@ -83,7 +95,7 @@ def _words(line: str, masked: str, a: int, b: int, base: int, bold: bool) -> Lis
     pos = a
     for u in re.finditer(re.escape(MASK) + "+", masked[a:b]):
         ua, ub = a + u.start(), a + u.end()
-        if not URL.fullmatch(line[ua:ub]):
+        if not (URL.fullmatch(line[ua:ub]) and _trim_url(line[ua:ub]) == line[ua:ub]):
             continue  # (an image's text: words)
         if ua > pos:
             out.append(Run("text", line[pos:ua], base + pos, "", bold, base + pos, base + ua))
@@ -111,8 +123,8 @@ def inline(line: str, base: int = 0, bold: bool = False, masked: Optional[str] =
             a, b = m.start(2), m.end(2)
             out += inline(line[a:b], base + a, True, masked[a:b])
         else:
-            out.append(Run("link", line[m.start(3):m.end(3)], base + m.start(3), m.group(4), bold, base + m.start(),
-                           base + m.end()))
+            out.append(Run("link", line[m.start(3):m.end(3)], base + m.start(3), line[m.start(4):m.end(4)], bold,
+                           base + m.start(), base + m.end()))
         pos = m.end()
     if pos < len(line):
         out += _words(line, masked, pos, len(line), base, bold)
@@ -132,7 +144,7 @@ def _md_line(runs: List[Run]) -> str:
             if r.kind == "code":
                 parts.append("`%s`" % r.words)
             elif r.kind == "link":
-                parts.append("[%s](%s)" % (_md_escape(r.words), r.url))
+                parts.append("[%s](%s)" % (_md_escape(r.words), r.url.replace("&", "\\&")))  # (no entity: "&copy;")
             elif r.kind == "url":
                 parts.append(r.words)
             else:
@@ -145,8 +157,10 @@ def _md_line(runs: List[Run]) -> str:
         out.append(piece)
     line = "".join(out)
     indent = len(line) - len(line.lstrip(" \t"))
-    line = " " * indent + line[indent:]  # an indent kept, never an indented code block
-    return "\\" + line if MD_LINE_START.match(line) else line  # never a list or a heading of its own
+    line = NBSP * indent + line[indent:]  # an indent kept, never an indented code block
+    # never a list or a heading of its own: "1. x" -> "1\. x", "- x" -> "\- x", "## x" -> "\## x" ("1.5" as is)
+    line = re.sub(r"^(\d+)([.)])(?=\s|$)", r"\1\\\2", line)
+    return re.sub(r"^([+-]|#+)(?=\s|$)", r"\\\1", line)
 
 
 class Block(dict):
@@ -161,8 +175,9 @@ class Block(dict):
     number = property(lambda self: int(self.get("number", 1)))  # a numbered list's first number
 
     def runs(self) -> List[List[Run]]:
-        """Each line's runs (a heading's are bold)."""
-        return [inline(words, at, self.kind == "heading") for words, at in self.lines]
+        """Each line's runs (a heading's are bold); a line that is a rule ("*****", "---") is words as written."""
+        return [[Run("text", words, at, "", False, at, at + len(words))] if RULE.match(words)
+                else inline(words, at, self.kind == "heading") for words, at in self.lines]
 
     def has_code(self) -> bool:
         """Whether a line of it has `code`."""
@@ -189,8 +204,10 @@ class Block(dict):
 
 
 def _closes(line: str, fence: str) -> bool:
-    s = line.strip()
-    return len(line) - len(line.lstrip(" ")) <= 3 and len(s) >= len(fence) and s == fence[0] * len(s)
+    """Whether the line closes the fence: up to 3 spaces (no tab), its mark at least as many times, nothing else."""
+    lead = len(line) - len(line.lstrip(" "))
+    s = line[lead:].rstrip()
+    return lead <= 3 and len(s) >= len(fence) and s == fence[0] * len(s)
 
 
 def _starts_block(line: str) -> bool:
@@ -260,9 +277,7 @@ def blocks(text: str) -> List[Block]:
             continue
         got, j = [], i
         while j < n and lines[j].strip() and (j == i or not _starts_block(lines[j])):
-            line = lines[j].rstrip()
-            lead = 0 if j > i else len(line) - len(line.lstrip())  # a later line keeps its indent ("    run()")
-            got.append((line[lead:], offs[j] + lead))
+            got.append((lines[j].rstrip(), offs[j]))  # its indent kept ("    run()")
             j += 1
         out.append(Block(kind="paragraph", lines=got, start=offs[i], end=end_of(j - 1)))
         i = j

@@ -99,6 +99,32 @@ class FormattedTest(unittest.TestCase):
         self.assertEqual(hidden, ["乙", "丙", "戊"])
 
 
+class SecondReviewTest(unittest.TestCase):
+    def test_addresses_end_before_sentence_marks_and_stars(self):
+        self.assertEqual([(r.kind, r.words, r.bold) for r in markup.inline("**See https://example.org**.")],
+                         [("text", "See ", True), ("url", "https://example.org", True), ("text", ".", False)])
+        self.assertEqual([(r.kind, r.words, r.url, r.bold) for r in markup.inline("**[docs](https://e.org/a**b)**")],
+                         [("link", "docs", "https://e.org/a**b", True)], "a link's address is one piece")
+        text = "**看** https://example.org/项目/@Ann，然后 @Ann"
+        out, spans = mention_spans(text, [("1", "Ann")], markup.no_mentions(text), markup.FRONT_END)
+        self.assertEqual(spans[0][2], out.rindex("@Ann"), "Chinese words in a path are in it")
+
+    def test_words_that_stay_words(self):
+        for text in ("*****", '![**map**](map.png "Map")'):
+            self.assertFalse(markup.formatted(text), text)
+        bs = markup.blocks("```\nbefore\n\t```\n@Ann\n```")
+        self.assertEqual([(b.kind, b["body"]) for b in bs], [("code", "before\n\t```\n@Ann")],
+                         "a tab-indented fence closes nothing")
+        bs = markup.blocks("**例子**\n\n    if ready:\n        run()")
+        self.assertEqual([w for w, _ in bs[1].lines], ["    if ready:", "        run()"], "the first line's indent too")
+
+    def test_markdown_escapes_only_what_it_must(self):
+        md = markup.blocks("1.5 ms for `run`\n1. 不是列表 `x`")[0].markdown()
+        self.assertEqual(md, "1.5 ms for `run`")
+        self.assertEqual(markup.blocks("`x` [docs](https://e.org/?q=&copy;) a&amp;b")[0].markdown(),
+                         "`x` [docs](https://e.org/?q=\\&copy;) a\\&amp;b", "no entity is read in words or an address")
+
+
 class CodeAsWrittenTest(unittest.TestCase):
     def test_a_block_with_an_at_and_code(self):
         text = "@甲\n\n跑 `make`\n\n@乙 看 `x`"
