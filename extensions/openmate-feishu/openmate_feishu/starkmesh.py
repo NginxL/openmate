@@ -719,7 +719,7 @@ def clock_at(t: float, now: float, tz) -> str:
 
 # the usage bars' words, by the query's lang (zh-Hans, en, ja; any other: Chinese, as the rest of the extension)
 USAGE_TEXT = {
-    "zh": {"name": "StarkMesh 号池", "usable": "可用 Claude 号 {ok}/{all}", "partial": "（只读到 {read}/{total} 个号）",
+    "zh": {"name": "Claude Code Max", "usable": "可用 Claude 号 {ok}/{all}", "partial": "（只读到 {read}/{total} 个号）",
            "first": "（只读了前 {read} 个号）", "incomplete": "号没有读全，额度条不画，详情看中转站页",
            "left": "{of} 个可用号合计剩 {left:.2f} 号", "soonest": "，最早 {at} 有号重置",
            "setup": "还没有接上 StarkMesh：在飞书（OpenMate）扩展的设置里填 StarkMesh 地址和只读管理密钥",
@@ -727,7 +727,7 @@ USAGE_TEXT = {
            "no_subscription": "能用的 Claude 号都不是订阅号（API Key、Bedrock、Vertex 这类），没有 5 小时和每周额度",
            "soon5h": "，5 小时最早 {at} 有号重置", "cover": "，{window}有 {miss} 个号没有快照，不画", "gaps": "有号还没有用量快照，额度条先不画", "w_five_hour": "5 小时", "w_seven_day": "每周",
            "none_usable": "Claude 号现在都用不了（限流、暂停调度、凭据过期或出错），详情看中转站页"},
-    "en": {"name": "StarkMesh pool", "usable": "{ok} of {all} Claude accounts usable", "partial": " (read {read} of {total} accounts)",
+    "en": {"name": "Claude Code Max", "usable": "{ok} of {all} Claude accounts usable", "partial": " (read {read} of {total} accounts)",
            "first": " (read the first {read} accounts only)", "incomplete": "Not every account was read, so no bars: see the 中转站 page",
            "left": "{left:.2f} of {of} usable accounts left", "soonest": "; the first resets at {at}",
            "setup": "StarkMesh is not set up: add its address and read-only admin key in the OpenMate Feishu extension's settings",
@@ -735,7 +735,7 @@ USAGE_TEXT = {
            "no_subscription": "The usable Claude accounts are no subscriptions (API Key, Bedrock, Vertex and the like): no 5-hour or weekly quota",
            "soon5h": "; first 5-hour reset at {at}", "cover": "; no {window} bar: {miss} without a snapshot", "gaps": "Some accounts have no usage snapshot yet, so no bars", "w_five_hour": "5-hour", "w_seven_day": "weekly",
            "none_usable": "No Claude account can be used now (rate-limited, paused, expired or failing): see the 中转站 page"},
-    "ja": {"name": "StarkMesh プール", "usable": "使える Claude アカウント {ok}/{all}", "partial": "（{read}/{total} 件だけ読めました）",
+    "ja": {"name": "Claude Code Max", "usable": "使える Claude アカウント {ok}/{all}", "partial": "（{read}/{total} 件だけ読めました）",
            "first": "（最初の {read} 件だけ読みました）", "incomplete": "全アカウントを読めなかったのでバーは出しません。詳しくは 中转站 ページへ",
            "left": "使えるアカウント {of} 件で残り {left:.2f} 件分", "soonest": "、最初のリセットは {at}",
            "setup": "StarkMesh が未設定です：飛書（OpenMate）拡張の設定で StarkMesh のアドレスと読み取り専用の管理キーを入力してください",

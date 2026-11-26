@@ -49,7 +49,7 @@
       {"id": "today-card", "title": "今天", "placement": "overview_card", "opens": "openmate-today"},
       {"id": "openmate-agents", "title": "Agent 进度", "placement": "nav_page", "icon": "robot"},
       {"id": "agents-card", "title": "Agent 进度", "placement": "overview_card", "opens": "openmate-agents"},
-      {"id": "chats", "title": "飞书", "placement": "nav_page", "icon": "bell"},
+      {"id": "chats", "title": "飞书", "placement": "nav_page", "icon": "chat"},
       {"id": "calendar", "title": "日程", "placement": "nav_page", "icon": "calendar"},
       {"id": "starkmesh", "title": "中转站", "placement": "nav_page", "icon": "wallet"},
       {"id": "starkmesh-card", "title": "中转站", "placement": "overview_card", "opens": "starkmesh"}

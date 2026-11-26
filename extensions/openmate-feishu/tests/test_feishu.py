@@ -28,11 +28,12 @@ with open(os.path.join(EXT_DIR, "persona-extension.json"), encoding="utf-8") as 
 CONN = MANIFEST["contributes"]["connectors"][0]
 
 
-# The icons the Persona web draws for a nav_page (web/src/lib/extension-ui.ts: UI_ICONS, with UI version 6's NEW_ICONS_6).
-NAV_ICONS = set("""extension plugin chart gauge list bell doc calendar money branch code pull_request merge map
-home sofa light power fan thermometer droplet lock unlock door window camera video play pause stop speaker music tv plug
-battery bolt sun moon cloud rain snow wind leaf car location robot wifi shield trend_up trend_down wallet bank heart plus
-minus trash edit refresh share info""".split())
+# The icons a nav_page may name: Persona's NavIcon set (sdk/go/wire/wire_gen.go). Since nwverse/persona#16296 the web
+# draws every one of them in the sidebar; a name outside the set is refused by the hub.
+NAV_ICONS = set("""plugin chart gauge list bell doc calendar money extension person chat mail link folder star check warning
+clock tag search settings branch commit code pull_request merge file home sofa light power fan thermometer droplet lock
+unlock door window camera video play pause stop speaker music tv plug battery bolt sun moon cloud rain snow wind leaf car
+location robot wifi shield trend_up trend_down wallet bank heart plus minus trash edit refresh share info""".split())
 
 
 class ManifestTest(unittest.TestCase):
@@ -127,11 +128,10 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual({k: (u["placement"], u.get("icon"), u.get("opens")) for k, u in ui.items()}, {
             "openmate-today": ("nav_page", "sun", None), "today-card": ("overview_card", None, "openmate-today"),
             "openmate-agents": ("nav_page", "robot", None), "agents-card": ("overview_card", None, "openmate-agents"),
-            "chats": ("nav_page", "bell", None), "calendar": ("nav_page", "calendar", None),
+            "chats": ("nav_page", "chat", None), "calendar": ("nav_page", "calendar", None),
             "starkmesh": ("nav_page", "wallet", None), "starkmesh-card": ("overview_card", None, "starkmesh")})
         # Each page keeps its own shape in the sidebar's monochrome icons: no two of our pages share an icon, and each is
-        # one the Persona web draws for a nav_page (web/src/lib/extension-ui.ts UI_ICONS; any other becomes the plain
-        # extension icon there, so "chat" or "person" would not help yet).
+        # a NavIcon name (the hub refuses any other).
         nav = [u["icon"] for u in ui.values() if u["placement"] == "nav_page"]
         self.assertTrue(set(nav) <= NAV_ICONS, set(nav) - NAV_ICONS)
         drawn = [{"plugin": "extension"}.get(i, i) for i in nav]  # plugin is extension's old name: the same picture

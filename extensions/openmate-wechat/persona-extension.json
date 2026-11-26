@@ -98,7 +98,7 @@
         "id": "wechat-chats",
         "title": "微信",
         "placement": "nav_page",
-        "icon": "list"
+        "icon": "person"
       }
     ]
   },

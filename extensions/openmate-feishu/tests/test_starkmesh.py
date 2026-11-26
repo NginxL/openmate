@@ -265,7 +265,7 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(len(res["accounts"]), 1, "the pool, not each account: the strip shows the two tightest")
         a = res["accounts"][0]
         self.assertEqual((a["id"], a["provider"], a["name"], a["headline"]),
-                         ("starkmesh-pool", "claude", "StarkMesh 号池", "可用 Claude 号 3/4，5 小时最早 %s 有号重置" % at(6540, tz=SH)))
+                         ("starkmesh-pool", "claude", "Claude Code Max", "可用 Claude 号 3/4，5 小时最早 %s 有号重置" % at(6540, tz=SH)))
         self.assertEqual(a["sampled_at"], starkmesh._iso(NOW))
         self.assertNotIn("notice", a)
         # the page's 号 as what is used: 5 小时 1.30 of 3 left, 本周 1.40 of 3, Fable 本周 1.50 of 2
@@ -299,12 +299,12 @@ class UsageTest(unittest.TestCase):
         page, _ = make()
         a = page.usage({"lang": "en"})["accounts"][0]
         self.assertEqual((a["name"], a["headline"], a["windows"][0]["note"], a["windows"][1]["note"]),
-                         ("StarkMesh pool", "3 of 4 Claude accounts usable; first 5-hour reset at %s" % at(6540),
+                         ("Claude Code Max", "3 of 4 Claude accounts usable; first 5-hour reset at %s" % at(6540),
                           "1.30 of 3 usable accounts left; the first resets at %s" % at(6540),
                           "1.40 of 3 usable accounts left; the first resets at %s" % at(144000)))
         a = page.usage({"lang": "ja"})["accounts"][0]
         self.assertEqual((a["name"], a["headline"], a["windows"][0]["note"]),
-                         ("StarkMesh プール", "使える Claude アカウント 3/4、5 時間枠の最初のリセットは %s" % at(6540),
+                         ("Claude Code Max", "使える Claude アカウント 3/4、5 時間枠の最初のリセットは %s" % at(6540),
                           "使えるアカウント 3 件で残り 1.30 件分、最初のリセットは %s" % at(6540)))
 
     def test_not_set_up_unreachable_and_nothing_usable(self):
