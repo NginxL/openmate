@@ -19,7 +19,8 @@ class FormattedTest(unittest.TestCase):
                             ("# **粗** 标题", ["标题"])):
             self.assertEqual(markup.features(text), words, text)
         for text in ("你好\n第二行", "版本 1.5 和 2*3*4", "a*b* c", "https://example.com/x 看下", "---", "#话题",
-                     "[文字](ftp://x)", "** 不是粗体 **", "单个 ` 反引号", "", "1.不算列表", "-不算列表"):
+                     "[文字](ftp://x)", "** 不是粗体 **", "单个 ` 反引号", "", "1.不算列表", "-不算列表", ">= 80% 就行",
+                     "![图](https://example.com/a.png)", "https://example.org/a**b**c", "看 https://e.com/**x**"):
             self.assertEqual(markup.features(text), [], text)
             self.assertFalse(markup.formatted(text), text)
 
@@ -42,6 +43,34 @@ class FormattedTest(unittest.TestCase):
         self.assertEqual([(b.kind, b["body"]) for b in bs], [("code", "a\n```\nb")])
         self.assertEqual(markup.blocks("~~~\nx\n~~~\n后")[0]["body"], "x")
 
+    def test_crlf_ends_lines(self):
+        text = "```py\r\n@张三 = 1\r\n```\r\n- 一\r\n- 二"
+        bs = markup.blocks(text)
+        self.assertEqual([(b.kind, b.get("body")) for b in bs], [("code", "@张三 = 1"), ("bullets", None)])
+        self.assertEqual([w for w, _ in bs[1].lines], ["一", "二"])
+        self.assertTrue(any(a <= text.index("@张三") < b for a, b in markup.no_mentions(text)))
+
+    def test_code_and_addresses_bind_first(self):
+        runs = markup.inline("**use `a** @Ann` now**")
+        self.assertEqual([(r.kind, r.words, r.bold) for r in runs], [("text", "use ", True), ("code", "a** @Ann", True),
+                                                                    ("text", " now", True)])
+        text = "**see** https://example.com/@Ann/repo，@Ann"
+        hidden = [a for a, b in markup.no_mentions(text)]
+        self.assertIn(text.index("https://"), hidden)
+        out, spans = mention_spans(text, [("1", "Ann")], markup.no_mentions(text), markup.FRONT_END)
+        self.assertEqual(spans[0][2], out.rindex("@Ann"), "the one after the address, not the one in it")
+        self.assertEqual([(r.kind, r.words) for r in markup.inline("看 https://e.com/a**b**c 吧")],
+                         [("text", "看 "), ("url", "https://e.com/a**b**c"), ("text", " 吧")])
+        self.assertEqual([(r.kind, r.words) for r in markup.inline("![图](https://e.com/a.png) **x**")][:1],
+                         [("text", "![图](https://e.com/a.png) ")], "an image is words, never a link")
+        self.assertEqual([(r.kind, r.words, r.bold) for r in markup.inline("**见 https://e.com/x**")],
+                         [("text", "见 ", True), ("url", "https://e.com/x", True)], "the stars after it close the bold")
+
+    def test_indents_and_numbers_kept(self):
+        bs = markup.blocks("**Python**\nif ready:\n    run()\n\n0. 草稿\n1. 发布")
+        self.assertEqual([w for w, _ in bs[0].lines], ["**Python**", "if ready:", "    run()"])
+        self.assertEqual(bs[1].number, 0)
+
     def test_runs(self):
         runs = markup.inline("看 **粗 `c` [链](https://e.com/a_(b))** 和 `x`", 10)
         self.assertEqual([(r.kind, r.words, r.bold) for r in runs], [
@@ -55,6 +84,11 @@ class FormattedTest(unittest.TestCase):
     def test_markdown_of_a_block(self):
         md = [b.markdown() for b in markup.blocks("  * 一 `x`\n  * 二\n\n7. 七\n8. 八\n\n段 `c`\n---\n\n## 题 `t`\n\n> 引")]
         self.assertEqual(md, ["- 一 `x`\n- 二", "7. 七\n8. 八", "段 `c`  \n\\---", "**题 `t`**", "> 引"])
+        md = [b.markdown() for b in markup.blocks(
+            "跑 `x` 和 *原样* a_b [链](https://e.com/a_b) https://e.com/c_d\n    缩进 >= 1\n\n# 今天 **上线** 跑 `test`")]
+        self.assertEqual(md, ["跑 `x` 和 \\*原样\\* a\\_b [链](https://e.com/a_b) https://e.com/c_d  \n"
+                              "\u00a0\u00a0\u00a0\u00a0缩进 \\>= 1", "**今天 上线 跑 `test`**"],
+                         "literal words escaped, addresses as written, an indent kept, a heading bold all through")
         self.assertEqual(markup.blocks("```\na ``` b\n```")[0].markdown(), "````\na ``` b\n````",
                          "a fence its body never closes")
 
@@ -63,6 +97,13 @@ class FormattedTest(unittest.TestCase):
         places = markup.no_mentions(text)
         hidden = [n for n in "甲乙丙丁戊" if any(a <= text.index("@" + n) < b for a, b in places)]
         self.assertEqual(hidden, ["乙", "丙", "戊"])
+
+
+class CodeAsWrittenTest(unittest.TestCase):
+    def test_a_block_with_an_at_and_code(self):
+        text = "@甲\n\n跑 `make`\n\n@乙 看 `x`"
+        self.assertFalse(markup.code_as_written(text, [0]), "the @ in a paragraph of its own")
+        self.assertTrue(markup.code_as_written(text, [0, text.index("@乙")]))
 
 
 class MentionSkipTest(unittest.TestCase):

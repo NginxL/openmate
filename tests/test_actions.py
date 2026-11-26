@@ -469,13 +469,26 @@ class FormattedSendTest(unittest.TestCase):
         text = "**请看**：@示例同事甲 跑一下 `@示例同事乙 的脚本`"
         args = {"chat": "chat_example_team", "text": text, "at": ["user_example_a", "user_example_b"]}
         card = self.describe("send", args)
-        self.assertTrue(card.endswith("——\n@示例同事乙\n" + text), "one only in code: in front, on its own line")
+        self.assertTrue(card.endswith("——\n@示例同事乙\n\n" + text), "one only in code: in front, a paragraph of its own")
+        self.assertIn("有 @ 的那一段里的行内代码按原样显示", card, "that block's code is words: the card says so")
         self.h.c("actions.do", name=CID + "_send", args=args, request_id="req-rich-at")
         s = self.h.sent()[-1]
-        self.assertEqual((s["text"], s["rich"]), ("@示例同事乙\n" + text, True))
+        self.assertEqual((s["text"], s["rich"]), ("@示例同事乙\n\n" + text, True))
         self.assertEqual([(u, s["text"][at:at + len(n) + 1]) for u, n, at in s["mentions"]],
                          [("user_example_b", "@示例同事乙"), ("user_example_a", "@示例同事甲")])
         self.assertLess(s["mentions"][1][2], s["text"].index("`"), "the one written in the words, there")
+
+    def test_code_beside_an_unwritten_at_still_shows_as_code(self):
+        args = {"chat": "chat_example_team", "text": "跑 `make test`", "at": ["user_example_a"]}
+        card = self.describe("send", args)
+        self.assertTrue(card.endswith("——\n@示例同事甲\n\n跑 `make test`"), card)
+        self.assertNotIn("按原样显示", card)
+
+    def test_the_words_a_formatted_send_reads_back_as_are_no_request(self):
+        self.h.app.backend.formatted_words = lambda text, mentions: "/stop"  # ("> /stop" reads back so)
+        self.h.c("actions.do", name=CID + "_send", args={"chat": "chat_example_team", "text": "> /stop"},
+                 request_id="req-quoted-stop")
+        self.assertTrue(self.h.app.agent._echo("/stop"), "its echo is never a stop of /agent's")
 
     def test_rich_is_refused_where_the_backend_cannot(self):
         from openmate_core.backend import SendRejected

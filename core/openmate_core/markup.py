@@ -10,30 +10,42 @@ The subset (what the send tools tell the model):
 - "# " to "###### " (a heading: shown as a bold line), "> " (a quote)
 - a line break is one, an empty line starts a new paragraph
 
-Nothing else is read as markup: single *, _, ~~, tables, nested lists (an indented item is one more item), images.
+Nothing else is read as markup: single *, _, ~~, tables, nested lists (an indented item is one more item), images
+(![…](…) stays words), anything inside code or a bare address.
 """
 
+import itertools
 import re
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*([\w+#.-]*)[ \t]*$")
 HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(\S.*?)[ \t]*$")
-QUOTE = re.compile(r"^ {0,3}>[ \t]?(.*?)[ \t]*$")
+QUOTE = re.compile(r"^ {0,3}>(?:[ \t]+(.*?))?[ \t]*$")  # "> words" or a ">" alone; ">= 80%" is words
 BULLET = re.compile(r"^[ \t]*[-*+][ \t]+(\S.*?)[ \t]*$")
 NUMBERED = re.compile(r"^[ \t]*(\d{1,9})[.)][ \t]+(\S.*?)[ \t]*$")
 SETEXT = re.compile(r"^[-=*_][-=*_ \t]*$")
 RULE = re.compile(r"^ {0,3}([-*_])([ \t]*\1){2,}[ \t]*$")  # "---", "* * *": words as written, never a list
-# `code`, **bold** (no space just inside the stars), [words](http(s) address: one pair of round brackets may be in it)
-INLINE = re.compile(r"`([^`\n]+)`"
-                    r"|\*\*(?=\S)(.+?)(?<=\S)\*\*"
-                    r"|\[([^\[\]\n]+)\]\((https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)\)")
+CODE_SPAN = re.compile(r"`[^`\n]+`")
+_TARGET = r"(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"  # one pair of round brackets may be in an address
+LINK = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\(" + _TARGET + r"\)")
+IMAGE = re.compile(r"!\[[^\[\]\n]*\]\([^\s()]*(?:\([^\s()]*\)[^\s()]*)*\)")  # words as written, never a link
+# a bare address (ASCII but space, quotes, <, > and `; stars inside it, not at its end, so "**see https://x**" is
+# bold): as written (the service links it), no markup or @ in it
+_URL_CHAR = r"\x21\x23-\x26\x28-\x29\x2b-\x3b\x3d\x3f-\x5f\x61-\x7e"
+URL = re.compile(r"https?://[%s*]*[%s]" % (_URL_CHAR, _URL_CHAR))
+# on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](address)
+INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|" + LINK.pattern)
+MASK = "\x01"  # stands for code's words, a bare address, an image's text: never markup, wherever the stars are
+MD_SPECIAL = re.compile(r"([\\`*_~\[\]<>|])")
+MD_LINE_START = re.compile(r"^([#+\-]|\d+[.)])")
 
 FEATURES = (("bold", "粗体"), ("link", "链接"), ("list", "列表"), ("code", "代码"), ("heading", "标题"), ("quote", "引用"))
 
 
 class Run(NamedTuple):
-    """An inline run. kind: "text", "code" or "link"; words: what it shows; at: where its words start in the text;
-    url: a link's address; bold; start, end: the whole run in the text, its markup included."""
+    """An inline run. kind: "text", "url" (a bare address: words as written), "code" or "link"; words: what it shows;
+    at: where its words start in the text; url: a link's address; bold; start, end: the whole run in the text, its
+    markup included."""
 
     kind: str
     words: str
@@ -44,23 +56,97 @@ class Run(NamedTuple):
     end: int
 
 
-def inline(line: str, base: int = 0, bold: bool = False) -> List[Run]:
-    """A line's runs in order; base: where the line starts in the text. Inside **bold**, code and links are read too."""
+def _masked(line: str) -> str:
+    """The line with code's words, images and bare addresses as MASK: what no markup is read in (a "**" in code, in
+    an address, closes no bold; an image is no link)."""
+    m = list(line)
+
+    def blank(a: int, b: int) -> None:
+        m[a:b] = MASK * (b - a)
+
+    for c in CODE_SPAN.finditer(line):
+        blank(c.start() + 1, c.end() - 1)
+    once = "".join(m)
+    for x in IMAGE.finditer(once):
+        blank(x.start(), x.end())
+    once = "".join(m)
+    links = [(x.start(), x.end()) for x in LINK.finditer(once)]
+    for u in URL.finditer(once):
+        if not any(a <= u.start() < b for a, b in links):
+            blank(u.start(), u.end())
+    return "".join(m)
+
+
+def _words(line: str, masked: str, a: int, b: int, base: int, bold: bool) -> List[Run]:
+    """Words between markup: "text" runs, a bare address its own "url" run."""
+    out: List[Run] = []
+    pos = a
+    for u in re.finditer(re.escape(MASK) + "+", masked[a:b]):
+        ua, ub = a + u.start(), a + u.end()
+        if not URL.fullmatch(line[ua:ub]):
+            continue  # (an image's text: words)
+        if ua > pos:
+            out.append(Run("text", line[pos:ua], base + pos, "", bold, base + pos, base + ua))
+        out.append(Run("url", line[ua:ub], base + ua, line[ua:ub], bold, base + ua, base + ub))
+        pos = ub
+    if pos < b:
+        out.append(Run("text", line[pos:b], base + pos, "", bold, base + pos, base + b))
+    return out
+
+
+def inline(line: str, base: int = 0, bold: bool = False, masked: Optional[str] = None) -> List[Run]:
+    """A line's runs in order; base: where the line starts in the text. Inside **bold**, code and links are read too;
+    code, bare addresses and images are read before any of it (CommonMark's way: code binds first)."""
+    if masked is None:
+        masked = _masked(line)
     out: List[Run] = []
     pos = 0
-    for m in INLINE.finditer(line):
+    for m in INLINE.finditer(masked):
         if m.start() > pos:
-            out.append(Run("text", line[pos:m.start()], base + pos, "", bold, base + pos, base + m.start()))
+            out += _words(line, masked, pos, m.start(), base, bold)
         if m.group(1) is not None:
-            out.append(Run("code", m.group(1), base + m.start(1), "", bold, base + m.start(), base + m.end()))
+            out.append(Run("code", line[m.start(1):m.end(1)], base + m.start(1), "", bold, base + m.start(),
+                           base + m.end()))
         elif m.group(2) is not None:
-            out.extend(inline(m.group(2), base + m.start(2), True))
+            a, b = m.start(2), m.end(2)
+            out += inline(line[a:b], base + a, True, masked[a:b])
         else:
-            out.append(Run("link", m.group(3), base + m.start(3), m.group(4), bold, base + m.start(), base + m.end()))
+            out.append(Run("link", line[m.start(3):m.end(3)], base + m.start(3), m.group(4), bold, base + m.start(),
+                           base + m.end()))
         pos = m.end()
     if pos < len(line):
-        out.append(Run("text", line[pos:], base + pos, "", bold, base + pos, base + len(line)))
+        out += _words(line, masked, pos, len(line), base, bold)
     return out
+
+
+def _md_escape(words: str) -> str:
+    return MD_SPECIAL.sub(r"\\\1", words)
+
+
+def _md_line(runs: List[Run]) -> str:
+    """A line's runs as Markdown: the words escaped (a lone * or _ stays a star), bold runs together in one **…**."""
+    out: List[str] = []
+    for bold, group in itertools.groupby(runs, key=lambda r: r.bold):
+        parts = []
+        for r in group:
+            if r.kind == "code":
+                parts.append("`%s`" % r.words)
+            elif r.kind == "link":
+                parts.append("[%s](%s)" % (_md_escape(r.words), r.url))
+            elif r.kind == "url":
+                parts.append(r.words)
+            else:
+                parts.append(_md_escape(r.words))
+        piece = "".join(parts)
+        core = piece.strip()
+        if bold and core:
+            lead, trail = piece[:len(piece) - len(piece.lstrip())], piece[len(piece.rstrip()):]
+            piece = "%s**%s**%s" % (lead, core, trail)
+        out.append(piece)
+    line = "".join(out)
+    indent = len(line) - len(line.lstrip(" \t"))
+    line = " " * indent + line[indent:]  # an indent kept, never an indented code block
+    return "\\" + line if MD_LINE_START.match(line) else line  # never a list or a heading of its own
 
 
 class Block(dict):
@@ -72,7 +158,7 @@ class Block(dict):
     lines = property(lambda self: self.get("lines") or [])
     start = property(lambda self: self["start"])
     end = property(lambda self: self["end"])
-    number = property(lambda self: int(self.get("number") or 1))  # a numbered list's first number
+    number = property(lambda self: int(self.get("number", 1)))  # a numbered list's first number
 
     def runs(self) -> List[List[Run]]:
         """Each line's runs (a heading's are bold)."""
@@ -83,23 +169,22 @@ class Block(dict):
         return any(r.kind == "code" for line in self.runs() for r in line)
 
     def markdown(self) -> str:
-        """The block as Markdown on its own, written plainly (each line as one, a list's items unindented): what a
-        backend that renders Markdown shows for it."""
+        """The block as Markdown on its own, made from its runs (literal words escaped, each line as one, a list's
+        items unindented): what a backend that renders Markdown shows for it, as the other blocks show."""
         k = self.kind
         if k == "code":
             body = self["body"]
             ticks = max([len(t) for t in re.findall(r"`{3,}", body)] + [2]) + 1  # a fence the body never closes
             return "%s%s\n%s%s%s" % ("`" * ticks, self.get("lang") or "", body, "\n" if body else "", "`" * ticks)
-        lines = [w for w, _ in self.lines]
-        if k == "heading":
-            return "**%s**" % lines[0] if "**" not in lines[0] else lines[0]
+        lines = [_md_line(runs) for runs in self.runs()]
         if k == "quote":
             return "\n".join("> " + w for w in lines)
         if k == "bullets":
             return "\n".join("- " + w for w in lines)
         if k == "numbers":
             return "\n".join("%d. %s" % (self.number + i, w) for i, w in enumerate(lines))
-        # a paragraph: each line break a hard one; a line of only - = * _ is words (never a heading's underline)
+        # a paragraph (a heading: its one bold line): each line break a hard one; a line of only - = * _ is words
+        # (never a heading's underline)
         return "  \n".join("\\" + w if SETEXT.match(w) else w for w in lines)
 
 
@@ -115,12 +200,13 @@ def _starts_block(line: str) -> bool:
 
 def blocks(text: str) -> List[Block]:
     """The text's blocks in order (empty lines between them only; none when the text is empty)."""
-    lines = (text or "").split("\n")
+    raw = (text or "").split("\n")
     offs: List[int] = []
     at = 0
-    for line in lines:
+    for line in raw:
         offs.append(at)
         at += len(line) + 1
+    lines = [line[:-1] if line.endswith("\r") else line for line in raw]  # a CRLF ends a line as an LF does
     n, i = len(lines), 0
     out: List[Block] = []
 
@@ -151,7 +237,7 @@ def blocks(text: str) -> List[Block]:
             got, j = [], i
             while j < n and QUOTE.match(lines[j]) and not FENCE.match(lines[j]):
                 q = QUOTE.match(lines[j])
-                if q.group(1):
+                if q.group(1) is not None:
                     got.append((q.group(1), offs[j] + q.start(1)))
                 j += 1
             if got:
@@ -174,9 +260,9 @@ def blocks(text: str) -> List[Block]:
             continue
         got, j = [], i
         while j < n and lines[j].strip() and (j == i or not _starts_block(lines[j])):
-            raw = lines[j]
-            lead = len(raw) - len(raw.lstrip())
-            got.append((raw.strip(), offs[j] + lead))
+            line = lines[j].rstrip()
+            lead = 0 if j > i else len(line) - len(line.lstrip())  # a later line keeps its indent ("    run()")
+            got.append((line[lead:], offs[j] + lead))
             j += 1
         out.append(Block(kind="paragraph", lines=got, start=offs[i], end=end_of(j - 1)))
         i = j
@@ -212,15 +298,24 @@ def formatted(text: str) -> bool:
 
 
 def no_mentions(text: str) -> List[Tuple[int, int]]:
-    """Where an "@name" is no @: code (fenced or `inline`) and links, as (start, end) places in the text."""
+    """Where an "@name" is no @: code (fenced or `inline`), links and bare addresses, as (start, end) places."""
     out: List[Tuple[int, int]] = []
     for b in blocks(text):
         if b.kind == "code":
             out.append((b.start, b.end))
             continue
         for line in b.runs():
-            out.extend((r.start, r.end) for r in line if r.kind in ("code", "link"))
+            out.extend((r.start, r.end) for r in line if r.kind in ("code", "link", "url"))
     return out
+
+
+FRONT_END = "\n\n"  # after the @s a formatted text does not write (textutil.mention_spans' front_end): a paragraph
+
+
+def code_as_written(text: str, ats: List[int]) -> bool:
+    """Whether a block with an @ in it (ats: where each "@name" is in the text) has `code`: it goes as words then
+    (an @ is no Markdown's), its code's backticks shown, and the card says so."""
+    return any(b.kind != "code" and b.has_code() and any(b.start <= a < b.end for a in ats) for b in blocks(text))
 
 
 def block_of(bs: List[Block], at: int) -> Optional[Block]:

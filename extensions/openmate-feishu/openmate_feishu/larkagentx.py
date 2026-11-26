@@ -2823,7 +2823,7 @@ class LarkXBackend(Backend):
             if spans:
                 raise SendRejected("要 @ 的人不对")
             if rich:
-                text, spans = mention_spans(text, pairs, markup.no_mentions(text), "\n")
+                text, spans = mention_spans(text, pairs, markup.no_mentions(text), markup.FRONT_END)
             else:
                 text, spans = mention_spans(text, pairs)
         if len({uid for uid, _, _ in spans}) > MENTIONS_MOST:

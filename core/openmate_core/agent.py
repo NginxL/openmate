@@ -464,6 +464,12 @@ class AgentRunner:
                 del self._posted[k]
             return self._digest(text) in self._posted
 
+    def remember_sent(self, words: str) -> None:
+        """Words a send of the user's (a tool's formatted text, read back as its words) is about to show, so its echo
+        is never a request or a stop ("> /stop" reads back as "/stop")."""
+        with self._mu:
+            self._posted[self._digest(words)] = time.time()
+
     def _remember_post(self, body: str, run: Optional[dict] = None) -> bool:
         """What is about to go out, so its echo is never a request; False (nothing remembered, and it must not go out)
         for a run wiped by the switch: checked where forget empties the echoes, so none outlives the switch. Right

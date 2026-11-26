@@ -587,7 +587,7 @@ def _send_card(app, a: dict) -> tuple:
     spans: List[tuple] = []
     if mentions:  # the text as it will read: one not written goes in front (the card, the send and its echo agree)
         if rich:  # never an @ in code or in a link's words; those in front on a line of their own
-            text, spans = mention_spans(text, mentions, markup.no_mentions(text), "\n")
+            text, spans = mention_spans(text, mentions, markup.no_mentions(text), markup.FRONT_END)
         else:
             text, spans = mention_spans(text, mentions)
         text = _check_text(text)
@@ -635,15 +635,19 @@ def _send_card(app, a: dict) -> tuple:
     if mentions:
         lines.append("会 @ 并提醒：" + "、".join("%s（%s）" % (n, u) for u, n in mentions))
     if rich:
-        lines.append(_rich_line(app, text))
+        lines.append(_rich_line(app, text, [at for _, _, at in spans]))
     lines += ["——", text]
     return chat_id, text, reply_to, visible, "\n".join(lines), spans, rich
 
 
-def _rich_line(app, text: str) -> str:
-    """The card's word on a formatted text: what shows formatted (the text below it is as written)."""
-    return "按%s富文本发送：下面的%s会按格式显示（这里是写的原文，链接的地址就是括号里的）" % (
+def _rich_line(app, text: str, ats=()) -> str:
+    """The card's word on a formatted text: what shows formatted (the text below it is as written), and where code
+    stays as written (a block with an @: markup.code_as_written)."""
+    line = "按%s富文本发送：下面的%s会按格式显示（这里是写的原文，链接的地址就是括号里的）" % (
         app.platform.name, "、".join(markup.features(text)))
+    if markup.code_as_written(text, list(ats)):
+        line += "；有 @ 的那一段里的行内代码按原样显示（带反引号）"
+    return line
 
 
 def _dm_card(app, a: dict) -> tuple:

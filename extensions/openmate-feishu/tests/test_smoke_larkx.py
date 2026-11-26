@@ -179,7 +179,7 @@ out["mentions"] = [els, [rt.elements.dictionary[k].tag for k in rt.atIds], list(
                    len(set(rt.elementIds)) == len(rt.elementIds), pkt.cmd]
 from openmate_core import markup
 src = "**结论**：看 [文档](https://example.com/d)\n- 一项 @张三\n- 二项\n\n3. 三\n\n改 `a.py`\n\n```py\nx = 1\n```"
-text, spans = mention_spans(src, [("7001", "张三"), ("7002", "李四")], markup.no_mentions(src), "\n")
+text, spans = mention_spans(src, [("7001", "张三"), ("7002", "李四")], markup.no_mentions(src), markup.FRONT_END)
 tree = larkagentx.post_tree(text, spans)
 pkt = larkagentx.as_post(b.lx.builders.build_send_message_packet(text, "900", "rid", root_id="80"), tree)
 lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
@@ -341,7 +341,8 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["formatted"], [
             2, "900", "80", "80", True, [7002, 7001],
             [["DOCS", True, "", [
-                ["P", True, "", [["at", "7002", "@李四"], ["text", "\n", {}], ["text", "结论", bold], ["text", "：看 ", {}],
+                ["P", True, "", [["at", "7002", "@李四"]]],
+                ["P", True, "", [["text", "结论", bold], ["text", "：看 ", {}],
                                  ["a", "https://example.com/d", "文档", "文档", True, 3]]],
                 ["UL", True, "0800", [["LI", True, "", [["text", "一项 ", {}], ["at", "7001", "@张三"]]],
                                   ["LI", True, "", [["text", "二项", {}]]]]],

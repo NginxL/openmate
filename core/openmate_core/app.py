@@ -1631,13 +1631,16 @@ class ConnectorApp:
             raise SendRejected("%s这里不能 @人" % self.platform.name)
         if rich and not getattr(self.backend, "can_format", False):
             raise SendRejected("%s这里不能发带格式的消息" % self.platform.name)
-        # what its echo will read: a formatted text reads as its words (the backend says them), not as written
+        # what its echo will read: a formatted text reads as its words (the backend says them), not as written; those
+        # words are never a request or a stop of /agent's ("> /stop" reads back as "/stop")
         heard = text
-        if rich and self.channel is not None:
+        if rich:
             try:
                 heard = self.backend.formatted_words(text, list(mentions or ())) or text
             except Exception:
                 heard = text
+            if heard != text and self.agent is not None:
+                self.agent.remember_sent(heard)
         if self.channel is not None:
             self.channel.outgoing(chat_id, heard)  # its echo in the 渠道's chat is no line of the user's
         # only when set: a backend that never reads "thread_chat" or takes no @s need not know the words
