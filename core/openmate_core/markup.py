@@ -33,12 +33,13 @@ IMAGE = re.compile(r"!\[[^\[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)")
 # a bare address: up to a space, a quote, <, >, ` or CJK or fullwidth punctuation (Chinese words and fullwidth
 # letters in its path are in it), without the sentence marks and stars at its end ("**see https://x.org**." is
 # bold: _trim_url): as written (the service links it), no markup or @ in it
-URL = re.compile(r"(?i:https?)://[^\s<>\"'`\x01\x03\x04\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
+URL = re.compile(r"(?i:https?)://[^\s<>\"'`\x00\x01\x03\x04\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
 URL_TAIL = ".,:;!?*"
 MASK = "\x01"  # stands for code's words, an address: never markup, wherever the stars are
 IMAGE_MASK = "\x03"  # stands for an image, its text and address: words, never a link
 LINK_MASK = "\x04"  # stands for a link's address (LINK's, http or https in lower case): its link's
-MASKS = (MASK, "\x02", IMAGE_MASK, LINK_MASK)
+MASKS = (MASK, IMAGE_MASK, LINK_MASK)  # (written in the text: "\x00", an address's end as they are; a name's mask
+# "\x02" is kept, an address runs on through it)
 SCHEME = re.compile(r"(?i)https?://")
 # on a line masked (_masked): `code`, **bold** (no space just inside the stars), [words](its address, masked)
 INLINE = re.compile(r"`([^`\n]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!!)\[([^\[\]\n]+)\]\((\x04+)\)")

@@ -136,6 +136,10 @@ class SecondReviewTest(unittest.TestCase):
         self.assertEqual([(r.kind, r.url) for r in markup.inline("[A](https://a.org)和https://b.org/?q=[B](https://c.org)")],
                          [("link", "https://a.org"), ("text", ""), ("url", "https://b.org/?q=[B](https://c.org)")])
         self.assertFalse(markup.formatted('"[x](\u0004)"'), "a mark written in the text is none of the masks")
+        text = "**See** https://example.org/@Ann\u0004 then @Ann"
+        spans = mention_spans(text, [("1", "Ann")], markup.no_mentions(markup.without_names(text, ["Ann"])),
+                              markup.FRONT_END)[1]
+        self.assertEqual(spans[0][2], text.rindex("@Ann"), "it ends the address as before")
         name = "@A`B\n\n`@A`B`"
         md = markup.blocks(markup.without_names(name, ["A`B"]))[1].markdown(name)
         self.assertEqual(md, "``@A`B``", "code fenced by more backticks than are in it")
