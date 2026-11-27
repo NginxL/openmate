@@ -627,13 +627,6 @@ class Store:
                         # turned into a notice (a recall): what it carried is not offered any more
                         db.execute("UPDATE messages SET media = '[]' WHERE chat_id = ? AND id = ? AND media != '[]'",
                                    (m.chat_id, m.id))
-                    if not from_history and m.placement:
-                        # a live reading says where it shows (its thread's marks): it wins over the thread an older
-                        # reading kept (a history read may take a quote in the main stream for a reply in a thread),
-                        # so the Inbox's topics and the threads read later go by it too
-                        db.execute("UPDATE messages SET root_id = ?, thread_id = ? WHERE chat_id = ? AND id = ? "
-                                   "AND (root_id != ? OR thread_id != ?)",
-                                   (m.root_id or "", m.thread_id or "", m.chat_id, m.id, m.root_id or "", m.thread_id or ""))
                     if m.at_me or m.at_all:  # a history read may not know whom a message mentions (Feishu)
                         db.execute("UPDATE messages SET at_me = MAX(at_me, ?), at_all = MAX(at_all, ?) "
                                    "WHERE chat_id = ? AND id = ?",
