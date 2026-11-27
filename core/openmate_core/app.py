@@ -1642,16 +1642,16 @@ class ConnectorApp:
             raise SendRejected("%s这里不能 @人" % self.platform.name)
         if rich and not getattr(self.backend, "can_format", False):
             raise SendRejected("%s这里不能发带格式的消息" % self.platform.name)
-        # what its echo will read: a formatted text reads as its words (the backend says them), not as written; its
-        # echo is never a request or a stop of /agent's ("> /stop" reads back as "/stop": agent.own_send)
+        # Register before the backend sends: the live echo can reach us before the backend returns its message ID.
         heard = text
-        agent = self.agent if rich else None
+        agent = self.agent
+        kind = "POST" if rich else "TEXT"
         if rich:
             try:
                 heard = self.backend.formatted_words(text, list(mentions or ())) or text
             except Exception:
                 heard = text
-        gen = agent.own_send(chat_id, heard) if agent is not None else None
+        gen = agent.own_send(chat_id, heard, kind=kind) if agent is not None else None
         if self.channel is not None:  # its echo in the 渠道's chat is no line of the user's (a formatted one: a POST)
             self.channel.outgoing(chat_id, heard, post=rich)
         # only when set: a backend that never reads "thread_chat" or takes no @s need not know the words
@@ -1668,12 +1668,12 @@ class ConnectorApp:
             if self.channel is not None:
                 self.channel.outgoing(chat_id, heard, failed=True, post=rich)  # surely not sent: it stands for nothing
             if agent is not None:
-                agent.own_send(chat_id, heard, failed=True, gen=gen)
+                agent.own_send(chat_id, heard, failed=True, gen=gen, kind=kind)
             raise
         if self.channel is not None:
             self.channel.outgoing(chat_id, heard, str(mid or ""), post=rich)  # known by its id from now on
         if agent is not None and mid:
-            agent.own_send(chat_id, heard, str(mid), gen=gen)
+            agent.own_send(chat_id, heard, str(mid), gen=gen, kind=kind)
         return mid
 
     def send_image_as_user(self, chat_id: str, path: str, reply_to: str = "", root: str = "",
@@ -1687,6 +1687,9 @@ class ConnectorApp:
             raise SendRejected("%s登录已失效，请重新扫码登录" % self.platform.name)
         if not getattr(self.backend, "can_send_images", False):
             raise SendRejected("%s这里现在不能发图片" % self.platform.name)
+        agent = self.agent
+        target = root or reply_to
+        gen = agent.own_send(chat_id, target, kind="IMAGE") if agent is not None else None
         if self.channel is not None:
             # its echo in the 渠道's chat (it may come before its id is known) is no line of the user's
             self.channel.outgoing(chat_id, "", picture=True)
@@ -1699,9 +1702,13 @@ class ConnectorApp:
         except SendRejected:
             if self.channel is not None:
                 self.channel.outgoing(chat_id, "", failed=True, picture=True)  # surely not sent: no picture stands
+            if agent is not None:
+                agent.own_send(chat_id, target, failed=True, gen=gen, kind="IMAGE")
             raise
         if self.channel is not None:
             self.channel.outgoing(chat_id, "", str(mid or ""), picture=True)  # known by its id from now on
+        if agent is not None and mid:
+            agent.own_send(chat_id, target, str(mid), gen=gen, kind="IMAGE")
         return mid
 
     # ------------------------------------------------------------------ inbox

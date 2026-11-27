@@ -1871,7 +1871,8 @@ class LarkXBackend(Backend):
             text=text, at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
             media=media, placement=placement, same_as=same_as, markdown=markdown, title=title,
-            text_after_mentions=cut, edited=marks["edited"] if "edited" in marks else None)  # None: not known
+            text_after_mentions=cut, mention_ids=sorted(mentions - {"all"}),
+            edited=marks["edited"] if "edited" in marks else None)  # None: not known
 
     def _placement(self, d: dict, chat_id: str, msg_id: str, in_thread: bool, topic_root: bool, mine: bool,
                    client) -> str:

@@ -83,6 +83,8 @@ class Message:
     #: a rich text's (a POST's) title, which text starts with on a line of its own: /agent reads the request after it.
     #: Live-only, like placement
     title: str = ""
+    #: User IDs from the service's real @ elements, for live handling only.
+    mention_ids: List[str] = field(default_factory=list)
 
 
 @dataclass

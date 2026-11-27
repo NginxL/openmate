@@ -187,6 +187,8 @@ class MappingTest(Base):
         self.assertEqual((self_at.mine, self_at.at_me, self_at.text), (True, True, "@我 设置为 write"))
         other_at = self.m(from_id=ME, content_data=text_data(("at", "7002", "@同事"), " 看下"), at_me=True)
         self.assertEqual((other_at.mine, other_at.at_me), (True, False))
+        self.assertEqual(other_at.mention_ids, ["7002"])
+        self.assertEqual(everyone.mention_ids, [])
 
     def test_text_after_the_leading_mentions_is_cut_where_they_end(self):
         from larkx._fake import text_data

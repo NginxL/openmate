@@ -218,6 +218,8 @@ def _live_row(r: sqlite3.Row, m: Message) -> dict:
     # this reading's own: whether it @-mentions the user (the stored at_me keeps any reading's), whether it is of an
     # edit, and its text after the leading @s as the backend cut it
     d["live_at_me"] = bool(m.at_me)
+    if m.mention_ids:
+        d["mention_ids"] = m.mention_ids
     d["edited"] = m.edited  # True, False, or None (the backend could not tell)
     if m.text_after_mentions is not None:
         d["text_after_mentions"] = m.text_after_mentions
@@ -865,6 +867,22 @@ class Store:
 
     def sends_prune(self, before: float) -> None:
         self._tx(lambda db: db.execute("DELETE FROM sends WHERE updated < ? AND state != 'sending'", (before,)))
+
+    def sent_message(self, msg_id: str, kind: str) -> bool:
+        """Whether a completed send of this kind returned the service's message ID."""
+        if not msg_id:
+            return False
+        try:
+            return self._one("SELECT 1 FROM sends WHERE state = 'done' AND kind = ? "
+                             "AND json_extract(result, '$.message_ref') = ? LIMIT 1", (kind, msg_id)) is not None
+        except sqlite3.OperationalError:  # an SQLite without JSON
+            for r in self._all("SELECT result FROM sends WHERE state = 'done' AND kind = ?", (kind,)):
+                try:
+                    if json.loads(r["result"]).get("message_ref") == msg_id:
+                        return True
+                except ValueError:
+                    continue
+            return False
 
     # ---- /agent runs ----
 
