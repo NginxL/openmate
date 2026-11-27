@@ -114,6 +114,12 @@ class SignInTest(Base):
 
 
 class ListenTest(Base):
+    def test_native_cannot_confirm_recalls(self):
+        b = self.backend()
+        self.assertFalse(b.reports_recalls)
+        self.assertIsNone(b.message_gone("wxid_friend", "1"))
+        self.assertEqual(self.requests(), [])
+
     def test_only_live_messages_reach_the_core(self):
         events = [
             {"event": "link", "up": True},

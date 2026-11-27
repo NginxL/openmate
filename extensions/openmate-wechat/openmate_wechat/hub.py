@@ -1240,6 +1240,7 @@ class HubLink:
                        "chat": str(data["threadId"]), "type": "SYSTEM", "text": "[撤回了一条消息]"}
             if out is not None:
                 out["update"] = True  # a message kept already: its new text (a recall notice) replaces the old
+                out["recalled"] = True
                 self._emit(gen, out)
         elif kind == "thread.read-state":
             # read on the phone (remote_read, or entering / leaving the chat there) or in the desktop app
@@ -1294,6 +1295,15 @@ class HubLink:
                     raise
             time.sleep(0.5)
         return None
+
+    def _op_message_gone(self, timeout: float, hub_id: str, chat: str) -> dict:
+        """Read once before a reply, with a shorter timeout than the event stream's reads."""
+        msg = self._get("/messages/" + seg(hub_id), timeout=timeout)
+        if not isinstance(msg, dict) or msg.get("id") != hub_id or msg.get("threadId") != chat:
+            return {}
+        if isinstance(msg.get("recall"), dict):
+            return {"gone": True}
+        return {} if msg.get("deleted") else {"gone": False}
 
     def _catch_up(self, gen: int, stop: threading.Event) -> int:
         """After a gap the event log no longer covers: the chats active since, read at one moment (the log's head
@@ -1439,6 +1449,7 @@ class HubLink:
             ev["envelope"] = True  # its sender read from the text: a quote of it would be named otherwise
         if recalled:
             ev["update"] = True  # kept already: its text and media go (wherever the recall was seen)
+            ev["recalled"] = True
         return ev
 
     def _file_media(self, hub_id: str, name: str) -> dict:

@@ -13,16 +13,19 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXT = os.path.dirname(HERE)
 ROOT = os.path.dirname(os.path.dirname(EXT))
-for p in (os.path.join(ROOT, "core"), EXT, HERE):
+for p in (os.path.join(ROOT, "core"), os.path.join(ROOT, "tests"), EXT, HERE):
     if p not in sys.path:
         sys.path.insert(0, p)
 
 from fake_hub import FakeHub  # noqa: E402
+from harness import Harness  # noqa: E402
 from openmate_core.backend import BackendError, SendRejected  # noqa: E402
+from openmate_wechat import platform  # noqa: E402
 from openmate_wechat import backend as wb  # noqa: E402
 from openmate_wechat import hub as wh  # noqa: E402
 
@@ -78,14 +81,18 @@ class Base(unittest.TestCase):
         b.login_direct()
         return b
 
-    def listen(self, b):
+    def listen(self, b, on_recalled=None):
         got, links = [], []
         stop = threading.Event()
         err = []
 
         def run():
             try:
-                b.listen(got.append, lambda s, r: links.append((s, r)), stop)
+                on_link = lambda s, r: links.append((s, r))
+                if on_recalled is None:
+                    b.listen(got.append, on_link, stop)
+                else:
+                    b.listen_with_recall(got.append, on_link, stop, on_recalled)
             except Exception as e:  # noqa: BLE001
                 err.append(e)
 
@@ -416,6 +423,120 @@ class LiveTest(Base):
         self.hub.message("wxid_friend", "重新登录后")
         self.assertTrue(wait_until(lambda: any(g.text == "重新登录后" for g in got), timeout=8))
         self.assertEqual(err, [])
+
+
+class RecallTest(Base):
+    def test_a_recall_reports_the_core_id_after_renewing_history(self):
+        b = self.signed_in()
+        recalled = []
+        got, *_ = self.listen(b, lambda chat, mid: recalled.append((chat, mid, self.history[-1].text)))
+        for server in ("77", ""):
+            with self.subTest(server=server):
+                m = self.hub.message("wxid_friend", "/agent 看一下", direction="outgoing", commit=False)
+                m["serverId"] = server
+                self.hub.push("message.committed", {"messageId": m["id"], "origin": "live"})
+                self.assertTrue(wait_until(lambda: len(got) == len(recalled) + 1))
+                self.hub.recall(m)
+                self.assertTrue(wait_until(lambda: len(recalled) == len(got)))
+                self.assertEqual(recalled[-1], (got[-1].chat_id, got[-1].id, "[撤回了一条消息]"))
+                self.assertNotEqual(got[-1].id, m["id"])
+
+    def test_a_recall_of_an_unknown_message_is_reported(self):
+        b = self.signed_in()
+        recalled = []
+        got, *_ = self.listen(b, lambda *ids: recalled.append(ids))
+        self.hub.push("message.recalled", {"threadId": "wxid_friend", "serverId": "77", "messageId": "missing"})
+        self.assertTrue(wait_until(lambda: recalled))
+        self.assertEqual(recalled, [("wxid_friend", "77")])
+        self.assertIsNone(b.store.message("77"))
+        self.assertEqual(got, [])
+
+    def test_a_recall_in_catchup_is_reported(self):
+        b = self.signed_in()
+        m = self.hub.message("wxid_friend", "撤回了", commit=False)
+        m["recall"] = {"observedAt": "x"}
+        recalled = []
+        got, *_ = self.listen(b, lambda *ids: recalled.append(ids))
+        self.assertEqual(recalled, [("wxid_friend", m["serverId"])])
+        self.assertEqual(got, [])
+
+    def test_only_recalls_from_this_listen_and_account_are_reported(self):
+        b = self.signed_in()
+        recalled = []
+        got, *_ = self.listen(b, lambda *ids: recalled.append(ids))
+        self.hub.message("wxid_friend", "普通消息", server="77")
+        self.assertTrue(wait_until(lambda: got))
+        n, gen = b._native, b._gen
+        ev = {"event": "message", "id": "77", "chat": "wxid_friend", "update": True,
+              "text": "普通更新", "origin": "catchup"}
+        n._emit(gen, dict(ev))
+        n._subs[gen].put(dict(ev, gen=gen - 1, recalled=True))
+        self.assertTrue(wait_until(lambda: self.history))
+        self.assertEqual(self.history[-1].text, "普通更新")
+        b.store.put("account", "wxid_other")
+        n._emit(gen, dict(ev, recalled=True, text="另一个账号"))
+        n._emit(gen, {"event": "cursor", "cursor": "test:checked"})
+        self.assertTrue(wait_until(lambda: b.store.get("hub_cursor") == "test:checked"))
+        self.assertEqual(recalled, [])
+
+    def test_a_recall_callback_error_leaves_the_listener_running(self):
+        b = self.signed_in()
+
+        def fail(chat, mid):
+            raise RuntimeError("private callback detail")
+
+        got, _, _, errors = self.listen(b, fail)
+        with self.assertLogs("openmate.wechat", level="WARNING") as logs:
+            self.hub.push("message.recalled", {"threadId": "wxid_friend", "serverId": "77"})
+            self.hub.message("wxid_friend", "之后的")
+            self.assertTrue(wait_until(lambda: got))
+        self.assertEqual([m.text for m in got], ["之后的"])
+        self.assertEqual(errors, [])
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+        self.assertNotIn("private callback detail", "\n".join(logs.output))
+
+    def test_message_gone_looks_up_the_saved_hub_id(self):
+        b = self.signed_in()
+        self.assertTrue(b.reports_recalls)
+        got = []
+        m = self.hub.message("wxid_friend", "/agent 看一下", direction="outgoing", commit=False)
+        ev = b._native.message_event(m, "live")
+        self.assertTrue(b._on_event(ev, got.append, b.me))
+        chat, mid = got[0].chat_id, got[0].id
+        self.assertIs(b.message_gone(chat, mid), False)
+        self.assertIsNone(b.message_gone(chat, "unknown"))
+        self.assertIsNone(b.message_gone("another_chat", mid))
+        self.hub.fail_messages = 1
+        self.assertIsNone(b.message_gone(chat, mid))
+        with patch.object(b._native.client, "call", side_effect=wh.HubDown("TimeoutError")) as call:
+            self.assertIsNone(b.message_gone(chat, mid))
+        call.assert_called_once()
+        self.assertLessEqual(call.call_args.kwargs["timeout"], 1.0)
+        self.assertEqual(call.call_args.args, ("GET", "/v1/accounts/%s/messages/%s" % (self.hub.account,
+                                                                                     wh.seg(m["id"]))))
+        m["recall"] = {"observedAt": "x"}  # no push: the answer must come from the current hub message
+        self.assertIs(b.message_gone(chat, mid), True)
+        del self.hub.messages[m["id"]]
+        self.assertIsNone(b.message_gone(chat, mid))
+
+    def test_recalling_a_request_stops_the_core_run(self):
+        h = Harness(self, platform=platform(), config={"agent": True, "agent_ack_reaction": ""},
+                    initialize=False,
+                    backend_factory=lambda cfg, data: wb.WeChatBackend(None, data, hub_url=self.hub.url))
+        h.initialize(secrets={"hub_token": self.hub.token})
+        h.sign_in()
+        self.assertTrue(wait_until(h.app._catchup_done.is_set))
+        m = self.hub.message("wxid_friend", "/agent 写个长报告", direction="outgoing")
+
+        def runs():
+            return h.app.store.runs_for_request(m["threadId"], m["serverId"])
+
+        self.assertTrue(wait_until(lambda: any(r["state"] == "running" for r in runs())))
+        run = runs()[0]
+        self.hub.recall(m)
+        self.assertTrue(wait_until(lambda: h.http.sessions[run["session_id"]]["stopped"]))
+        stopped = h.app.store.run_get(run["id"])
+        self.assertEqual((stopped["state"], stopped["stop_reason"]), ("stopped", "recalled"))
 
 
 class SendTest(Base):

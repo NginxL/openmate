@@ -37,6 +37,7 @@ from openmate_core.backend import (
     Message,
     OnLink,
     OnMessage,
+    OnRecalled,
     Person,
     SendRejected,
 )
@@ -695,7 +696,15 @@ class WeChatBackend(Backend):
 
     # ---------------------------------------------------------------- the live link
 
+    @property
+    def reports_recalls(self) -> bool:  # type: ignore[override]
+        return bool(self.hub_url)
+
     def listen(self, on_message: OnMessage, on_link: OnLink, stop: threading.Event) -> None:
+        self.listen_with_recall(on_message, on_link, stop, None)
+
+    def listen_with_recall(self, on_message: OnMessage, on_link: OnLink, stop: threading.Event,
+                           on_recalled: Optional[OnRecalled]) -> None:
         n = self._link()
         with self._mu:
             self._gen += 1
@@ -732,6 +741,14 @@ class WeChatBackend(Backend):
                             # the hub's stream goes on in memory: listening again from the kept cursor brings it back
                             # (kept, not handed over: it is handed over then; what came after it is caught up)
                             raise BackendError("一条微信消息没交给 Persona，正在重新连接再交一次", "unreachable")
+                    elif on_recalled is not None and ev.get("recalled") and gen == self._gen and (
+                            not me or self.store.get("account") in ("", me)):
+                        chat, mid = str(ev.get("chat") or ""), str(ev.get("id") or "")
+                        if chat and mid:
+                            try:
+                                on_recalled(chat, mid)
+                            except Exception as e:
+                                log.warning("a pushed recall was not taken (%s)", type(e).__name__)
                 elif kind == "cursor":
                     if not held:
                         # after the messages before it
@@ -879,6 +896,20 @@ class WeChatBackend(Backend):
         own = self.store.get("account")
         theirs = {x for x in [self.core_account] + self._saved_ids() if x}
         return bool(own and theirs and theirs != {own})
+
+    def message_gone(self, chat_id: str, message_id: str) -> Optional[bool]:
+        # Use the signed-in link without waiting for a link to start or holding its lock during the request.
+        n = self._ready_for
+        if not self.hub_url or n is None or self._closed or self._foreign_store():
+            return None
+        got = self.store.message(message_id)
+        if got is None or got[0].get("chat") != chat_id or not got[0].get("hub_id"):
+            return None
+        try:
+            result = n.call("message_gone", timeout=1.0, hub_id=got[0]["hub_id"], chat=chat_id)
+        except NativeError:
+            return None
+        return result.get("gone") if n is self._ready_for and not self._closed else None
 
     def history(self, chat_id: str, before_position: Optional[int] = None, limit: int = 50) -> List[Message]:
         if self._foreign_store():
