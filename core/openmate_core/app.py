@@ -1710,6 +1710,7 @@ class ConnectorApp:
         if self.store is None:
             return {"things": []}
         t = self.timing
+        epoch = self.account_epoch()  # one account's store: another's sign-in while it reads ends this read
         rules = str(self.config.get("triage_rules") or "").strip()
         triage = set(_id_list(self._declared("inbox_triage_chats")))  # groups whose every message the model sorts
         private = set(_id_list(self._declared("inbox_private_dms")))  # direct chats no Inbox model reads
@@ -1717,6 +1718,17 @@ class ConnectorApp:
         me = self.me_name()
         since = time.time() - t.inbox_window
         chats = self.store.chats_since(since, t.inbox_most)
+        topics_from = 0.0
+        if self.platform.inbox_topics:
+            # when a group's topics first became items of their own here: what a topic group said before then was its
+            # one item, which is handed over done (views.inbox_things) so no item of the version before stays open
+            try:
+                topics_from = float(self.store.meta_get("inbox_topics_at") or 0)
+            except ValueError:
+                topics_from = 0.0
+            if not topics_from:
+                topics_from = time.time()
+                self.store.meta_set("inbox_topics_at", repr(topics_from))
         has_mute = self.backend is not None and getattr(self.backend, "has_mute", False)
         groups = [c["id"] for c in chats if views.chat_kind(c) == "group"]
         mutes = self.store.mutes(groups, self.store.meta_get("account_id")) if has_mute else {}
@@ -1726,13 +1738,18 @@ class ConnectorApp:
             # a group's topics each need their own lines: a busy topic must not push another's @ out of the window
             rows = self.store.inbox_rows(cid, TOPIC_ROWS if topics else 60)
             dm = views.chat_kind(chat) == "dm"
-            hidden = dm and bool(private) and (cid in private or (chat.get("peer_id") or self.store.dm_peer(cid)) in private)
-            for thing in views.inbox_things(chat, rows, topics=topics, since=since, platform=self.platform.name,
+            # listed by its id: whatever kind the store took it for (a chat first kept when its kind could not be read
+            # is a group till it is); by the other person: a direct chat's
+            hidden = bool(private) and (cid in private or (dm and (chat.get("peer_id") or self.store.dm_peer(cid)) in private))
+            for thing in views.inbox_things(chat, rows, topics=topics, since=since, until=topics_from,
+                                            platform=self.platform.name,
                                             tz=self.tz, me=me, rules=rules, can_reply=self.signed_in,
                                             mute=mutes.get(cid, ("", 0.0))[0], triage=cid in triage,
                                             private=hidden):
                 thing["_chat"] = cid
                 things.append(thing)
+        if epoch != self.account_epoch():
+            return {"things": []}  # read partly for another account: none of it is handed over
         if has_mute and groups:
             now = time.time()
             self._ask_mutes([c for c in groups if c not in mutes or mutes[c][1] < now - t.mute_ttl])
@@ -2008,17 +2025,19 @@ class ConnectorApp:
     def _topic_page(self, chat: dict, chat_id: str, topic: str, thread: str, limit: int, before: str,
                     epoch: int) -> dict:
         """One topic's page (an Inbox item of inbox_topics): the messages kept here of that topic, its root first,
-        oldest first, a page of limit at a time (before: "o<how many newer ones>"). Its reply action is the send
+        oldest first, a page of limit at a time (before: where the page after it began). Its reply action is the send
         tool's, into the topic (the tool reads "<chat>:<root>" as that)."""
-        skip = 0
-        if before:
-            if not before.startswith("o") or not before[1:].isdigit():
-                raise RPCError("before 不是这个连接器给出的位置")
-            skip = int(before[1:])
         rows = [r for r in self.store.thread_messages(chat_id, topic, TOPIC_PAGE_MOST) if views.has_content(r)]
-        rows.sort(key=lambda r: (int(r["position"]), r.get("at") or 0, int(r.get("seq") or 0)))
-        end = max(0, len(rows) - skip)
-        page_rows = rows[max(0, end - limit):end]
+        place = lambda r: (int(r["position"]), float(r.get("at") or 0), int(r.get("seq") or 0))  # noqa: E731
+        rows.sort(key=place)
+        if before:  # "t<position>:<at>:<seq>" of the oldest line of the page after this one
+            try:
+                p, a, q = before[1:].split(":") if before.startswith("t") else ("", "", "")
+                bound = (int(p), float(a), int(q))
+            except ValueError:
+                raise RPCError("before 不是这个连接器给出的位置")
+            rows = [r for r in rows if place(r) < bound]
+        page_rows = rows[-limit:]
         me = self.me_name()
         messages = []
         for r in page_rows:
@@ -2027,8 +2046,9 @@ class ConnectorApp:
         page = {"chat": {"id": thread, "name": views.chat_name(chat, chat_id), "kind": views.chat_kind(chat),
                          "reply": self.cid + "_send"},
                 "messages": messages}
-        if end - len(page_rows) > 0:
-            page["before"] = "o%d" % (skip + len(page_rows))
+        if len(rows) > len(page_rows):
+            p, a, q = place(page_rows[0])
+            page["before"] = "t%d:%r:%d" % (p, a, q)
         if chat.get("members"):
             page["chat"]["members"] = int(chat["members"])
         if getattr(self.backend, "has_avatars", False):
@@ -2281,7 +2301,7 @@ def _history_key(raw: str) -> tuple:
 
 
 TOPIC_ROWS = 300  # a group's newest lines an Inbox read looks at when its topics are items of their own
-TOPIC_PAGE_MOST = 500  # a topic's lines its page reads at most
+TOPIC_PAGE_MOST = 20000  # a topic's lines its page reads at most (all a store keeps of one, in practice)
 
 
 def _id_list(v: Any) -> List[str]:

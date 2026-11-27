@@ -251,6 +251,8 @@ class Store:
             self._migrate([str(t) for t in legacy_blocked_texts if t])
             for stmt in _SCHEMA:
                 self._db.execute(stmt)
+            if "owner" not in {r[1] for r in self._db.execute("PRAGMA table_info(mutes)").fetchall()}:
+                self._db.execute("ALTER TABLE mutes ADD COLUMN owner TEXT NOT NULL DEFAULT ''")  # (made without it)
             if self._db.execute("PRAGMA user_version").fetchone()[0] == 0:
                 # a new store; an older one's version is _migrate's to set (with what it marks), never set over here
                 self._db.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)

@@ -595,6 +595,10 @@ def _send_card(app, a: dict) -> tuple:
     chat_id, topic = _topic_of(app, a)
     text = _check_text(_need(a, "text", "消息内容"))
     reply_to = str(a.get("reply_to") or "").strip() or topic
+    if topic and reply_to != topic and app.store is not None:  # into that topic: what it quotes is one of its lines
+        quoted = app.store.message(chat_id, reply_to)
+        if quoted is None or (quoted.get("root_id") or quoted["id"]) != topic:
+            raise RPCError("reply_to 不是这个话题里的消息：要回复别的话题，chat 只填会话 id")
     mentions = _mentions(app, a, chat_id)
     names = [n for _, n in mentions]
     rich = _rich(app, text, names)

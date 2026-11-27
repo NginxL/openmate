@@ -142,6 +142,14 @@ class PrivateDMsTest(unittest.TestCase):
         h = signed_in(self)
         self.assertNotIn("tier", things(h)[DM_A])
 
+    def test_by_chat_id_whatever_kind_it_was_kept_as(self):
+        h = signed_in(self, inbox_private_dms=[DM_A])
+        with h.app.store._lock:  # first kept when its kind could not be read: a group till it is
+            h.app.store._db.execute("UPDATE chats SET kind = 'group' WHERE id = ?", (DM_A,))
+        t = things(h)[DM_A]
+        self.assertEqual((t["tier"], t["preview"]), ("action", "（这个私聊设置为不交给收件箱 AI：内容不在这里，打开会话查看）"))
+        self.assertNotIn("评审", t["context"])
+
     def test_a_string_setting_is_split(self):
         h = signed_in(self, inbox_private_dms="%s， other" % DM_A)
         self.assertEqual(things(h)[DM_A]["tier"], "action")
@@ -217,6 +225,25 @@ class TopicsTest(unittest.TestCase):
         wait_until(lambda: "今天的消息" in things(self.h)[TEAM]["context"], what="today")
         self.assertNotIn("%s:%s" % (TEAM, old.id), things(self.h))
 
+    def test_the_send_tool_refuses_a_line_of_another_topic(self):
+        other = self.h.world.push(TEAM, "user_example_c", "别的话题")
+        r = self.h.world.push(TEAM, "user_example_a", "回复", root_id=other.id, parent_id=other.id)
+        wait_until(lambda: self.h.app.store.message(TEAM, r.id), what="kept")
+        with self.assertRaises(HubSideError):
+            self.h.c("actions.describe", name="matefeishu_send", args={"chat": self.topic, "text": "x", "reply_to": r.id})
+
+    def test_a_topic_group_s_one_item_from_before_is_ended(self):
+        h = signed_in(self)
+        old = [m for m in h.world.history[CHATTER]][-1]
+        with h.app.store._lock:
+            h.app.store._db.execute("UPDATE chats SET topic = 1 WHERE id = ?", (CHATTER,))
+        t = things(h)
+        self.assertEqual((t[CHATTER]["done"], t[CHATTER]["last"]), ("read", old.id))  # the item before topics: ended
+        self.assertIn("%s:%s" % (CHATTER, old.id), t)
+        new = h.world.push(CHATTER, "user_example_a", "新话题")
+        wait_until(lambda: "%s:%s" % (CHATTER, new.id) in things(h), what="the new topic")
+        self.assertEqual(things(h)[CHATTER]["last"], old.id, "that ended item never moves")
+
     def test_the_send_tool_takes_a_topic_s_thread(self):
         a = {"chat": self.topic, "text": "页里回复"}
         card = self.h.c("actions.describe", name="matefeishu_send", args=a)
@@ -254,9 +281,13 @@ class TopicsTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in first["messages"]], [m.id for m in more[-3:]])
         second = self.h.c("thread.page", thread=self.topic, limit=3, before=first["before"])
         self.assertEqual([m["id"] for m in second["messages"]], [self.reply.id] + [m.id for m in more[:2]])
+        newer = self.h.world.push(TEAM, "user_example_c", "又一条", root_id=self.root.id, parent_id=self.root.id)
+        wait_until(lambda: self.h.app.store.message(TEAM, newer.id), what="kept")
         third = self.h.c("thread.page", thread=self.topic, limit=3, before=second["before"])
-        self.assertEqual([m["id"] for m in third["messages"]], [self.root.id])
+        self.assertEqual([m["id"] for m in third["messages"]], [self.root.id])  # a newer line moves no page
         self.assertNotIn("before", third)
+        with self.assertRaises(HubSideError):
+            self.h.c("thread.page", thread=self.topic, limit=3, before="o3")
         whole = self.h.c("thread.page", thread=TEAM, limit=50)
         self.assertIn(self.main.id, [m["id"] for m in whole["messages"]])
         self.assertEqual(whole["chat"]["reply"], "matefeishu_send")
@@ -288,6 +319,26 @@ class WeChatTest(unittest.TestCase):
         self.assertNotIn("tier", things(h)[DM_A])
         with self.assertRaises(HubSideError):  # no topic ids there: a thread is a chat's id, whole
             h.c("thread.page", thread=TEAM + ":" + root.id, limit=5)
+
+
+
+class StoreTest(unittest.TestCase):
+    def test_a_mutes_table_made_without_owner_gains_it(self):
+        import sqlite3
+        import tempfile
+
+        from openmate_core.store import Store
+
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "openmate.db")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE mutes (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, checked REAL NOT NULL)")
+        db.commit()
+        db.close()
+        st = Store(path)
+        st.set_mute("c1", "muted", "a1")
+        self.assertEqual(st.mutes(["c1"], "a1")["c1"][0], "muted")
+        st.close()
 
 
 if __name__ == "__main__":

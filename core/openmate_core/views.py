@@ -131,7 +131,7 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
         kind = "mention"
     else:
         kind = "group"
-    muted = mute == "muted" and not triage and not kind_dm
+    muted = mute == "muted" and not triage and not kind_dm and not private
     if muted and kind == "group" and not done:
         done = "read"  # muted in the service: nothing to do (still archived)
     elif muted and kind == "mention" and not done:
@@ -141,7 +141,7 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
     head = where(platform, chat, chat_id)
     if root:
         head += "的一个话题（根消息 id=%s）" % root
-    hidden = kind == "dm" and private
+    hidden = private  # (listed by its id: whatever kind it was kept as)
     lines = [head]
     if hidden:
         lines.append(PRIVATE_PREVIEW)
@@ -164,16 +164,16 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
     if can_reply:
         thing["reply_to"] = reply_target(platform, chat, chat_id, topic=bool(root))
         thing["can_reply"] = True
-    if kind == "group":
+    if hidden:
+        thing["tier"] = "action"
+        thing["why"] = "规则：这个私聊设置为不交给收件箱 AI（不调用模型）"
+    elif kind == "group":
         if triage:
             # sorted by the model with the user's rules; the rule's tier only where the model cannot be asked
             thing["extra"] = {"rule_tier": "noise"}
         else:
             thing["tier"] = "noise"
             thing["why"] = "规则：群消息没有 @我，直接归为噪音（不调用模型）"
-    elif hidden:
-        thing["tier"] = "action"
-        thing["why"] = "规则：这个私聊设置为不交给收件箱 AI（不调用模型）"
     if done == "read":
         thing["done"] = "read"
         thing["why"] = "规则：这个群在飞书里设了消息免打扰，没有 @我"
@@ -181,7 +181,7 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
         thing["done"] = done
         thing["why"] = "我已经回复"
     tags = [{"key": "chat", "value": chat_id, "name": name}]
-    last_other = considered[-1]
+    last_other = latest if not latest.get("mine") else considered[-1]  # (a muted group's @: its sender)
     if last_other.get("sender_id"):
         tags.append({"key": "sender", "value": last_other["sender_id"], "name": sender_of(last_other, me)})
     thing["tags"] = tags
@@ -196,7 +196,8 @@ def _place(r: dict) -> tuple:
     return (int(r.get("position") or 0), float(r.get("at") or 0), int(r.get("seq") or 0))
 
 
-def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, since: float = 0.0, **kw) -> List[dict]:
+def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, since: float = 0.0, until: float = 0.0,
+                 **kw) -> List[dict]:
     """The chat's things from its recent rows (oldest first): one for the chat (inbox_thing), or, with topics, in a
     group one for each topic its rows are in besides the chat's own.
 
@@ -204,7 +205,8 @@ def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, since: f
     and replies. In an ordinary group a topic's thing is its replies (the root above them, for context): the root was
     said in the main stream, so it stays the chat's own thing's, and the user's own replies in a topic whose root is
     there end that thing as well (it asked, the user answered where it was asked). A topic whose last line is older
-    than since is left out."""
+    than since is left out. until: when topics became items of their own; a topic group's lines said before it were
+    its one item, which is handed over done (with those lines only, so it stays that one item)."""
     if not topics or chat_kind(chat) == "dm":
         thing = inbox_thing(chat, rows, **kw)
         return [thing] if thing is not None else []
@@ -223,10 +225,16 @@ def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, since: f
         thing = inbox_thing(chat, mine_too, **kw)
         if thing is not None:
             out.append(thing)
-    elif main:  # (a topic group's line outside any topic: the chat's own)
-        thing = inbox_thing(chat, main, **kw)
-        if thing is not None:
-            out.append(thing)
+    else:
+        before = [r for r in rows if float(r.get("at") or 0) <= until] if until else []
+        old = inbox_thing(chat, before, **kw) if before and not main else None
+        if old is not None and not old.get("done"):
+            old["done"], old["why"] = "read", "规则：这个群的消息现在按话题各成一条"
+            out.append(old)  # the one item a version before this one kept for the whole group: ended
+        if main:  # (a topic group's line outside any topic: the chat's own)
+            thing = inbox_thing(chat, main, **kw)
+            if thing is not None:
+                out.append(thing)
     by_id = {str(r.get("id") or ""): r for r in rows}
     for root, part in scopes.items():
         if not part or max(float(r.get("at") or 0) for r in part) < since:
