@@ -54,8 +54,16 @@ def platform(manifest_path: str = "") -> Platform:
         legacy_blocked_texts=(DLP_BLOCKED_TEXT,),  # what told a blocked message before 0.11.29 stored the mark
         tools=_media_tools,  # matefeishu_media and matefeishu_members (read-only)
         media_tool=CONNECTOR_ID + "_media",
-        inbox_topics=True,  # a group's topics are Inbox items of their own ("<chat>:<root>")
+        inbox_topics=True,
+        agent_task_wait=True,  # a request whose conversation handed out work stays open until the answer comes
+        verify_at=_verify_at,  # an /agent reply's `at`: checked against the chat's members (matefeishu_members)  # a group's topics are Inbox items of their own ("<chat>:<root>")
     )
+
+
+def _verify_at(app, chat_id, wanted):
+    from .members import verify
+
+    return verify(app, chat_id, wanted)
 
 
 def _media_tools(app):

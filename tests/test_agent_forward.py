@@ -128,10 +128,11 @@ class ForwardTest(unittest.TestCase):
         self.assertEqual(h.app.store.run_get(run1["id"])["superseded_by"], ask_run["id"])
         h.http.add(sid, "assistant", "text", "都安排好了")
         h.http.end_turn(sid)
-        wait_until(lambda: [s for s in replies(h) if s["text"].startswith("都安排好了")], what="the answer")
+        # (its task still open: the words show as the request's progress, the answer awaited; agent_task_wait)
+        wait_until(lambda: [s for s in replies(h) if "都安排好了" in s["text"]], what="the answer")
         time.sleep(0.4)
-        self.assertEqual([s["reply_to"] for s in replies(h) if s["text"].startswith("都安排好了")], [ask_msg.id],
-                         "one answer, under the request asked last")
+        self.assertEqual([s["reply_to"] for s in replies(h) if "都安排好了" in s["text"]], [ask_msg.id],
+                         "said once, under the request asked last")
 
     def test_a_stop_while_the_agent_is_looked_up_stops_the_conversation(self):
         h, first, run1, sid = dispatched(self)

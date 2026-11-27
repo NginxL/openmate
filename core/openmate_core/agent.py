@@ -47,7 +47,7 @@ from urllib.parse import urlsplit
 from . import cards, images, modelimages, placement, views
 from .backend import BackendError
 from .hub import HubError
-from .textutil import clip, local_stamp, strip_leading_mentions
+from .textutil import clip, local_stamp, mention_spans, strip_leading_mentions
 from .wire import RPCError
 
 START_REPLAY_MOST = 25 * 86400.0  # a start older than this is not asked again (the hub keeps receipts 30 days)
@@ -158,6 +158,7 @@ ASK_ASSISTANT = re.compile(r"问\s*(?:persona|助手)", re.IGNORECASE)  # a foll
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # what agents.control refuses in a message (newline, tab kept)
 ACTIVE = ("starting", "running")
 PROMPT_MOST = 30000
+AT_MOST = 20  # people one /agent reply @-s at most
 REQUEST_IMAGES_MOST = 4  # pictures of a request handed to its conversation…
 REQUEST_IMAGE_MOST = 3 << 20  # …each at most this big
 CONTEXT_MESSAGES = 40
@@ -349,6 +350,7 @@ class AgentRunner:
         self._placing_mu = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._swept = 0.0  # when the requests waiting for their answers were last looked at (_tasks_sweep)
         self._thread: Optional[threading.Thread] = None
         self._last_prune = 0.0
         self._posted: Dict[str, float] = {}  # hashes of what /agent posted lately: their echoes are never requests
@@ -1922,10 +1924,17 @@ class AgentRunner:
             "我在%s里发了一条 /agent 请求，请你替我处理。" % p,
             "- 这次请求的 id 是 %s。处理完调用工具 %s_agent_reply 回复：request 填 \"%s\"，text 填要发的内容。回复会以我的身份%s，并自动加上 AI 代答标记，你不用自己加。" % (self._ref(run), c, self._ref(run), _WHERE_WORDS.get(run.get("placement") or "", "发到这个话题里")),
             "- 回复以我的名义发出：只写已经做完的事和查到的事实；还没做的写成建议，不要替我答应任何事。",
-        ] + (["- text 排版：" + cards.REPLY_WORDS] if render_cards else []) + ([
+        ] + ([
+            "- 回复默认就是对我（提问的人）说的：直接写结果，不要在开头称呼谁或「@」谁。正文里打的「@名字」只是普通文字，不会提醒到人，"
+            "不要用它假装 @ 了谁。确实要提醒群里某人或某个机器人时，先用 %s_members 查到他的 id 和准确显示名，在 %s_agent_reply 的 at 里传 "
+            "[{\"id\": …, \"name\": …}]，并在 text 里原样写「@显示名」；查不到就不要 @。" % (c, c),
+        ] if self._verified_at() else []) + (["- text 排版：" + cards.REPLY_WORDS] if render_cards else []) + ([
             "- 中途进度：调用 %s_agent_reply 时加 progress=true，它会原地更新同一条进度消息，不会刷屏；只发有意义的进展。" % c,
             "- 最终结果：不要带 progress，它会作为一条新回复发出并提醒我，之前那条进度消息会标成已完成。",
-        ] if self._can_edit() else [
+        ] + ([
+            "- 把活派给 Agent（建了待办）时：可以先带 progress=true 告诉我派给了谁、在做什么，等任务有了结果再不带 progress 发最终回复。"
+            "还没有最终回复时，这个请求会一直挂着等结果（🤔），这一轮最后说的话只当进度显示，不当答案。",
+        ] if self._task_wait_on() else []) if self._can_edit() else [
             "- 只回复一次最终结果：%s不能编辑消息，中途进度不要发（会以我的身份在群里刷屏）。" % p,
         ]) + ([
             "- 需要流程图、步骤图、表格这类图示时，可以画成一张 PNG（比如先手写 SVG，再用无头 Chrome 渲染成 PNG），存到 /tmp 下，在最终回复时把它的绝对路径填进 image：文字照常写，图片紧跟着单独发出。只能带一张，最多 10 MB；文字里不要贴图片路径。",
@@ -2111,6 +2120,10 @@ class AgentRunner:
                 self._retry_notes()
             except Exception:
                 log.exception("/agent: the notes of follow-ups handed on could not be tried again")
+            try:
+                self._tasks_sweep()
+            except Exception:
+                log.exception("/agent: the requests waiting for their answers could not be looked at")
             for run in self.store.runs_in_state(["running"]):
                 if self._stop.is_set():
                     return
@@ -2214,13 +2227,79 @@ class AgentRunner:
         # waits, so that a dropped machine's half-written answer is never posted as the answer.
         return bool(run.get("replies")) and row.get("status") == "offline"
 
+    def _verified_at(self) -> bool:
+        """The reply tool takes `at`: real @s checked against the chat's members (Platform.verify_at)."""
+        return getattr(self.app.platform, "verify_at", None) is not None and \
+            bool(getattr(getattr(self.app, "backend", None), "can_mention", False))
+
+    def _task_wait_on(self) -> bool:
+        return bool(getattr(self.app.platform, "agent_task_wait", False))
+
+    def _open_tasks(self, run: dict) -> str:
+        """Whether the run's conversation still has work it handed out under way: "open" (an open to-do it opened,
+        `origin`), "none", or "unknown" (the hub could not say now)."""
+        conv = run.get("session_id") or ""
+        if not conv:
+            return "none"
+        if not self.hub.available:
+            return "unknown"
+        try:
+            todos = self.hub.todos()
+        except HubError as e:
+            if e.status == 404:
+                return "none"  # a hub without to-dos: nothing is waited on
+            log.info("/agent: the to-dos could not be read (HTTP %s %s)", e.status, e.code)
+            return "unknown"
+        busy = [t for t in todos if t.get("origin") == conv and not t.get("done_at") and (t.get("kind") or "") in ("", "todo")]
+        return "open" if busy else "none"
+
+    def _may_await(self, cur: dict) -> bool:
+        """With agent_task_wait: a run whose turn ends with no answer yet (only progress, or nothing) may end waiting
+        for it, when its conversation has handed out work (_open_tasks)."""
+        return (self._task_wait_on() and cur.get("kind") not in GUEST_KINDS and not cur.get("forward_pending")
+                and not int(cur.get("replies") or 0) and not int(cur.get("reply_inflight") or 0)
+                and not cur.get("fallback") and self._can_edit())
+
+    def _tasks_sweep(self) -> None:
+        """The requests that ended waiting for their answer (awaiting): their 🤔 becomes ✅ once the answer went out
+        (an end a restart cut off), no work their conversation handed out is left under way, or agent_task_wait_most
+        went by. Nothing is said in the chat."""
+        t = self.app.timing
+        now = time.time()
+        if not self._task_wait_on() or now - self._swept < t.agent_task_recheck:
+            return
+        self._swept = now
+        for run in self.store.runs_in_state(["done"]):
+            if not run.get("awaiting"):
+                continue
+            end = bool(int(run.get("replies") or 0)) or now - float(run.get("awaiting_since") or 0) > t.agent_task_wait_most
+            if not end and self._open_tasks(run) != "none":
+                continue
+            with self._lock(run["id"]):
+                cur = self.store.run_get(run["id"])
+                if cur is None or not cur.get("awaiting"):
+                    continue
+                cur["awaiting"] = ""
+                self.store.run_put(cur)
+            self._end_reaction(run["id"], "done")
+
     def _turn_ended(self, run_id: str) -> None:
+        first = self.store.run_get(run_id)
+        # (the hub asked before the run's lock is taken: its answer may take a while)
+        tasks = self._open_tasks(first) if first is not None and self._may_await(first) else "none"
         with self._lock(run_id):
             cur = self.store.run_get(run_id)
             if cur is None or cur["state"] != "running":
                 return
             post = None
-            if not cur["replies"] and not cur["reply_inflight"] and not cur.get("fallback"):
+            awaiting = tasks != "none" and self._may_await(cur)
+            if awaiting:
+                # its conversation handed the work out and it has not answered yet: not the end of it. Its last words
+                # go as its progress (edited in place later), its 🤔 stays till the answer comes (_tasks_sweep)
+                cur["awaiting"], cur["awaiting_since"] = tasks, time.time()
+                log.info("/agent: the turn ended with no answer while its work is %s: waiting for the answer",
+                         "under way" if tasks == "open" else "not known to be done")
+            if not awaiting and not cur["replies"] and not cur["reply_inflight"] and not cur.get("fallback"):
                 lt = cur.get("last_text") or {}
                 text = lt.get("text") or ""
                 if lt.get("full") and lt.get("id"):
@@ -2234,6 +2313,9 @@ class AgentRunner:
                     post = text
             cur["state"] = "done"
             self.store.run_put(cur)
+        if awaiting:
+            self._await_progress(cur)
+            return
         self._end_reaction(run_id, "done")
         me = None
         if post is not None and cur.get("kind") not in QUIET_KINDS:
@@ -2258,6 +2340,26 @@ class AgentRunner:
                 self.store.run_put(cur)
             if mid and cur.get("progress_id"):
                 self._progress_done(cur)
+
+    def _await_progress(self, run: dict) -> None:
+        """A run that ended waiting for its answer: the turn's last words (when it said any and sent no progress of its
+        own) go as its progress message, so the chat hears what was handed out; never as the answer."""
+        if run.get("progress_id"):
+            return
+        lt = run.get("last_text") or {}
+        text = lt.get("text") or ""
+        if lt.get("full") and lt.get("id"):
+            try:
+                text = (self.hub.item_full(run["machine_id"], run["session_id"], lt["id"]) or {}).get("text") or text
+            except HubError:
+                pass
+        words = self._clean_answer(text, run).strip() if text.strip() else ""
+        if not words:
+            return
+        try:
+            self._progress(run, words)
+        except Exception as e:
+            log.info("/agent: the waiting request's progress was not sent (%s)", getattr(e, "kind", "") or type(e).__name__)
 
     def _timeout(self, run_id: str) -> None:
         with self._lock(run_id):
@@ -2571,7 +2673,7 @@ class AgentRunner:
     def _can_send_images(self) -> bool:
         return bool(getattr(self.app.backend, "can_send_images", False))
 
-    def reply_tool(self, request: str, text: str, progress: bool = False, image: str = "") -> str:
+    def reply_tool(self, request: str, text: str, progress: bool = False, image: str = "", at=None) -> str:
         """<connector>_agent_reply: only the run this request id names, and only while it may still reply. progress:
         the run's progress message, edited in place (_progress), not the answer. image: a picture sent right after the
         answer's text, part of the same one reply (checked before anything goes out)."""
@@ -2579,13 +2681,37 @@ class AgentRunner:
         sid = (run or {}).get("session_id") or ""
         if run is not None and run.get("kind") == "auto":
             with self._lock("reply:" + run["id"]):  # one answer at a time: which one @s the asker is decided in turn
-                return self._reply_tool(request, text, progress, image)
+                return self._reply_tool(request, text, progress, image, at)
         if run is None or not sid or run.get("kind") in GUEST_KINDS:
-            return self._reply_tool(request, text, progress, image)
+            return self._reply_tool(request, text, progress, image, at)
         with self._lock("route:" + sid):  # where a reply goes is chosen and held one reply at a time per conversation
-            return self._reply_tool(request, text, progress, image)
+            return self._reply_tool(request, text, progress, image, at)
 
-    def _reply_tool(self, request: str, text: str, progress: bool = False, image: str = "") -> str:
+    def _at_pairs(self, run: dict, text: str, at, progress: bool) -> List[Tuple[str, str]]:
+        """The reply's real @s ([(user id, name)]): each one checked against the chat's members (Platform.verify_at)
+        and written in the text as "@name"; RPCError saying what is wrong (nothing is sent then). A platform without
+        verify_at takes none: `at` is not its tool's, and is left alone (as before)."""
+        if at in (None, "", []) or not self._verified_at():
+            return []
+        if progress:
+            raise RPCError("进度消息不能 @ 人：做完后在最终回复里带上 at")
+        if run.get("kind") in GUEST_KINDS:
+            raise RPCError("自动代答和文档代答不能另外 @ 人")
+        if not isinstance(at, list) or not all(isinstance(x, dict) for x in at) or len(at) > AT_MOST:
+            raise RPCError("at 要写成 [{\"id\": …, \"name\": …}]，最多 %d 个" % AT_MOST)
+        try:
+            pairs = list(self.app.platform.verify_at(self.app, run["chat_id"], at))
+        except Exception as e:
+            raise RPCError(str(e) or "没能核实要 @ 的人")
+        me = getattr(getattr(self.app, "account", None), "id", "")
+        if me and any(uid == me for uid, _ in pairs):  # sent as the user, an @ of them reads as an @自己 request
+            raise RPCError("at 里不能有你自己")
+        missing = [n for u, n in pairs if mention_spans(text, [(u, n)])[0] != text]
+        if missing:
+            raise RPCError("text 里要写出「@%s」（at 里的人都要在正文里原样写到）" % "」「@".join(missing))
+        return pairs
+
+    def _reply_tool(self, request: str, text: str, progress: bool = False, image: str = "", at=None) -> str:
         run = self.store.run_get(request.split(".", 1)[0])
         if run is None:
             raise RPCError("没有这个 /agent 请求：request 不对，或者已经过期")
@@ -2596,7 +2722,9 @@ class AgentRunner:
         named = run["id"]  # a reply's key is the request it names: asked again, it is the same reply wherever it went
         if run.get("kind") not in GUEST_KINDS and run.get("session_id") and self._stopped_since_asked(run):
             raise RPCError("这个 /agent 请求已经停止了，不再回复")  # its conversation was stopped since it was asked
-        named_key = "agent:%s:%s" % (named, hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32])
+        ats = self._at_pairs(run, text, at, progress)
+        said = text.strip() + ("\x00" + "\x00".join("%s=%s" % p for p in ats) if ats else "")  # with its @s: another reply
+        named_key = "agent:%s:%s" % (named, hashlib.sha256(said.encode("utf-8")).hexdigest()[:32])
         if self.store.send_get(named_key) is None:  # asked again: where it went the first time, never a second place
             run = self._answered_follow_up(run)
         if time.time() - run["created"] > self.app.timing.agent_keep:
@@ -2670,7 +2798,7 @@ class AgentRunner:
                     cur["reply_inflight"] = max(0, int(cur.get("reply_inflight") or 0) - 1)
                     self.store.run_put(cur)
             raise RPCError("回复里只有 AI 标记，没有正文：请把答案本身写进 text")
-        if not image and not quiet and cards.enabled(self.app):
+        if not image and not quiet and not ats and cards.enabled(self.app):
             mark = self._mark_line(header, cur, me) or self.suffix.strip().rsplit("\n", 1)[-1]
             with cards.reply(answer, self.app.data_dir, mark) as (words, picture, fulltext):
                 # A /stop may have arrived while the renderer was working.
@@ -2685,10 +2813,10 @@ class AgentRunner:
                         raise RPCError("这个 /agent 请求已经停止了，不再回复" if stopped else "回复内容是空的")
                 return self._deliver_reply(cur, key, words, me, asker, picture, skipped,
                                            cleaned=True, fulltext=fulltext)
-        return self._deliver_reply(cur, key, text, me, asker, pic, skipped)
+        return self._deliver_reply(cur, key, text, me, asker, pic, skipped, ats=ats)
 
     def _deliver_reply(self, cur: dict, key: str, text: str, me: tuple, asker: Optional[tuple], pic: Optional[tuple],
-                       skipped: str, *, cleaned: bool = False, fulltext: str = "") -> str:
+                       skipped: str, *, cleaned: bool = False, fulltext: str = "", ats=()) -> str:
         rid = cur["id"]
         body, at = self._marked(text, cur, me, "@" + asker[1] if asker else "", cleaned=cleaned)
         if asker and not ai_marked(body, AI_MARKS):  # the mark as it came out is not where others read it: no @
@@ -2696,11 +2824,18 @@ class AgentRunner:
             body, at = self._marked(text, cur, me, cleaned=cleaned)
         full_body = self._marked(fulltext, cur, me, cleaned=True)[0] if fulltext else ""
         sent_id = ""
+        at_note = ""
         try:
             if cur.get("kind") == "doc":
                 res = self._doc_reply(cur, key, body)
             else:
                 mentions = [(asker[0], asker[1], at)] if asker else None
+                if ats and not asker:  # the @s the reply wrote, where the marked body writes them
+                    marked, spans = mention_spans(body, list(ats))
+                    if marked == body and len({u for u, _, _ in spans}) == len(ats):
+                        mentions = spans
+                    else:
+                        at_note = "；at 没有生效（正文里的「@名字」被 AI 标记行改掉了），发出的是普通文字"
                 res = self._send(cur, key, body, mentions=mentions, **self._where(cur))
             sent_id = str(res.get("message_ref") or "")
             went = True
@@ -2728,7 +2863,14 @@ class AgentRunner:
             self.store.run_put(cur)
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
-        note = self._send_image(cur, pic, key, full_body) if pic is not None else skipped
+        if cur.get("awaiting"):  # the answer it waited for: ✅ now
+            with self._lock(rid):
+                latest = self.store.run_get(rid)
+                if latest is not None and latest.get("awaiting"):
+                    latest["awaiting"] = ""
+                    self.store.run_put(latest)
+            self._end_reaction(rid, "done")
+        note = self._send_image(cur, pic, key, full_body) + at_note if pic is not None else skipped + at_note
         return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, sent_id or "未知", note)
 
     def _send_image(self, run: dict, pic: tuple, reply_key: str, fulltext: str = "") -> str:

@@ -84,6 +84,14 @@ class Platform:
     #: its context, done state, page and reply that topic's; what is said outside any topic stays the chat's item
     #: (its id the chat's, as before). Feishu: yes. WeChat: no (no topics; one item per chat as always)
     inbox_topics: bool = False
+    #: an /agent request whose turn ended with only progress (or nothing) sent, while its conversation still has an
+    #: open to-do it handed out, or the to-dos cannot be read, stays open (🤔, no last words posted as the answer) until
+    #: the answer comes through the reply tool, or no such to-do is left. Feishu: yes. WeChat: no (as before)
+    agent_task_wait: bool = False
+    #: checks the people an /agent reply really @-s (its `at`): (app, chat id, [{"id", "name"}]) → [(user id, name)],
+    #: raising with the reason when one is not that chat's member by that name. None: the reply tool takes no `at`
+    #: (WeChat: as before)
+    verify_at: Optional[Callable[[Any, str, list], list]] = None
 
 
 @dataclass
@@ -127,5 +135,7 @@ class Timing:
     avatar_batch: int = 30  # …at most this many chats per round, in the background (an Inbox read never waits for it)
     mute_ttl: float = 3600.0  # a group's mute state (has_mute) is asked of the service again when it is this old…
     mute_retry: float = 600.0  # …and never sooner than this after it was asked (a failed read is "unknown" till mute_ttl)…
+    agent_task_wait_most: float = 86400.0  # a request waiting on its to-dos (agent_task_wait) times out this late…
+    agent_task_recheck: float = 60.0  # …and asks the hub about them at most this often
     mute_batch: int = 10  # …at most this many groups per round, in the background (an Inbox read never waits for it)
     extra: Dict[str, float] = field(default_factory=dict)
