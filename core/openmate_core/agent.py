@@ -659,7 +659,7 @@ class AgentRunner:
             shown = row.get("text_after_mentions")
             for words in ([shown] if isinstance(shown, str) else []) + [text]:
                 first, _, rest = strip_leading_mentions(words).lstrip().partition("\n")
-                if first.strip() == title and rest.strip():
+                if first.strip() in (title, strip_leading_mentions(title).strip()) and rest.strip():
                     req = match_prefix(rest.lstrip(), self.prefix)
                     break
         # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), is surely not
@@ -1093,8 +1093,14 @@ class AgentRunner:
         try:
             self._start_once_now(run, row, epoch)
         finally:
-            if self._state(run["id"]) != "starting" or not self._stop.is_set():
-                self._drop_request_images(run["id"])  # its start is over (shutting down midway: kept for the resume)
+            # its start is over: its pictures go (shutting down midway: kept for the resume). Only a run with some
+            # is looked at (a store already closed at shutdown is never read here)
+            if getattr(self.app, "data_dir", "") and os.path.isdir(self._images_dir(run["id"])):
+                try:
+                    if not (self._stop.is_set() and self._state(run["id"]) == "starting"):
+                        self._drop_request_images(run["id"])
+                except Exception:
+                    pass
 
     def _start_once_now(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
         """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
@@ -2274,11 +2280,12 @@ class AgentRunner:
         if not waiting:
             return
         todos: Optional[List[dict]] = None
+        read = False
         for run in waiting:
             end = bool(int(run.get("replies") or 0)) or now - float(run.get("awaiting_since") or 0) > t.agent_task_wait_most
             if not end:
-                if todos is None:  # (one read of the to-dos for all of them)
-                    todos = self._todos_now()
+                if not read:  # (one read of the to-dos for all of them, a failed one too)
+                    todos, read = self._todos_now(), True
                 if todos is None or self._open_tasks(run, todos) != "none":
                     continue
             self._end_awaiting(run["id"])
