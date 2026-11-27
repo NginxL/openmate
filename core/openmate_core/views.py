@@ -88,16 +88,23 @@ def unanswered_run(rows: List[dict]) -> List[dict]:
     return rows[i:]
 
 
+PRIVATE_PREVIEW = "（这个私聊设置为不交给收件箱 AI：内容不在这里，打开会话查看）"
+
+
 def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rules: str, can_reply: bool,
-                context_lines: int = 8, root: str = "", mute: str = "", triage: bool = False,
-                private: bool = False) -> Optional[dict]:
+                context_lines: int = 8, root: str = "", lead: Optional[dict] = None, mute: str = "",
+                triage: bool = False, private: bool = False) -> Optional[dict]:
     """One thing for a chat from its recent rows (oldest first), or None when there is nothing to show.
 
     root: the rows are one topic's of a group (inbox_things): the thing is that topic's ("<chat>:<root>"), its context,
-    done state and reply that topic's. mute: the group's mute state ("muted", "normal", "unknown" or "": not asked).
-    triage: the user listed the group for AI triage (setting inbox_triage_chats): its messages without an @ of the
-    user go to the triage model too, muted or not. private: the user listed the direct chat as one not handed to the
-    Inbox's AI (setting inbox_private_dms): its tier is the rule's, no model is asked."""
+    done state and reply that topic's; lead: the topic's root message when it is the chat's own item's (an ordinary
+    group: the root was said in the main stream), shown first in the context and not counted as the topic's.
+    mute: the group's mute state ("muted", "normal", "unknown" or "": not asked). A muted group's thing that does not
+    @ the user is handed over as already done (read: Persona's own muted items are), and in one that does, what came
+    after the user's @ is not what it is about. triage: the user listed the group for AI triage (setting
+    inbox_triage_chats): its messages without an @ go to the triage model too, muted or not. private: the user listed
+    the direct chat as one not handed to the Inbox's AI (setting inbox_private_dms): its tier is the rule's and no
+    words of it are in the thing (preview, context): no model reads them."""
     msgs = [r for r in rows if not is_system(r) and has_content(r)]
     if not msgs:
         return None
@@ -124,21 +131,32 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
         kind = "mention"
     else:
         kind = "group"
-    if kind == "group" and mute == "muted" and not triage and not done:
-        return None  # muted in the service: what does not @ the user stays out of the Inbox (still archived)
+    muted = mute == "muted" and not triage and not kind_dm
+    if muted and kind == "group" and not done:
+        done = "read"  # muted in the service: nothing to do (still archived)
+    elif muted and kind == "mention" and not done:
+        # muted: the @ of the user is the thing, not the chatter after it
+        latest = [r for r in considered if r.get("at_me")][-1]
     name = chat_name(chat, chat_id)
     head = where(platform, chat, chat_id)
     if root:
         head += "的一个话题（根消息 id=%s）" % root
+    hidden = kind == "dm" and private
     lines = [head]
-    lines += [log_line(r, tz, me) for r in msgs[-context_lines:]]
+    if hidden:
+        lines.append(PRIVATE_PREVIEW)
+    else:
+        if lead is not None and has_content(lead) and not is_system(lead):
+            lines.append(log_line(lead, tz, me) + "（话题的根消息）")
+        upto = msgs.index(latest) + 1 if latest in msgs else len(msgs)
+        lines += [log_line(r, tz, me) for r in msgs[:upto][-context_lines:]]
     thing = {
         "thread": "%s:%s" % (chat_id, root) if root else chat_id,
         "kind": kind,
         "label": LABELS[kind],
         "title": name,
         "sender": sender_of(latest, me),
-        "preview": one_line(text_of(latest), 200),
+        "preview": PRIVATE_PREVIEW if hidden else one_line(text_of(latest), 200),
         "context": "\n".join(lines),
         "at": rfc3339(latest.get("at") or 0),
         "last": latest["id"],
@@ -153,10 +171,13 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
         else:
             thing["tier"] = "noise"
             thing["why"] = "规则：群消息没有 @我，直接归为噪音（不调用模型）"
-    elif kind == "dm" and private:
+    elif hidden:
         thing["tier"] = "action"
         thing["why"] = "规则：这个私聊设置为不交给收件箱 AI（不调用模型）"
-    if done:
+    if done == "read":
+        thing["done"] = "read"
+        thing["why"] = "规则：这个群在飞书里设了消息免打扰，没有 @我"
+    elif done:
         thing["done"] = done
         thing["why"] = "我已经回复"
     tags = [{"key": "chat", "value": chat_id, "name": name}]
@@ -169,30 +190,54 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
     return thing
 
 
-def topic_of(row: dict, roots: set) -> str:
-    """The topic a group's row is in: its thread's root (a reply in a topic), itself when it is a topic's root (a
-    reply in its thread is known, or the service read it as a thread-first group's root), "" outside any topic."""
-    if row.get("root_id"):
-        return str(row["root_id"])
-    rid = str(row.get("id") or "")
-    if rid and (rid in roots or row.get("thread_id") == rid):
-        return rid
-    return ""
+def _place(r: dict) -> tuple:
+    """A row's place in its chat: its position, then when it was said (a thread's replies may share a position), then
+    when it was kept."""
+    return (int(r.get("position") or 0), float(r.get("at") or 0), int(r.get("seq") or 0))
 
 
-def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, **kw) -> List[dict]:
+def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, since: float = 0.0, **kw) -> List[dict]:
     """The chat's things from its recent rows (oldest first): one for the chat (inbox_thing), or, with topics, in a
-    group one for each topic its rows are in and one for what was said outside any topic."""
+    group one for each topic its rows are in besides the chat's own.
+
+    A group in topic mode (chat.topic: every message opens a topic or replies in one) has a thing per topic, its root
+    and replies. In an ordinary group a topic's thing is its replies (the root above them, for context): the root was
+    said in the main stream, so it stays the chat's own thing's, and the user's own replies in a topic whose root is
+    there end that thing as well (it asked, the user answered where it was asked). A topic whose last line is older
+    than since is left out."""
     if not topics or chat_kind(chat) == "dm":
         thing = inbox_thing(chat, rows, **kw)
         return [thing] if thing is not None else []
-    roots = {str(r["root_id"]) for r in rows if r.get("root_id")}
+    rows = sorted(rows, key=_place)
+    topic_mode = bool(chat.get("topic"))
     scopes: Dict[str, List[dict]] = {}
     for r in rows:
-        scopes.setdefault(topic_of(r, roots), []).append(r)
+        key = str(r.get("root_id") or "") or (str(r.get("id") or "") if topic_mode else "")
+        scopes.setdefault(key, []).append(r)
     out = []
+    main = scopes.pop("", [])
+    if not topic_mode:
+        ids = {str(r.get("id") or "") for r in main}
+        answered = [r for key, part in scopes.items() if key in ids for r in part if r.get("mine")]
+        mine_too = sorted(main + answered, key=_place)
+        thing = inbox_thing(chat, mine_too, **kw)
+        if thing is not None:
+            out.append(thing)
+    elif main:  # (a topic group's line outside any topic: the chat's own)
+        thing = inbox_thing(chat, main, **kw)
+        if thing is not None:
+            out.append(thing)
+    by_id = {str(r.get("id") or ""): r for r in rows}
     for root, part in scopes.items():
-        thing = inbox_thing(chat, part, root=root, **kw)
+        if not part or max(float(r.get("at") or 0) for r in part) < since:
+            continue
+        lead = None
+        if not topic_mode:
+            part = [r for r in part if str(r.get("id") or "") != root]
+            lead = by_id.get(root)
+            if not part:
+                continue
+        thing = inbox_thing(chat, part, root=root, lead=lead, **kw)
         if thing is not None:
             out.append(thing)
     return out

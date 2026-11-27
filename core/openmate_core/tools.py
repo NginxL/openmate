@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import cards, modelimages, views
 from .backend import BackendError
@@ -580,10 +580,21 @@ def _opens_topic(app, chat_id: str) -> bool:
         return False
 
 
-def _send_card(app, a: dict) -> tuple:
+def _topic_of(app, a: dict) -> Tuple[str, str]:
+    """(chat id, topic root) the send's chat names: an Inbox topic's thread ("<chat>:<root>", inbox_topics: its page's
+    reply) is that chat, into that topic; any other chat id is itself ("" root)."""
     chat_id = _need(a, "chat", "会话 id")
+    if getattr(app.platform, "inbox_topics", False) and ":" in chat_id:
+        cid, _, root = chat_id.partition(":")
+        if cid and root:
+            return cid, root
+    return chat_id, ""
+
+
+def _send_card(app, a: dict) -> tuple:
+    chat_id, topic = _topic_of(app, a)
     text = _check_text(_need(a, "text", "消息内容"))
-    reply_to = str(a.get("reply_to") or "").strip()
+    reply_to = str(a.get("reply_to") or "").strip() or topic
     mentions = _mentions(app, a, chat_id)
     names = [n for _, n in mentions]
     rich = _rich(app, text, names)
@@ -702,8 +713,8 @@ def do(app, params: dict) -> dict:
     if name == c + "_send":
         try:
             chat_id, text, reply_to, visible, _, mentions, rich = _send_card(app, a)
-            root = None
-            if reply_to:
+            root = _topic_of(app, a)[1] or None  # an Inbox topic's page: into that topic
+            if reply_to and root is None:
                 quoted = app.store.message(chat_id, reply_to)
                 if quoted is not None and quoted.get("root_id"):
                     root = quoted["root_id"]

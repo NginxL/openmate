@@ -101,7 +101,10 @@ _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS avatars (chat_id TEXT PRIMARY KEY, value TEXT NOT NULL, checked REAL NOT NULL)",
     # whether the account muted a group in the service's own client (Backend.chat_mute): state "muted", "normal" or
     # "unknown" (asked, and the service did not say), and when it was last asked; a table of its own, like avatars
-    "CREATE TABLE IF NOT EXISTS mutes (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, checked REAL NOT NULL)",
+    # (owner: the account it was asked for; an older version's account switch does not empty this table, so a row of
+    # another account's is never read)
+    "CREATE TABLE IF NOT EXISTS mutes (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, checked REAL NOT NULL, "
+    "owner TEXT NOT NULL DEFAULT '')",
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
@@ -369,22 +372,23 @@ class Store:
             out.update({r["chat_id"]: (r["value"], float(r["checked"])) for r in rows})
         return out
 
-    def set_mute(self, chat_id: str, state: str, now: Optional[float] = None) -> None:
-        """A group's mute state as the service says it now: "muted", "normal" or "unknown"."""
+    def set_mute(self, chat_id: str, state: str, owner: str = "", now: Optional[float] = None) -> None:
+        """A group's mute state as the service says it now: "muted", "normal" or "unknown", for the account owner."""
         if state not in ("muted", "normal", "unknown"):
             state = "unknown"
         self._tx(lambda db: db.execute(
-            "INSERT INTO mutes (chat_id, state, checked) VALUES (?, ?, ?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET state = excluded.state, checked = excluded.checked",
-            (str(chat_id), state, now or time.time())))
+            "INSERT INTO mutes (chat_id, state, checked, owner) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET state = excluded.state, checked = excluded.checked, owner = excluded.owner",
+            (str(chat_id), state, now or time.time(), owner or "")))
 
-    def mutes(self, ids: Iterable[str]) -> Dict[str, Tuple[str, float]]:
-        """{chat id: (state, when it was asked)} of those of ids the service was asked about."""
+    def mutes(self, ids: Iterable[str], owner: str = "") -> Dict[str, Tuple[str, float]]:
+        """{chat id: (state, when it was asked)} of those of ids the service was asked about for the account owner."""
         ids = sorted({str(i) for i in ids if i})
         out: Dict[str, Tuple[str, float]] = {}
         for i in range(0, len(ids), 500):
             part = ids[i:i + 500]
-            rows = self._all("SELECT chat_id, state, checked FROM mutes WHERE chat_id IN (%s)" % ",".join("?" * len(part)), part)
+            rows = self._all("SELECT chat_id, state, checked FROM mutes WHERE owner = ? AND chat_id IN (%s)"
+                             % ",".join("?" * len(part)), [owner or ""] + part)
             out.update({r["chat_id"]: (r["state"], float(r["checked"])) for r in rows})
         return out
 
@@ -621,6 +625,13 @@ class Store:
                         # turned into a notice (a recall): what it carried is not offered any more
                         db.execute("UPDATE messages SET media = '[]' WHERE chat_id = ? AND id = ? AND media != '[]'",
                                    (m.chat_id, m.id))
+                    if not from_history and m.placement:
+                        # a live reading says where it shows (its thread's marks): it wins over the thread an older
+                        # reading kept (a history read may take a quote in the main stream for a reply in a thread),
+                        # so the Inbox's topics and the threads read later go by it too
+                        db.execute("UPDATE messages SET root_id = ?, thread_id = ? WHERE chat_id = ? AND id = ? "
+                                   "AND (root_id != ? OR thread_id != ?)",
+                                   (m.root_id or "", m.thread_id or "", m.chat_id, m.id, m.root_id or "", m.thread_id or ""))
                     if m.at_me or m.at_all:  # a history read may not know whom a message mentions (Feishu)
                         db.execute("UPDATE messages SET at_me = MAX(at_me, ?), at_all = MAX(at_all, ?) "
                                    "WHERE chat_id = ? AND id = ?",

@@ -241,7 +241,7 @@
       "triage_rules": {
         "type": "string",
         "title": "收件箱分拣规则",
-        "description": "用你自己的话写飞书消息该怎么分拣（哪些要你处理、哪些看看就行、哪些是噪音）。留空就用 Persona 的全局规则。没有 @你 的群消息按噪音处理，不调用模型；在飞书里设了消息免打扰的群，没有 @你 的消息不进收件箱（照旧存进知识库）。下面“照常分拣的群”里列的群例外。",
+        "description": "用你自己的话写飞书消息该怎么分拣（哪些要你处理、哪些看看就行、哪些是噪音）。留空就用 Persona 的全局规则。没有 @你 的群消息按噪音处理，不调用模型；在飞书里设了消息免打扰的群，没有 @你 的消息直接算已读，不留在待处理里（照旧存进知识库）。下面“照常分拣的群”里列的群例外。",
         "maxLength": 4000
       },
       "inbox_triage_chats": {
@@ -255,7 +255,7 @@
       "inbox_private_dms": {
         "type": "array",
         "title": "不交给收件箱 AI 的私聊",
-        "description": "这些私聊照常进收件箱，但不交给 AI 分拣，一律按“要你处理”放。填私聊的会话 id 或对方的用户 id（matefeishu_chats、matefeishu_search 给出），一行一个。默认不填：所有私聊照旧由 AI 分拣。",
+        "description": "这些私聊照常进收件箱，但不交给 AI 分拣，一律按“要你处理”放，条目里也不带消息内容（打开会话看）。填私聊的会话 id 或对方的用户 id（matefeishu_chats、matefeishu_search 给出），一行一个。默认不填：所有私聊照旧由 AI 分拣。",
         "items": {"type": "string", "maxLength": 64},
         "maxItems": 100,
         "default": []
