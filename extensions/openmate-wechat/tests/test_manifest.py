@@ -9,6 +9,11 @@ with open(os.path.join(os.path.dirname(HERE), "persona-extension.json"), encodin
 
 
 class ManifestTest(unittest.TestCase):
+    def test_full_automatic_replies_are_off_by_default(self):
+        setting = MANIFEST["configuration"]["properties"]["auto_reply_full"]
+        self.assertEqual(setting["type"], "boolean")
+        self.assertIs(setting["default"], False)
+
     def test_sidebar_page_icon(self):
         nav = {u["id"]: u["icon"] for u in MANIFEST["contributes"]["ui"] if u["placement"] == "nav_page"}
         # person: a NavIcon name (sdk/go/wire/wire_gen.go) that none of the Feishu extension's pages uses; the plain

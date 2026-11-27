@@ -197,7 +197,7 @@
       "auto_reply": {
         "type": "boolean",
         "title": "自动代答",
-        "description": "在“微信”页里开了自动代答的群，有人真正 @ 你（不是手打名字）时，AI 直接以你的身份引用并 @ 对方回复，不用确认（要先打开 /agent）。私聊、公众号和只 @所有人 不代答。代答用访客会话：AI 只能回复这一条，读不到你的知识库、文件和其他工具。",
+        "description": "在“微信”页里开了自动代答的群，有人真正 @ 你（不是手打名字）时，AI 可以直接以你的身份引用并 @ 对方回复，不用确认（要先打开 /agent）。私聊、公众号和只 @所有人 不代答。",
         "default": true
       },
       "auto_reply_daily_most": {
@@ -222,6 +222,12 @@
         "description": "自动代答回复带的 AI 标记行，{agent} 换成实际回答的 Agent（如 claude code、codex），{model} 换成回答它的模型（如 Opus 5.5），{effort} 换成思考强度（只在打开“AI 标记写上思考强度”时才写）；位置同“AI 标记位置”。留空表示不加。",
         "default": "> 🤖 AI 代答 · {model} · {effort}",
         "maxLength": 200
+      },
+      "auto_reply_full": {
+        "type": "boolean",
+        "title": "代答用完整能力",
+        "description": "打开后，群里的自动代答可以像 /agent 一样查消息、知识库、文件、日志和代码再回答。关闭后，只能根据群里最近的消息回答。微信里多是私人群，默认关闭。",
+        "default": false
       },
       "triage_rules": {
         "type": "string",

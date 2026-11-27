@@ -510,7 +510,7 @@ class HintTest(unittest.TestCase):
         self.assertNotIn("下载文件：", started(h, 2)["body"]["prompt"], "a file stays on this computer: no hint")
 
     def test_an_auto_reply_has_only_its_reply_tool_and_no_hint(self):
-        h = agent(self)
+        h = agent(self, auto_reply_full=False)
         h.hub.request("ui.action", {"contribution": "chats", "action": {"id": "autoreply"}, "state": "",
                                     "ui_version": 6, "values": {"auto:" + TEAM: "true"}})
         pic = h.world.push(TEAM, "user_example_a", "", type="IMAGE", media=[Media("image", ref="img:example-3")])

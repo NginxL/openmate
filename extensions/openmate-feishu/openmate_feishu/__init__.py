@@ -45,6 +45,7 @@ def platform(manifest_path: str = "") -> Platform:
         handle_kind="lark",
         doc_hosts=DOC_HOSTS,
         agent_purpose="lark.agent",
+        auto_reply_full=True,
         self_mention=True,  # 「@自己 …」 is a request like /agent (agent_self_mention)
         login_hint="用飞书手机 App 扫码，并在手机上确认登录",
         login_hint_scanned="已扫码，请在飞书手机 App 上点“确认登录”",

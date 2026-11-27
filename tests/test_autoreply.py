@@ -42,7 +42,7 @@ def act(h, aid, values=None):
 
 class AutoReplyTest(unittest.TestCase):
     def test_switch_on_then_an_at_me_is_answered_as_me(self):
-        h = make(self)
+        h = make(self, auto_reply_full=False)
         sec = [s for s in page(h)["sections"] if s.get("title") == "自动代答"][0]
         team = [r for r in sec["items"] if r["key"] == "auto:" + TEAM][0]
         self.assertEqual(team["control"], {"kind": "switch", "name": "auto:" + TEAM, "on": False, "action": {"id": "autoreply"}})
@@ -145,7 +145,7 @@ class AutoReplyTest(unittest.TestCase):
         self.assertEqual(h.http.starts(), [])
 
     def test_guest_only(self):
-        h = make(self)
+        h = make(self, auto_reply_full=False)
         h.app.store.autoreply_set(TEAM, True)
         h.http.no_guest = True  # an older hub would start an ordinary conversation: none at all
         msg = at_me(h)
@@ -155,7 +155,7 @@ class AutoReplyTest(unittest.TestCase):
         self.assertEqual([s for s in h.sent() if s["chat"] == TEAM], [])
 
     def test_never_in_my_own_conversation(self):
-        h = make(self)
+        h = make(self, auto_reply_full=False)
         h.app.store.autoreply_set(TEAM, True)
         mine = h.world.push(TEAM, "me", "/agent 帮我总结一下")
         running(h, mine)

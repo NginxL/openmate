@@ -108,7 +108,7 @@ _SCHEMA = [
     "PRIMARY KEY (chat_id, id))",
     "CREATE TABLE IF NOT EXISTS mutes (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, checked REAL NOT NULL, "
     "owner TEXT NOT NULL DEFAULT '')",
-    # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
+    # one row per automatic reply started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
     # Persona's 渠道 (channel.py). The user's lines for Persona ("in"), handed over in order from this table (state

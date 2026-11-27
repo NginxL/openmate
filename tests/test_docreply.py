@@ -113,7 +113,7 @@ class DocReplyTest(unittest.TestCase):
         self.assertEqual(h.world.doc_replies, [])
 
     def test_answered_in_the_comment_as_me(self):
-        h = make(self)
+        h = make(self, auto_reply_full=False)
         h.world.doc_texts[URL] = "# 示例方案\n口径：按自然周统计。" + "很长的正文。" * 3000
         mention(h)
         run = doc_run(h)
@@ -167,7 +167,7 @@ class DocReplyTest(unittest.TestCase):
 
 class DocGuestTest(unittest.TestCase):
     def test_a_hub_without_guest_conversations_starts_nothing(self):
-        h = make(self)
+        h = make(self, auto_reply_full=False)
         h.http.no_guest = True
         mention(h)
         wait_until(lambda: next((r for r in h.app.store.runs_since(0, 50) if r["request_id"] == "dn1" and r["state"] == "failed"), None),

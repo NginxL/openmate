@@ -93,7 +93,7 @@ class ManifestTest(unittest.TestCase):
                                        "agent_ack_reaction",
                                        "agent_done_reaction", "agent_fail_reaction",
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
-                                       "auto_reply_header", "auto_reply_at_asker",
+                                       "auto_reply_header", "auto_reply_at_asker", "auto_reply_full",
                                        "agent_reply_suffix",
                                        "history_chats", "triage_rules", "inbox_triage_chats", "inbox_private_dms", "lark_cli", "lark_cli_profile", "starkmesh_url", "needs_hours", "bookmarks"])
         self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])
@@ -106,6 +106,9 @@ class ManifestTest(unittest.TestCase):
         self.assertNotIn("starkmesh_url", d, "an address a network permission names is the user's to write: no default")
         self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"], d["auto_reply_at_asker"]),
                          (True, 20, "> 🤖 AI 代答 · {model} · {effort}", True))
+        self.assertEqual(props["auto_reply_full"]["type"], "boolean")
+        self.assertIs(d["auto_reply_full"], True)
+        self.assertIs(openmate_feishu.platform().auto_reply_full, True)
         self.assertEqual(d["larkx_commit"], "97ad48e69e34bd8c78ee30f795b7c3759dd81659")
         self.assertTrue(re.match(props["larkx_commit"]["pattern"], d["larkx_commit"]))
         self.assertEqual([c["const"] for c in props["region"]["oneOf"]], ["feishu", "lark"])
