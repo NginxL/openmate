@@ -65,6 +65,7 @@ class Gateway:
     def __init__(self):
         self.calls = []
         self.fail = None  # an exception for every call
+        self.stats_fail = None
         self.stats_status = 200
 
     def __call__(self, req, timeout=None):
@@ -77,6 +78,8 @@ class Gateway:
         elif path == "/api/v1/admin/accounts/usage/batch":
             data = {"usage": USAGE, "errors": {}}
         elif path == "/api/v1/admin/dashboard/stats":
+            if self.stats_fail is not None:
+                raise self.stats_fail
             if self.stats_status != 200:
                 raise urllib.error.HTTPError(req.full_url, self.stats_status, "no", {}, None)
             data = STATS
@@ -171,6 +174,53 @@ class StarkMeshTest(unittest.TestCase):
         gw.fail = urllib.error.URLError("refused")
         page, _ = make(gateway=gw)
         self.assertIn("连不上 StarkMesh", items(page.render({"ui_version": 6}))[0]["detail"])
+        self.assertIn("StarkMesh 读不到", str(page.card(6, True, True)))
+        self.assertEqual(page.mesh.state, (None, NOW))
+        self.assertEqual(len(gw.calls), 1, "a failed account read stops before usage and stats")
+
+    def test_a_failed_stats_read_keeps_the_accounts_and_quota(self):
+        healthy, _ = make()
+        windows = healthy.usage({})["accounts"][0]["windows"]
+        for reason, text, status in (("offline", "连接失败或超时", 200), ("failed", "网关响应异常", 503)):
+            with self.subTest(reason=reason):
+                page, gw = make()
+                gw.stats_status = status
+                if reason == "offline":
+                    gw.stats_fail = TimeoutError("read timed out")
+                snap = page.mesh.read()
+                self.assertEqual((snap.accounts, snap.usage, snap.stats), (ACCOUNTS, USAGE, {}))
+                self.assertEqual(snap.stats_failed, reason)
+                self.assertEqual(page.mesh.state, (snap, None))
+
+                notice = "今日统计暂时读不到（%s）" % text
+                view = page.render({"ui_version": 9})
+                self.assertIn(notice, [it.get("text") for it in items(view)])
+                self.assertEqual([t["title"] for t in view["sections"][0]["items"][0]["tiles"]], ["服务", "可用号"])
+                self.assertEqual(view["sections"][1]["footer"], "最近一次重置在 1 小时 49 分后")
+                self.assertIn("claude-a", str(view["sections"][2]))
+                self.assertIn("剩 80%", str(view["sections"][2]))
+                self.assertIn(notice, [it.get("text") for it in items(page.render({"ui_version": 5}))])
+
+                card = page.card(6, True, True)
+                self.assertIn("5 小时剩 1.30 号", card["items"][0]["text"])
+                self.assertIn(notice, [it.get("text") for it in items({"sections": [card]})])
+                overview = starkmesh.StarkMeshCard(page).render({"ui_version": 9})
+                self.assertIn(notice, [it.get("text") for it in items(overview)])
+                self.assertIn(notice, page.brief({}))
+                self.assertEqual(page.usage({})["accounts"][0]["windows"], windows)
+                self.assertEqual(len(gw.calls), 3, "the partial read is cached")
+
+    def test_stats_warning_uses_only_known_reasons(self):
+        page, gw = make()
+        sensitive = "sk-admin-readonly https://user:example-password@gateway.invalid/"
+        gw.stats_fail = starkmesh.StarkMeshError(sensitive, sensitive)
+        self.assertEqual(page.mesh.read().stats_failed, "failed")
+        for lang, prefix in (("zh-Hans", "今日统计暂时读不到"), ("en-US", "Today's stats are temporarily unavailable"),
+                             ("ja-JP", "今日の統計を一時的に取得できません")):
+            view = page.render({"ui_version": 6, "lang": lang})
+            self.assertIn(prefix, str(view))
+            for private in sensitive.split():
+                self.assertNotIn(private, str(view))
 
     def test_a_key_without_dashboard_read_still_shows_the_quota(self):
         gw = Gateway()
@@ -180,6 +230,11 @@ class StarkMeshTest(unittest.TestCase):
         heads = {t["title"]: t for t in view["sections"][0]["items"][0]["tiles"]}
         self.assertEqual(heads["今日请求"]["value"], "—")
         self.assertEqual(view["sections"][1]["items"][0]["tiles"][0]["value"], "1.30 号")
+        self.assertNotIn("今日统计暂时读不到", str(view))
+        card = page.card(6, True, True)
+        self.assertIn("5 小时剩 1.30 号", card["items"][0]["text"])
+        self.assertNotIn("今日统计暂时读不到", str(card))
+        self.assertNotIn("今日统计暂时读不到", page.brief({}))
 
     def test_rings_from_ui_version_9(self):
         page, _ = make()
@@ -334,9 +389,11 @@ class UsageTest(unittest.TestCase):
 
         page, gw = make()
         page.usage({"lang": "zh-Hans"})
+        last = page.mesh.last_read
         gw.fail = urllib.error.URLError("refused")
         with self.assertRaises(starkmesh.StarkMeshError):
             page.mesh._read()  # the read behind the kept one fails
+        self.assertEqual(page.mesh.state, (last, NOW))
         with self.assertRaises(RPCError):
             page.usage({"lang": "zh-Hans"})
         gw.fail = None

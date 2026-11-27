@@ -243,8 +243,9 @@ def span(seconds: float) -> str:
 class Snapshot:
     """One read of the gateway: its accounts, their usage, today's stats; and the quota counted in 号."""
 
-    def __init__(self, accounts: List[dict], usage: Dict[str, dict], stats: dict, now: float):
+    def __init__(self, accounts: List[dict], usage: Dict[str, dict], stats: dict, now: float, stats_failed: str = ""):
         self.accounts, self.usage, self.stats, self.now = accounts, usage, stats or {}, now
+        self.stats_failed = stats_failed
         self.claude = [a for a in accounts if str(a.get("platform") or "") == "anthropic"]
         self.ok = [a for a in accounts if usable(a, now)]
         self.ok_claude = [a for a in self.claude if usable(a, now)]
@@ -375,13 +376,15 @@ class StarkMesh:
             usage.update({str(k): v for k, v in (got.get("usage") or {}).items() if isinstance(v, dict)})
             if isinstance(got.get("errors"), dict):  # a batch that answered may still miss some accounts
                 failed_ids.update(str(k) for k in got["errors"])
+        stats_failed = ""
         try:
             stats = self.api.call("GET", "/api/v1/admin/dashboard/stats") or {}
         except StarkMeshError as e:
-            if e.kind != "auth":  # a key without dashboard.read still shows the quota
-                raise
             stats = {}
-        snap = Snapshot(accounts, usage, stats if isinstance(stats, dict) else {}, self.clock())
+            if e.kind != "auth":  # a key without dashboard.read still shows the quota without a warning
+                # The error message may contain the gateway URL or credentials echoed by the server.
+                stats_failed = "offline" if e.kind == "offline" else "failed"
+        snap = Snapshot(accounts, usage, stats if isinstance(stats, dict) else {}, self.clock(), stats_failed=stats_failed)
         snap.total = max(total, len(accounts))  # the gateway's count, when it said one beyond what was read
         snap.usage_missed = missed  # accounts whose usage a failed batch left out
         snap.usage_failed = failed_ids - set(usage)  # accounts the gateway could not say the usage of
@@ -493,15 +496,20 @@ class StarkMeshPage(Page):
         st = s.stats
         errors = [a for a in s.accounts if state_of(a, s.now)[1] == "danger"]
         heads = [("服务", "%d/%d" % (len(s.ok), len(s.accounts)), "可用账号 / 全部", "power", "green" if not errors else "amber"),
-                 ("可用号", "%d/%d" % (len(s.ok_claude), len(s.claude)), "Claude 账号", "robot", "teal"),
-                 ("今日请求", count(st.get("today_requests")), "RPM %s" % count(st.get("rpm")), "chart", "blue"),
-                 ("今日 Token", count(st.get("today_tokens")), "费用 %s" % money(st.get("today_actual_cost", st.get("today_cost"))),
-                  "money", "indigo")]
+                 ("可用号", "%d/%d" % (len(s.ok_claude), len(s.claude)), "Claude 账号", "robot", "teal")]
+        note = stats_notice(s, params.get("lang"))
+        if not note:
+            heads += [("今日请求", count(st.get("today_requests")), "RPM %s" % count(st.get("rpm")), "chart", "blue"),
+                      ("今日 Token", count(st.get("today_tokens")), "费用 %s" % money(st.get("today_actual_cost", st.get("today_cost"))),
+                       "money", "indigo")]
         if version >= 6:
             head = {"type": "grid", "max_columns": 4, "key": "heads",
                     "tiles": [tile(t, v, sub, icon, color, key="h:" + t) for t, v, sub, icon, color in heads]}
         else:
             head = {"type": "stat_grid", "stats": [stat(t, v, sub) for t, v, sub, _, _ in heads]}
+        summary = [head]
+        if note:
+            summary.append({"type": "text", "style": "caption", "text": note})
         quota: Dict[str, Any] = {"title": "Claude 额度", "items": []}
         if version >= 6:
             tiles = self.quota_tiles(s, version)
@@ -530,7 +538,7 @@ class StarkMeshPage(Page):
             accounts["footer"] = "还有 %d 个账号（都能用的排在后面），完整列表在 StarkMesh 后台" % (len(listed) - ACCOUNTS_MOST)
         updated = "数据读于 %s" % when(s.now, self.app.tz)
         view = {"title": TITLE, "refresh_after": REFRESH,
-                "sections": [{"items": [head]}, quota, accounts, {"items": [{"type": "text", "style": "caption", "text": updated}]}]}
+                "sections": [{"items": summary}, quota, accounts, {"items": [{"type": "text", "style": "caption", "text": updated}]}]}
         if version >= 8:
             view["layout"] = "columns"
             view["sections"][0]["span"] = "full"
@@ -561,6 +569,9 @@ class StarkMeshPage(Page):
                 items.append({"type": "grid", "max_columns": 3, "key": "sm:quota", "tiles": tiles})
         else:
             items += self.quota_bars(s)
+        note = stats_notice(s)
+        if note:
+            items.append({"type": "text", "style": "caption", "text": note})
         sec: Dict[str, Any] = {"title": CARD_TITLE, "items": items}
         if links and version < 8:
             items.append(row("打开中转站 ›", "", "", "go:starkmesh", key="link:starkmesh"))
@@ -616,7 +627,10 @@ class StarkMeshPage(Page):
                     if t and t > s.now]
             lines.append("不可用：%s，%s%s" % (a.get("name") or a.get("id"), text, "，%s后恢复" % span(max(back) - s.now) if back else ""))
         st = s.stats
-        if st:
+        note = stats_notice(s)
+        if note:
+            lines.append(note)
+        elif st:
             lines.append("今天：请求 %s，Token %s，费用 %s" % (count(st.get("today_requests")), count(st.get("today_tokens")),
                                                      money(st.get("today_actual_cost", st.get("today_cost")))))
         return "\n".join(lines)
@@ -632,7 +646,7 @@ class StarkMeshPage(Page):
         is an error, so the manager keeps the last answer, faded, rather than drawing a part of the pool as the whole."""
         from openmate_core.wire import RPCError
 
-        say = USAGE_TEXT.get(str(params.get("lang") or "").split("-")[0].lower(), USAGE_TEXT["zh"])
+        say = _text(params.get("lang"))
         pool: Dict[str, Any] = {"id": USAGE_POOL, "provider": "claude", "name": say["name"]}
         if not self.mesh.configured:
             pool["notice"] = say["setup"]
@@ -717,9 +731,22 @@ def clock_at(t: float, now: float, tz) -> str:
     return at.strftime("%H:%M") if at.date() == today.date() else at.strftime("%m/%d %H:%M")
 
 
-# the usage bars' words, by the query's lang (zh-Hans, en, ja; any other: Chinese, as the rest of the extension)
-USAGE_TEXT = {
+def _text(lang) -> dict:
+    return TEXT.get(str(lang or "").split("-")[0].lower(), TEXT["zh"])
+
+
+def stats_notice(s: Snapshot, lang=None) -> str:
+    if not s.stats_failed:
+        return ""
+    say = _text(lang)
+    reason = say["stats_offline"] if s.stats_failed == "offline" else say["stats_error"]
+    return say["stats_failed"].format(reason=reason)
+
+
+# The usage bars and stats notice use the requested language (zh-Hans, en, ja; Chinese by default).
+TEXT = {
     "zh": {"name": "Claude Code Max", "usable": "可用 Claude 号 {ok}/{all}", "partial": "（只读到 {read}/{total} 个号）",
+           "stats_failed": "今日统计暂时读不到（{reason}）", "stats_offline": "连接失败或超时", "stats_error": "网关响应异常",
            "first": "（只读了前 {read} 个号）", "incomplete": "号没有读全，额度条不画，详情看中转站页",
            "left": "{of} 个可用号合计剩 {left:.2f} 号", "soonest": "，最早 {at} 有号重置",
            "setup": "还没有接上 StarkMesh：在飞书（OpenMate）扩展的设置里填 StarkMesh 地址和只读管理密钥",
@@ -728,6 +755,8 @@ USAGE_TEXT = {
            "soon5h": "，5 小时最早 {at} 有号重置", "cover": "，{window}有 {miss} 个号没有快照，不画", "gaps": "有号还没有用量快照，额度条先不画", "w_five_hour": "5 小时", "w_seven_day": "每周",
            "none_usable": "Claude 号现在都用不了（限流、暂停调度、凭据过期或出错），详情看中转站页"},
     "en": {"name": "Claude Code Max", "usable": "{ok} of {all} Claude accounts usable", "partial": " (read {read} of {total} accounts)",
+           "stats_failed": "Today's stats are temporarily unavailable ({reason})", "stats_offline": "connection failed or timed out",
+           "stats_error": "unexpected gateway response",
            "first": " (read the first {read} accounts only)", "incomplete": "Not every account was read, so no bars: see the 中转站 page",
            "left": "{left:.2f} of {of} usable accounts left", "soonest": "; the first resets at {at}",
            "setup": "StarkMesh is not set up: add its address and read-only admin key in the OpenMate Feishu extension's settings",
@@ -736,6 +765,8 @@ USAGE_TEXT = {
            "soon5h": "; first 5-hour reset at {at}", "cover": "; no {window} bar: {miss} without a snapshot", "gaps": "Some accounts have no usage snapshot yet, so no bars", "w_five_hour": "5-hour", "w_seven_day": "weekly",
            "none_usable": "No Claude account can be used now (rate-limited, paused, expired or failing): see the 中转站 page"},
     "ja": {"name": "Claude Code Max", "usable": "使える Claude アカウント {ok}/{all}", "partial": "（{read}/{total} 件だけ読めました）",
+           "stats_failed": "今日の統計を一時的に取得できません（{reason}）", "stats_offline": "接続失敗またはタイムアウト",
+           "stats_error": "ゲートウェイの応答異常",
            "first": "（最初の {read} 件だけ読みました）", "incomplete": "全アカウントを読めなかったのでバーは出しません。詳しくは 中转站 ページへ",
            "left": "使えるアカウント {of} 件で残り {left:.2f} 件分", "soonest": "、最初のリセットは {at}",
            "setup": "StarkMesh が未設定です：飛書（OpenMate）拡張の設定で StarkMesh のアドレスと読み取り専用の管理キーを入力してください",
@@ -786,4 +817,7 @@ class StarkMeshCard(Page):
                 items.append({"type": "grid", "max_columns": 3, "key": "sm:quota", "tiles": tiles})
         else:
             items += self.page.quota_bars(s)
+        note = stats_notice(s, params.get("lang"))
+        if note:
+            items.append({"type": "text", "style": "caption", "text": note})
         return {"sections": [{"items": items}], "refresh_after": REFRESH}
