@@ -508,6 +508,8 @@ class FakeHubHTTP:
                     row.update(model=s.get("model", "claude-opus-5-5"), effort=s.get("effort", "xhigh"))
                 if s.get("background"):
                     row.update(background_working=True, state="working")
+                if s.get("pending_interactions"):
+                    row.update(state="needs_you", pending_interactions=s["pending_interactions"])
                 on = self._todo_of(mid, sid)
                 if on is not None:  # the hub's decoration: the open to-do the session is active on
                     row["todo"] = {"id": on["id"], "title": on.get("title") or ""}
@@ -549,6 +551,7 @@ class FakeHubHTTP:
                 if method == "POST" and rest == ["interrupt"]:
                     s["working"] = False
                     s["interrupted"] = True
+                    s.pop("pending_interactions", None)
                     return 200, {"ok": True}
                 if method == "GET" and rest == ["items"]:
                     items = s["items"]

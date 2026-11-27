@@ -196,6 +196,7 @@ class SendRejected(BackendError):
 
 OnMessage = Callable[[Message], None]
 OnLink = Callable[[str, str], None]  # (state, reason): state is up | down | expired
+OnRecalled = Callable[[str, str], None]  # (chat id, message id)
 
 
 class Backend(abc.ABC):
@@ -212,6 +213,8 @@ class Backend(abc.ABC):
     saved_credentials: Optional[Dict] = None
     #: Set by the core too: the account its own store belongs to ("" before any sign-in), the same check's other half
     core_account: str = ""
+    #: This adapter can identify recalled request messages.
+    reports_recalls: bool = False
     #: Set by the core before anything else is called: the manifest's secrets the user set (name → value), such as a
     #: token for a service the adapter connects to. Never logged or written anywhere.
     secrets: Dict[str, str] = {}
@@ -307,7 +310,16 @@ class Backend(abc.ABC):
         it. Raise CredentialsExpired when the service says the sign-in is gone, BackendError("…", "proxy") when the
         proxy cannot work, BackendError("…", "unreachable") for a connection that failed."""
 
+    def listen_with_recall(self, on_message: OnMessage, on_link: OnLink, stop: threading.Event,
+                           on_recalled: OnRecalled) -> None:
+        """Like listen, with an optional recall callback bound to this connection's account generation."""
+        self.listen(on_message, on_link, stop)
+
     # reads
+
+    def message_gone(self, chat_id: str, message_id: str) -> Optional[bool]:
+        """Whether the service says the message was recalled. None when it cannot tell."""
+        return None
 
     @abc.abstractmethod
     def history(self, chat_id: str, before_position: Optional[int] = None, limit: int = 50) -> List[Message]:

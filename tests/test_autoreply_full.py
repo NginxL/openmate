@@ -8,10 +8,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-from harness import CID, wait_until
+from harness import CID, HubSideError, wait_until
 from openmate_core.backend import Chat, Media
 from openmate_core.fixture import tiny_png
-from test_agent import ask, computers, reading_of, run_of, running
+from test_agent import ask, computers, reading_of, run_of, running, wait_for_recall
 from test_autoreply import TEAM, at_me, make
 from test_docreply import URL, doc_run, make as make_doc, mention
 from test_wechat_platform import wechat
@@ -271,6 +271,79 @@ class AutoDraftWithdrawalTest(unittest.TestCase):
             self.assert_running(h, msg)
             ask(h, "我来处理。", parent_id=msg.id)
             self.assert_stopped(h, msg)
+
+    def test_recall_withdraws_a_pending_draft(self):
+        h = make(self)
+        h.app.backend.reports_recalls = True
+        msg, run = self.auto(h)
+        sid = run["session_id"]
+        args = {"chat": TEAM, "reply_to": msg.id, "text": "周五可以上线。"}
+        h.c("actions.describe", name=CID + "_send", args=args)
+        h.http.sessions[sid]["pending_interactions"] = 1
+        h.http.end_turn(sid)
+        wait_until(lambda: run_of(h, msg)["state"] == "done", what="turn ended with a pending draft")
+        h.app.agent.on_recalled(msg.chat_id, msg.id, h.app.account_epoch())
+        wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % sid), what="the conversation stopped")
+        self.assertEqual(run_of(h, msg)["state"], "stopped")
+        self.assertEqual(run_of(h, msg)["stop_reason"], "recalled")
+        self.assertFalse(h.http.sessions[sid].get("pending_interactions"), "interrupt withdrew the draft")
+        with self.assertRaisesRegex(HubSideError, "已撤回"):
+            h.c("actions.do", name=CID + "_send", request_id="late-approval", args=args)
+        self.assertEqual(h.sent(), [])
+
+    def test_a_recalled_auto_request_gets_no_confirmation_card(self):
+        h = make(self)
+        h.app.backend.reports_recalls = True
+        msg, run = self.auto(h)
+        args = {"chat": TEAM, "reply_to": msg.id, "text": "周五可以上线。"}
+        with patch.object(h.app.backend, "message_gone", return_value=True) as lookup:
+            with self.assertRaisesRegex(HubSideError, "已撤回"):
+                h.c("actions.describe", name=CID + "_send", args=args)
+            lookup.assert_called_once_with(TEAM, msg.id)
+        wait_until(lambda: h.http.posts("/%s/stop" % run["session_id"]), what="the conversation stopped")
+        self.assertEqual(run_of(h, msg)["stop_reason"], "recalled")
+        self.assertEqual(h.sent(), [])
+
+    def test_recalling_an_ended_auto_request_leaves_a_newer_draft_alone(self):
+        h = make(self)
+        root = h.world.push(TEAM, "user_example_a", "周五的安排")
+        msg, first = self.auto(h, root_id=root.id)
+        sid = first["session_id"]
+        h.http.end_turn(sid)
+        wait_until(lambda: run_of(h, msg)["state"] == "done", what="first turn ended")
+        newer, second = self.auto(h, root_id=root.id)
+        self.assertEqual(second["session_id"], sid)
+        h.http.sessions[sid]["pending_interactions"] = 1
+        h.app.agent.on_recalled(TEAM, msg.id, h.app.account_epoch())
+        wait_for_recall()
+        self.assertEqual(run_of(h, msg)["state"], "done")
+        self.assertEqual(run_of(h, newer)["state"], "running")
+        self.assertEqual(h.http.sessions[sid]["pending_interactions"], 1)
+        self.assertEqual(h.http.posts("/stop"), [])
+
+    def test_recall_during_sender_lookup_prevents_auto_start(self):
+        h = make(self)
+        h.app.store.autoreply_set(TEAM, True)
+        looking_up, release = threading.Event(), threading.Event()
+        threads = []
+
+        def kind(*_):
+            threads.append(threading.current_thread())
+            looking_up.set()
+            release.wait(5)
+            return "user"
+
+        with patch.object(h.app.people, "kind_now", side_effect=kind):
+            msg = at_me(h)
+            try:
+                self.assertTrue(looking_up.wait(5))
+                h.app.agent.on_recalled(TEAM, msg.id, h.app.account_epoch())
+            finally:
+                release.set()
+            threads[0].join(5)
+            self.assertFalse(threads[0].is_alive())
+        self.assertEqual(h.app.store.run_count(), 0)
+        self.assertEqual(h.http.starts(), [])
 
     def test_ended_auto_guest_and_personal_runs_are_untouched(self):
         h = make(self)

@@ -836,7 +836,9 @@ class ConnectorApp:
                     self._set_link(gen, "down", why or "连接断开了")
 
             try:
-                self.backend.listen(lambda m, epoch=epoch: self._on_live(gen, m, epoch), on_link, stop)  # this one's
+                self.backend.listen_with_recall(
+                    lambda m, epoch=epoch: self._on_live(gen, m, epoch), on_link, stop,
+                    lambda chat, mid, epoch=epoch: self._on_live_recalled(gen, chat, mid, epoch))
             except CredentialsExpired as e:
                 self._set_link(gen, "expired", e.message)
                 return
@@ -952,6 +954,10 @@ class ConnectorApp:
             if not self.closing.is_set():
                 log.exception("a live message could not be stored")
             raise  # not taken: the backend must not count it delivered (it is delivered again, or read as history)
+
+    def _on_live_recalled(self, gen: int, chat_id: str, message_id: str, epoch: int) -> None:
+        if gen == self._gen and self.agent is not None:
+            self.agent.on_recalled(chat_id, message_id, epoch)
 
     def _request_catch_up(self, gen: int) -> None:
         """Read history after a link up; one asked for while one runs is run after it (a second outage's messages)."""

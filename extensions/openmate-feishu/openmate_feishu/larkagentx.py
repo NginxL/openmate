@@ -87,7 +87,7 @@ THREAD_REPLY = 2  # entities.Message.ThreadMessageType THREAD_REPLY_MESSAGE: a r
 SYNC_TARGET, SYNC_SOURCE = 1, 2  # entities.Message.SyncToChatMessageType: a thread reply's copy in the main stream, the reply
 SYNCED_KEEP = 500  # how many messages' "also in the main stream" marks are remembered (a reply copies the request's)
 AT_TAG = 5
-STATUS_NORMAL, STATUS_MODIFIED = 1, 3  # entities.Message.Status: as sent, edited
+STATUS_NORMAL, STATUS_DELETED, STATUS_MODIFIED = 1, 2, 3  # entities.Message.Status
 CODE_BLOCK_TAGS = (31, 37)  # CODE_BLOCK, CODE_BLOCK_V2: their own properties, not a TextProperty
 # DOCS (22) included: the newer rich text's block around its paragraphs (not a document; read "[文档]" before)
 BLOCK_TAGS = frozenset((3, 4, 14, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 37, 39, 40, 41, 42, 43, 44, 45, 46, 49))
@@ -378,7 +378,8 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
     """What says where each message of a messages.PushMessagesRequest shows, which LarkAgentX's message dicts leave
     out: by message id, its thread kind (threadMessageType), and whether it also went to the main stream (sendToChat,
     or the syncToChat marks: syncToChatMessageType, the related message, the thread's root), and whether it carried
-    the thread kind at all (thread_known; a proto2 field, unset reads as 0). Ids only, no content."""
+    the thread kind at all (thread_known; a proto2 field, unset reads as 0). Includes status and chat ids so even
+    a deletion missing its sender can be routed. Ids and flags only, no content."""
     from larkx.proto import lark_all_pb2
 
     req = lark_all_pb2.messages.PushMessagesRequest()
@@ -392,6 +393,7 @@ def pushed_threads(payload: bytes) -> Dict[str, dict]:
                         "sync_type": int(m.syncToChatMessageType), "sync_related": _id(m.syncToChatRelatedMessageId),
                         "sync_root": _id(m.syncToChatThreadRootId),
                         "status": int(m.status) if m.HasField("status") else None,
+                        "chat_id": _id(m.chatId) or _id(m.channelId),
                         "edited": push_edited(m)}
     return out
 
@@ -935,6 +937,7 @@ class LarkXBackend(Backend):
     rerender_types = RERENDER_TYPES
     rerender_empty = RERENDER_EMPTY
     done_marks = True  # a chat's 完成
+    reports_recalls = True
     has_avatars = True  # chat_info's Chat carries the chat's picture (avatar_address)
     has_mute = True  # chat_mute: the chat record's reminder switch (消息免打扰, mute_of)
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
@@ -946,9 +949,11 @@ class LarkXBackend(Backend):
     expiry_wait = 2.0  # …this far apart (a refusal can be a hiccup, and "expired" makes the user scan again)
     up_grace = 3.0  # a connection that stayed open this long after the handshake is up, even before a frame came
     heartbeat = 30.0
+    recall_timeout = 0.75  # the gateway call has its own longer timeout; a reply only waits this long
 
     def __init__(self, lx: types.SimpleNamespace, region: str):
         self.lx = lx
+        self._recall_slots = threading.BoundedSemaphore(4)
         self.region_name = region
         self.region = lx.region.get_region(region)
         self._lock = threading.RLock()
@@ -1231,6 +1236,9 @@ class LarkXBackend(Backend):
     # ------------------------------------------------------------ the live link
 
     def listen(self, on_message, on_link, stop: threading.Event) -> None:
+        self.listen_with_recall(on_message, on_link, stop, None)
+
+    def listen_with_recall(self, on_message, on_link, stop: threading.Event, on_recalled) -> None:
         client, me = self._session()
         if client is None or me is None:
             raise CredentialsExpired("还没有登录%s，需要扫码登录" % self.region.label)
@@ -1242,7 +1250,7 @@ class LarkXBackend(Backend):
         except Exception as e:
             raise self._net(e, "准备实时连接")
         inbox: "queue.Queue" = queue.Queue()
-        worker = threading.Thread(target=self._deliver, args=(inbox, client, me, on_message),
+        worker = threading.Thread(target=self._deliver, args=(inbox, client, me, on_message, on_recalled),
                                   name="openmate-larkx-deliver", daemon=True)
         worker.start()
         loop = asyncio.new_event_loop()
@@ -1350,25 +1358,34 @@ class LarkXBackend(Backend):
             return
         if cmd != PUSH_CMD:
             return
-        try:
-            pushed = d.decode_push_messages(raw)
-        except Exception:
-            log.info("a push could not be decoded")
-            return
         marks: Dict[str, dict] = {}
-        if any(m.get("from_id") for m in pushed) and packet.get("payload"):
+        if packet.get("payload"):
             try:
                 marks = pushed_threads(packet["payload"])
             except Exception as e:  # the messages are read all the same: where each shows is then not known
                 log.info("where pushed messages show could not be read (%s)", type(e).__name__)
+        try:
+            pushed = d.decode_push_messages(raw)
+        except Exception:
+            log.info("a push could not be decoded")
+            pushed = []
+        recalled = {mid for mid, mark in marks.items() if mark.get("status") == STATUS_DELETED}
+        if recalled:
+            decoded_chats = {_id(m.get("msg_id")): _id(m.get("chat_id")) for m in pushed}
+            for mid in sorted(recalled):
+                chat_id = marks[mid].get("chat_id") or decoded_chats.get(mid)
+                log.info("a pushed message %s in %s says it was recalled (status DELETED)", mid, chat_id or "?")
+                if chat_id:
+                    inbox.put({"recalled": (chat_id, mid)})
         for m in pushed:
-            if m.get("from_id"):
-                hit = marks.get(_id(m.get("msg_id")))
+            mid = _id(m.get("msg_id"))
+            if mid and mid not in recalled and m.get("from_id"):
+                hit = marks.get(mid)
                 if hit is not None:
                     m["_placement"] = hit
                 inbox.put(m)
 
-    def _deliver(self, inbox: "queue.Queue", client, me: Account, on_message) -> None:
+    def _deliver(self, inbox: "queue.Queue", client, me: Account, on_message, on_recalled) -> None:
         """Maps pushed messages and hands them to the core in order, off the connection's loop (the core may look
         names up), so acks and heartbeats never wait for it. Meanwhile keeps the list of every group fresh."""
         while True:
@@ -1379,6 +1396,13 @@ class LarkXBackend(Backend):
                 continue
             if item is None:
                 return
+            if "recalled" in item:
+                if on_recalled is not None:
+                    try:
+                        on_recalled(*item["recalled"])
+                    except Exception as e:
+                        log.warning("a pushed recall was not taken (%s)", type(e).__name__)
+                continue
             if "doc_feed" in item:
                 self._doc_feed(item["doc_feed"], me, client)
                 continue
@@ -2136,6 +2160,40 @@ class LarkXBackend(Backend):
         return [m]
 
     # ------------------------------------------------------------ reads
+
+    def message_gone(self, chat_id: str, message_id: str) -> Optional[bool]:
+        """The gateway looks up a message by its id alone, even when the entity has lost its chat fields."""
+        client, _ = self._session()
+        if client is None or not message_id or not self._recall_slots.acquire(blocking=False):
+            return None
+        result = queue.Queue(maxsize=1)
+
+        def read() -> None:
+            gone = None
+            try:
+                answer = client.api("messages.PullMessagesByIdsRequest", {"messageIds": [message_id]})
+                message = answer["messages"][message_id]  # a missing message does not establish a recall
+                status = message.get("status")
+                if status in (STATUS_DELETED, "DELETED", str(STATUS_DELETED)):
+                    gone = True
+                elif status in (STATUS_NORMAL, STATUS_MODIFIED, "NORMAL", "MODIFIED", "1", "3"):
+                    gone = False
+            except Exception:
+                pass
+            finally:
+                self._recall_slots.release()
+                result.put(gone)
+
+        # api() does not accept a timeout. Bound both the wait and the number of requests that can outlive it.
+        try:
+            threading.Thread(target=read, name="openmate-larkx-recall", daemon=True).start()
+        except RuntimeError:
+            self._recall_slots.release()
+            return None
+        try:
+            return result.get(timeout=self.recall_timeout)
+        except queue.Empty:
+            return None
 
     def history(self, chat_id: str, before_position: Optional[int] = None, limit: int = 50) -> List[Message]:
         client, me = self._signed_in()

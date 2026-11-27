@@ -387,6 +387,19 @@ class AgentAcrossSwitchTest(unittest.TestCase):
         self.assertIsInstance(reply.out.get("error"), RPCError, reply.out)
         self.assertEqual([s for s in h.sent() if s["chat"] == m.chat_id], [])
 
+    def test_a_recall_from_the_account_before_does_not_stop_the_current_run(self):
+        h = signed_in(self, self.config(agent_ack_reaction=""))
+        app = h.app
+        with_shared(h)
+        old_epoch = app.account_epoch()
+        to_other(h, keep=(SHARED,))
+        h.sign_in()
+        run = self.next_ones_run(h, "/agent 另一个账号的请求")
+        app.agent.on_recalled(SHARED, run["request_id"], old_epoch)
+        self.assertEqual(app.store.run_get(run["id"])["state"], "running")
+        self.assertFalse(app.store.seen_has("recalled:%s:%s" % (SHARED, run["request_id"])))
+        self.assertEqual(h.http.posts("/stop"), [])
+
     def test_a_document_reply_asked_across_the_switch_is_not_sent(self):
         h = signed_in(self, self.config(auto_reply_docs=True, agent_ack_reaction=""))
         app = h.app

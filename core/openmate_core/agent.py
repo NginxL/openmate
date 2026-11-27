@@ -156,6 +156,7 @@ ASK_ASSISTANT = re.compile(r"问\s*(?:persona|助手)", re.IGNORECASE)  # a foll
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # what agents.control refuses in a message (newline, tab kept)
 ACTIVE = ("starting", "running")
 USER_REPLY_STOP = "user_reply"
+RECALL_STOP = "recalled"
 PROMPT_MOST = 30000
 AT_MOST = 20  # people one /agent reply @-s at most
 REQUEST_IMAGES_MOST = 4  # pictures of a request handed to its conversation…
@@ -697,7 +698,8 @@ class AgentRunner:
             if not ok:
                 log.info("an /agent line of an account signed out meanwhile: not taken")
                 return
-            if not self.store.seen_add("agent:%s:%s" % (row["chat_id"], row["id"])):
+            if self._recalled(row["chat_id"], row["id"]) or not self.store.seen_add(
+                    "agent:%s:%s" % (row["chat_id"], row["id"])):
                 return
             run = self._new_run(row, req, now)
             run["placement"] = row.get("placement") or ""  # where it was asked: the replies go back there (_where)
@@ -705,6 +707,37 @@ class AgentRunner:
         self._prune()
         threading.Thread(target=self._start_run, args=(run, row, epoch), name="openmate-agent-start",
                          daemon=True).start()
+
+    def _recalled(self, chat_id: str, message_id: str) -> bool:
+        return self.store.seen_has("recalled:%s:%s" % (chat_id, message_id))
+
+    def on_recalled(self, chat_id: str, message_id: str, epoch: int) -> None:
+        with self.app.owned(epoch) as ok:
+            if not ok:
+                return
+            # Keep the mark even when the request has yet to arrive or is still being looked up before a run exists.
+            self.store.seen_add("recalled:%s:%s" % (chat_id, message_id))
+            runs = self.store.runs_for_request(chat_id, message_id)
+        if runs:
+            threading.Thread(target=self._stop_recalled_runs, args=(runs, epoch), name="openmate-agent-recall",
+                             daemon=True).start()
+
+    def _stop_recalled_runs(self, runs: List[dict], epoch: int) -> None:
+        try:
+            for run in runs:
+                pending_draft = False
+                if (run["state"] == "done" and not run.get("replies") and self._can_have_draft(run)
+                        and run.get("session_id") and self.app.owns(epoch)):
+                    # A turn can finish before the user deals with its confirmation card.
+                    try:
+                        status = self.hub.session_row(run["machine_id"], run["session_id"]) or {}
+                        pending_draft = status.get("state") == "needs_you" or bool(status.get("pending_interactions"))
+                    except HubError:
+                        pass
+                self._stop_run(run, stop_reason=RECALL_STOP, epoch=epoch, pending_draft=pending_draft)
+        except Exception:
+            if not self.app.closing.is_set():
+                log.exception("stopping a recalled request failed")
 
     def _take_stop(self, row: dict, epoch: Optional[int]) -> None:
         """A /stop of the user's (once per message): the request it is about is stopped, in a thread of its own."""
@@ -741,15 +774,19 @@ class AgentRunner:
                 return
         for run in runs:
             threading.Thread(target=self._stop_run, args=(run, row),
-                             kwargs={"handled_by_user": True, "epoch": epoch},
+                             kwargs={"stop_reason": USER_REPLY_STOP, "epoch": epoch},
                              name="openmate-agent-user-reply", daemon=True).start()
 
     def _guest(self, run: dict) -> bool:
         return run.get("kind") in QUIET_KINDS and not self.auto_full
 
     def _full_auto(self, run: dict) -> bool:
-        # Older runs without a recorded mode were guests. A config change cannot make an existing guest non-guest.
-        return run.get("kind") == "auto" and not self._guest(run) and not run.get("guest", True)
+        return self.auto_full and self._can_have_draft(run)
+
+    @staticmethod
+    def _can_have_draft(run: dict) -> bool:
+        # The recorded mode tells us whether a draft may still exist after a configuration change.
+        return run.get("kind") == "auto" and not run.get("guest", True)
 
     def auto_used(self, chat_id: str, now: Optional[float] = None, within: float = 86400, kind: str = "auto") -> int:
         """Automatic replies started in the chat within the window: a ledger pruning the runs never shortens."""
@@ -801,7 +838,7 @@ class AgentRunner:
             log.info("自动代答: not answered (it answers an AI's message of ours); left for the user")
             return
         with self.app.owned(epoch) as ok:
-            if not ok or not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
+            if not ok or self._recalled(chat_id, row["id"]) or not self.store.seen_add("auto:%s:%s" % (chat_id, row["id"])):
                 return
         threading.Thread(target=self._auto_start, args=(row, text, now, epoch), name="openmate-agent-auto",
                          daemon=True).start()
@@ -852,6 +889,8 @@ class AgentRunner:
             with self.app.owned(epoch) as ok:  # and none for an account signed out meanwhile
                 if not ok:
                     log.info("自动代答: not answered (the account signed out meanwhile)")
+                    return
+                if self._recalled(chat_id, row["id"]):
                     return
                 why = self._guest_room(chat_id, "auto", now)
                 if why:
@@ -1008,12 +1047,13 @@ class AgentRunner:
         with self.app.owned(epoch) as ok:
             if not ok or not self.store.seen_add("ack:%s" % run["id"]):
                 return
-        if self._gone(run["id"]):
+        if self._gone(run["id"]) or self._recalled(run["chat_id"], run["request_id"]):
             return
         try:
             mid = backend.react(run["chat_id"], run["request_id"], self.ack)
         except Exception as e:
-            log.info("the /agent request's reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+            if not self._recalled(run["chat_id"], run["request_id"]):
+                log.info("the /agent request's reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
             return
         sent = mid if isinstance(mid, str) and mid else ""  # a service without reactions sent a message (WeChat)
         if sent:
@@ -1034,23 +1074,26 @@ class AgentRunner:
         the 🤔 went on, once per run, never in the way of the run."""
         with self._lock(run_id):
             cur = self.store.run_get(run_id)
-            if cur is None or not cur.get("acked") or cur.get("ack_end"):
+            if (cur is None or not cur.get("acked") or cur.get("ack_end") or cur.get("stop_reason") == RECALL_STOP
+                    or self._recalled(cur["chat_id"], cur["request_id"])):
                 return
             cur["ack_end"] = outcome
             self.store.run_put(cur)
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run_id):
+        if backend is None or self._gone(run_id) or self._recalled(cur["chat_id"], cur["request_id"]):
             return
         try:
             backend.unreact(cur["chat_id"], cur["request_id"], cur["acked"])
         except Exception as e:
-            log.info("the /agent request's reaction was not taken back (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+            if not self._recalled(cur["chat_id"], cur["request_id"]):
+                log.info("the /agent request's reaction was not taken back (%s)", getattr(e, "kind", "") or e.__class__.__name__)
         new = {"done": self.done_reaction, "failed": self.fail_reaction}.get(outcome, "")
-        if new and not self._gone(run_id):  # another account's sign-in while it was taken back: not put
+        if new and not self._gone(run_id) and not self._recalled(cur["chat_id"], cur["request_id"]):
             try:
                 backend.react(cur["chat_id"], cur["request_id"], new)
             except Exception as e:
-                log.info("the /agent request's end reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
+                if not self._recalled(cur["chat_id"], cur["request_id"]):
+                    log.info("the /agent request's end reaction was not put (%s)", getattr(e, "kind", "") or e.__class__.__name__)
 
     def _resume_start(self, run: dict) -> None:
         row = self.store.message(run["chat_id"], run["request_id"]) or {"chat_id": run["chat_id"],
@@ -1355,6 +1398,8 @@ class AgentRunner:
             if cur is not None and cur.get("stop_reason") == USER_REPLY_STOP:
                 self._interrupt_auto(cur)
                 return
+            if cur is not None and cur.get("stop_reason") == RECALL_STOP and self._can_have_draft(cur):
+                self._interrupt_auto(cur)
             try:
                 self.hub.stop_conversation(fields["session_id"])
             except HubError:
@@ -2438,7 +2483,11 @@ class AgentRunner:
         if awaiting:
             self._await_progress(cur)
             return
-        self._end_reaction(run_id, "done")
+        # A fallback can discover a recall. Wait to change its reaction until that check has run.
+        defer_reaction = post is not None and cur.get("kind") not in QUIET_KINDS and getattr(
+            self.app.backend, "reports_recalls", False)
+        if not defer_reaction:
+            self._end_reaction(run_id, "done")
         me = None
         if post is not None and cur.get("kind") not in QUIET_KINDS:
             header = self.header
@@ -2451,17 +2500,21 @@ class AgentRunner:
                         cur["fallback"] = "failed"  # nothing in the journal: a late answer may still go out
                         self.store.run_put(cur)
         if post is not None:
-            mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, model_effort=me, **self._where(cur))
+            mid = self._post_once(cur, "agent:%s:fallback" % run_id, post, model_effort=me, final=True, **self._where(cur))
             with self._lock(run_id):
                 cur = self.store.run_get(run_id)
                 if cur is None:
                     return
+                if not mid and cur["state"] != "stopped" and self._recalled(cur["chat_id"], cur["request_id"]):
+                    return  # let the recall stop the run while its unsent answer is still marked as pending
                 cur["fallback"] = "sent" if mid else "failed"
                 if mid:
                     cur["reply_ids"] = (cur.get("reply_ids") or []) + [mid]
                 self.store.run_put(cur)
             if mid and cur.get("progress_id"):
                 self._progress_done(cur)
+        if defer_reaction:
+            self._end_reaction(run_id, "done")
 
     def _await_progress(self, run: dict) -> None:
         """A run that ended waiting for its answer: the turn's last words go as its progress (the progress message,
@@ -2716,14 +2769,49 @@ class AgentRunner:
         unknown, as before: its request's thread, else a thread opened on the request."""
         return _where(run["request_id"], run.get("root_id") or "", run.get("placement") or "", run["request_id"])
 
+    def _reject_recalled(self, chat_id: str, message_id: str) -> None:
+        if self._recalled(chat_id, message_id):
+            raise RPCError("这条请求消息已撤回，不再回复", "request_recalled")
+
+    def _check_final_request(self, chat_id: str, message_id: str, epoch: int) -> None:
+        self._reject_recalled(chat_id, message_id)
+        lookup = getattr(self.app.backend, "message_gone", None)
+        if lookup is not None and lookup(chat_id, message_id) is True:
+            log.info("request %s found recalled before the answer went out", message_id)
+            self.on_recalled(chat_id, message_id, epoch)
+            raise RPCError("这条请求消息已撤回，不再回复", "request_recalled")
+        self._reject_recalled(chat_id, message_id)  # a push could have arrived while the lookup was in flight
+
+    def check_auto_draft(self, chat_id: str, message_id: str, epoch: int, *, lookup: bool) -> None:
+        """Check a confirmation card that quotes a full automatic reply's request, or a later approval of it."""
+        if not message_id or not getattr(self.app.backend, "reports_recalls", False):
+            return
+        with self.app.owned(epoch) as ok:
+            if not ok:
+                raise RPCError("刚换了%s账号，这条回复没有发出" % self.app.platform.name)
+            drafts = [r for r in self.store.runs_for_request(chat_id, message_id) if self._can_have_draft(r)]
+        if not drafts:
+            return
+        if lookup and any(r["state"] in ACTIVE or (r["state"] == "done" and not r.get("replies")) for r in drafts):
+            self._check_final_request(chat_id, message_id, epoch)
+        else:
+            self._reject_recalled(chat_id, message_id)
+        if not self.app.owns(epoch):
+            raise RPCError("刚换了%s账号，这条回复没有发出" % self.app.platform.name)
+
     def _send(self, run: dict, key: str, body: str, reply_to: str, root: str, to_chat: bool = False,
-              mentions: Optional[List[Tuple[str, str, int]]] = None) -> dict:
+              mentions: Optional[List[Tuple[str, str, int]]] = None, *, final: bool = False) -> dict:
         """Send body into the run's chat as the user, once per key (the send journal). Nobody confirms these sends
         (the user asked for them with /agent), so each one that went out is told to the hub's sent-as-user ledger
         (sent.record, allowed by the manifest's sends_as_user); one answered from the journal is not told again."""
 
         def go() -> dict:
+            epoch = self.app.account_epoch() if final else None
             self._still_ours(run)
+            if final:
+                self._check_final_request(run["chat_id"], run["request_id"], epoch)
+                self._still_ours(run)
+            self._reject_recalled(run["chat_id"], run["request_id"])
             if not self._remember_post(body, run):
                 raise RPCError("换了%s账号，这个 /agent 请求是之前那个账号的，不再以你的身份发出" % self.app.platform.name)
             extra = {"mentions": mentions} if mentions else {}  # only when set, like send_as_user's own words
@@ -2778,7 +2866,7 @@ class AgentRunner:
             raise RPCError("换了%s账号，这个 /agent 请求是之前那个账号的，不再以你的身份发出" % self.app.platform.name)
 
     def _post_once(self, run: dict, key: str, text: str, reply_to: str = "", root: str = "", to_chat: bool = False,
-                   model_effort: Optional[tuple] = None) -> str:
+                   model_effort: Optional[tuple] = None, *, final: bool = False) -> str:
         """Send text (with the header / end mark) into the run's chat once per key; the new message's id, "" when it
         failed. A run nobody asked for in the chat (自动代答, a document's comment) says nothing there of its own: a
         failure, a stop or a timeout is the user's to see in the app, never a line in someone else's group."""
@@ -2787,10 +2875,11 @@ class AgentRunner:
             return ""
         body = self.with_suffix(text, run, model_effort)
         try:
-            res = self._send(run, key, body, reply_to, root, to_chat)
+            res = self._send(run, key, body, reply_to, root, to_chat, final=final)
             return str(res.get("message_ref") or "")
         except RPCError as e:
-            log.warning("an /agent message was not sent: %s", e.code or "error")
+            if e.code != "request_recalled":
+                log.warning("an /agent message was not sent: %s", e.code or "error")
             return ""
 
     def _can_send_images(self) -> bool:
@@ -2965,7 +3054,7 @@ class AgentRunner:
                         mentions = spans
                     else:
                         at_note = "；at 没有生效（正文里的「@名字」被 AI 标记行改掉了），发出的是普通文字"
-                res = self._send(cur, key, body, mentions=mentions, **self._where(cur))
+                res = self._send(cur, key, body, mentions=mentions, final=True, **self._where(cur))
             sent_id = str(res.get("message_ref") or "")
             went = True
         except RPCError:
@@ -3018,6 +3107,7 @@ class AgentRunner:
 
         def go() -> dict:
             self._still_ours(run)
+            self._reject_recalled(run["chat_id"], run["request_id"])
             w = self._where(run)  # where its text went (a backend that cannot place a picture: into the chat)
             mid = self.app.send_image_as_user(run["chat_id"], path, w["reply_to"], w["root"], w["to_chat"])
             chat = self.store.get_chat(run["chat_id"])
@@ -3082,6 +3172,7 @@ class AgentRunner:
             cur = self.store.run_get(run["id"])
             if cur is None:  # wiped by another account's sign-in meanwhile
                 raise RPCError("这个 /agent 请求已经不在了（换了%s账号），不再回复" % self.app.platform.name)
+            self._reject_recalled(cur["chat_id"], cur["request_id"])
             body = self.with_suffix(PROGRESS_MARK + "\n" + text.strip(), cur)
             pid = str(cur.get("progress_id") or "")
             if pid and self._edit(cur, pid, body, "/agent 更新了进度消息"):
@@ -3118,7 +3209,8 @@ class AgentRunner:
         """Edit a message /agent sent, as the user; told to the sent-as-user ledger like a send. False when the
         service has no editing or refused it."""
         backend = getattr(self.app, "backend", None)
-        if backend is None or self._gone(run["id"]) or not self._remember_post(body, run):
+        if (backend is None or self._gone(run["id"]) or self._recalled(run["chat_id"], run["request_id"])
+                or not self._remember_post(body, run)):
             return False
         try:
             backend.edit(run["chat_id"], mid, body)
@@ -3183,10 +3275,12 @@ class AgentRunner:
             try:
                 self.hub.interrupt(run["machine_id"], run["session_id"])
             except HubError as e:
-                log.warning("自动代答 %s: could not interrupt after the user replied (HTTP %s %s)",
-                            run["id"], e.status, e.code)
+                log.warning("自动代答 %s: could not interrupt (%s, HTTP %s %s)",
+                            run["id"], run.get("stop_reason"), e.status, e.code)
 
-    def _stop_run(self, run: dict, row: dict, *, handled_by_user: bool = False, epoch: Optional[int] = None) -> None:
+    def _stop_run(self, run: dict, row: Optional[dict] = None, *, stop_reason: str = "", epoch: Optional[int] = None,
+                  pending_draft: bool = False) -> None:
+        recalled = stop_reason == RECALL_STOP
         with self._lock(run["id"]), self.app.owned(epoch) as ok:
             if not ok:
                 return
@@ -3194,10 +3288,18 @@ class AgentRunner:
             if cur is None:
                 return  # gone meanwhile (pruned, or wiped by another account's sign-in): nothing here to stop
             before = cur["state"]
-            if handled_by_user:
-                if before not in ACTIVE:
+            if stop_reason and before not in ACTIVE:
+                # A refused final reply can clear its in-flight flag before the recall worker reaches the run.
+                finishing = not cur.get("replies") and (cur.get("awaiting") or cur.get("fallback") == "claimed"
+                                                        or cur.get("reply_inflight") or run.get("reply_inflight"))
+                if pending_draft:
+                    # The session's status can belong to a newer turn that reused this conversation.
+                    pending_draft = not cur.get("replies") and not any(
+                        other["created"] > cur["created"] for other in self._same_conversation(cur))
+                if not recalled or before not in ("done", "forwarded") or not (finishing or pending_draft):
                     return
-                cur["stop_reason"] = USER_REPLY_STOP
+            if stop_reason:
+                cur["stop_reason"] = stop_reason
             alone = before == "starting" and cur.get("forwarding") and not cur.get("forward_pending")
             if alone:  # being looked up: nothing of it went anywhere, the conversation it borrowed is not its own
                 for k in ("machine_id", "session_id", "continued", "asked", "forwarding"):
@@ -3209,11 +3311,18 @@ class AgentRunner:
                 cur["stopped_at"] = float(cur.get("updated") or time.time())
             if not self.store.run_put(cur):
                 return
-        if handled_by_user:
+        if stop_reason == USER_REPLY_STOP:
             log.info("自动代答 %s: stopped because the user replied in the group (message %s)", cur["id"], row["id"])
             self._interrupt_auto(cur)
             self._end_reaction(cur["id"], "stopped")
             return
+        withdraw_draft = recalled and self._can_have_draft(cur)
+        if recalled:
+            log.info("request %s recalled: run %s stopped", cur["request_id"], cur["id"])
+            if not self.app.owns(epoch):
+                return
+            if withdraw_draft:
+                self._interrupt_auto(cur)  # withdraw a pending draft just as when the user replies in the chat
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
         elif cur.get("awaiting"):  # ended waiting for its answer: no more waited for
@@ -3221,7 +3330,9 @@ class AgentRunner:
         for other in (self._same_conversation(cur) if before != "stopped" else []):
             # what this stop stops at the hub is theirs too: a turn still running, a follow-up handed to the task's
             # Agent and waiting for its result (an earlier stop that reached nothing here stops nothing more)
-            with self._lock(other["id"]):
+            with self._lock(other["id"]), self.app.owned(epoch) as ok:
+                if not ok:
+                    return
                 o = self.store.run_get(other["id"])
                 if o is None or not (o["state"] in ACTIVE or (o["state"] == "forwarded" and not o.get("replies"))):
                     continue
@@ -3229,6 +3340,8 @@ class AgentRunner:
                 if not self.store.run_put(o):
                     continue
             self._end_reaction(other["id"], "stopped")
+        if recalled and not self.app.owns(epoch):
+            return
         tasks: List[str] = []
         failed = ""
         if before == "stopped":
@@ -3240,10 +3353,11 @@ class AgentRunner:
                 tasks = [str(t.get("title") or "") for t in res.get("tasks") or [] if isinstance(t, dict) and t.get("title")]
             except HubError as e:
                 if e.status == 404:  # an older hub, or not a reporting conversation: interrupt the turn at least
-                    try:
-                        self.hub.interrupt(cur["machine_id"], cur["session_id"])
-                    except HubError:
-                        pass
+                    if not withdraw_draft:
+                        try:
+                            self.hub.interrupt(cur["machine_id"], cur["session_id"])
+                        except HubError:
+                            pass
                     already = before not in ACTIVE
                 elif e.unreachable:  # replies are refused from now on all the same: the chat side has stopped
                     failed = "网络不稳，没能通知 Persona，那边的会话可能还在运行；它不会再回复到这里"
@@ -3251,8 +3365,12 @@ class AgentRunner:
                 else:
                     failed = e.message or "hub 没有回答"
                     already = False
+                if recalled and e.status != 404:
+                    log.info("recalled run %s could not be stopped at the hub (HTTP %s %s)", cur["id"], e.status, e.code)
         else:
             already = before not in ACTIVE
+        if recalled:
+            return
         background = False
         if cur.get("session_id") and not failed and before != "stopped":
             # the hub stops a turn and the tasks it handed out, not the session's own background commands or

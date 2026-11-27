@@ -5,12 +5,20 @@ try:  # first: every temporary directory of this run in one, removed at its end
     import _runtmp  # noqa: F401
 except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
     pass
+import os
 import re
+import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 
-from harness import CID, Harness, HubSideError, fast, wait_until
+from harness import CID, Harness, HubSideError, fast, openmate_feishu, wait_until
+from openmate_core.agent import AgentRunner
+from openmate_core.app import ConnectorApp
+from openmate_core.fixture import FixtureBackend
+from openmate_core.store import Store
+from openmate_core.wire import RPCError
 
 SUFFIX = "> 🤖 AI 代答，仅供参考"
 RUN_ID = re.compile(r"omr_[0-9a-f]{20}")
@@ -43,6 +51,10 @@ def run_of(h, msg):
 
 def running(h, msg):
     return wait_until(lambda: (lambda r: r if r and r["state"] == "running" else None)(run_of(h, msg)), what="running")
+
+
+def wait_for_recall():
+    wait_until(lambda: not any(t.name == "openmate-agent-recall" for t in threading.enumerate()), what="recall handled")
 
 
 def replies(h):
@@ -533,6 +545,140 @@ class SupersedeTest(unittest.TestCase):
         h.tool("agent_reply", request=run["id"], text="/agent 这句只是回复里的文字")
         time.sleep(0.3)
         self.assertEqual(len(h.http.starts()), 1)
+
+
+class RecallTest(unittest.TestCase):
+    def test_confirmed_recall_rejects_the_reply_while_the_hub_is_busy(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        app = ConnectorApp(openmate_feishu.platform())
+        app.store = Store(os.path.join(directory.name, "openmate.db"))
+        self.addCleanup(app.store.close)
+        app.agent = AgentRunner(app)
+        app.backend = Mock()
+        app.backend.message_gone.return_value = True
+        run = dict(id="run", chat_id="chat", request_id="msg", thread_key="msg", state="done", created=time.time(),
+                   kind="auto", guest=False, machine_id="machine", session_id="session", reply_inflight=1)
+        app.store.run_put(run)
+        caller = threading.current_thread()
+        threads, release = [], threading.Event()
+
+        def session_row(*_):
+            thread = threading.current_thread()
+            threads.append(thread)
+            if thread is not caller:
+                release.wait(5)
+            return {}
+
+        with patch.object(app.hub, "session_row", side_effect=session_row), \
+                patch.object(app.hub, "interrupt", return_value={}), \
+                patch.object(app.hub, "stop_conversation", return_value={}) as stop:
+            try:
+                with self.assertRaisesRegex(RPCError, "已撤回"):
+                    app.agent._check_final_request("chat", "msg", app.account_epoch())
+                self.assertTrue(app.store.seen_has("recalled:chat:msg"))
+                worker = wait_until(lambda: threads, what="the session lookup")[0]
+                self.assertIsNot(worker, caller)
+                self.assertTrue(worker.daemon)
+                stop.assert_not_called()
+                cur = app.store.run_get("run")
+                cur["reply_inflight"] = 0  # the refused reply cleaned up while the hub is still being asked
+                app.store.run_put(cur)
+            finally:
+                release.set()
+                if threads and threads[0] is not caller:
+                    threads[0].join(5)
+            stop.assert_called_once_with("session")
+            self.assertEqual(app.store.run_get("run")["stop_reason"], "recalled")
+
+    def test_recall_stops_a_running_request_silently(self):
+        h = agent(self, agent_ack_reaction="🤔")
+        msg = ask(h, "/agent 写个长报告")
+        run = running(h, msg)
+        wait_until(lambda: run_of(h, msg).get("acked"), what="acknowledged")
+        reactions = list(h.world.reactions)
+        h.app.agent.on_recalled(msg.chat_id, msg.id, h.app.account_epoch())
+        wait_until(lambda: h.http.posts("/api/v1/assistant/conversations/%s/stop" % run["session_id"]),
+                   what="the conversation stopped")
+        self.assertEqual(run_of(h, msg)["state"], "stopped")
+        self.assertEqual(run_of(h, msg)["stop_reason"], "recalled")
+        self.assertEqual(h.sent(), [])
+        self.assertEqual(h.world.reactions, reactions)
+
+    def test_live_recall_callback_stops_a_self_mention(self):
+        callbacks = []
+
+        def listen(backend, on_message, on_link, stop, on_recalled):
+            callbacks.append(on_recalled)
+            backend.listen(on_message, on_link, stop)
+
+        with patch.object(FixtureBackend, "listen_with_recall", listen):
+            h = agent(self)
+            msg = ask(h, "@示例用户 查日程", at_me=True, edited=False, text_after_mentions="查日程")
+            run = running(h, msg)
+            callbacks[0](msg.chat_id, msg.id)
+            wait_until(lambda: h.app.store.run_get(run["id"]).get("stop_reason") == "recalled", what="recall stopped it")
+            self.assertEqual(h.sent(), [])
+
+    def test_recall_does_not_touch_an_answered_run(self):
+        h = agent(self)
+        msg = ask(h, "/agent 查日程")
+        run = running(h, msg)
+        h.tool("agent_reply", request=run["id"], text="会议在周五。")
+        h.http.end_turn(run["session_id"])
+        wait_until(lambda: run_of(h, msg)["state"] == "done", what="done")
+        done = run_of(h, msg)
+        sent = list(h.sent())
+        h.app.agent.on_recalled(msg.chat_id, msg.id, h.app.account_epoch())
+        wait_for_recall()
+        self.assertEqual(run_of(h, msg), done)
+        self.assertEqual(h.http.posts("/stop"), [])
+        self.assertEqual(h.sent(), sent)
+
+    def test_recall_before_the_request_leaves_it_unclaimed(self):
+        h = agent(self)
+        epoch = h.app.account_epoch()
+        msg = h.world.make("chat_example_team", "me", "/agent 查日程")
+        h.app.agent.on_recalled(msg.chat_id, msg.id, epoch)
+        h.app.ingest([msg], live=True, epoch=epoch)
+        self.assertEqual(h.app.store.run_count(), 0)
+        self.assertFalse(h.app.store.seen_has("agent:%s:%s" % (msg.chat_id, msg.id)))
+        self.assertEqual(h.http.starts(), [])
+
+    def test_final_reply_checks_once_and_only_a_confirmed_recall_stops_it(self):
+        for gone in (True, False, None):
+            with self.subTest(gone=gone):
+                h = agent(self)
+                msg = ask(h, "/agent 查日程")
+                run = running(h, msg)
+                with patch.object(h.app.backend, "message_gone", return_value=gone) as lookup:
+                    h.tool("agent_reply", request=run["id"], text="在查了。", progress=True)
+                    lookup.assert_not_called()
+                    if gone:
+                        with self.assertRaisesRegex(HubSideError, "已撤回"):
+                            h.tool("agent_reply", request=run["id"], text="会议在周五。")
+                        wait_until(lambda: run_of(h, msg).get("stop_reason") == "recalled", what="recall stopped it")
+                        self.assertEqual(len(h.sent()), 1, "only the earlier progress went out")
+                    else:
+                        h.tool("agent_reply", request=run["id"], text="会议在周五。")
+                        self.assertIn("会议在周五。", h.sent()[-1]["text"])
+                    lookup.assert_called_once_with(msg.chat_id, msg.id)
+
+    def test_fallback_answer_checks_for_recall(self):
+        h = agent(self, agent_ack_reaction="🤔")
+        h.app.backend.reports_recalls = True
+        msg = ask(h, "/agent 查日程")
+        run = running(h, msg)
+        wait_until(lambda: run_of(h, msg).get("acked"), what="acknowledged")
+        reactions = list(h.world.reactions)
+        with patch.object(h.app.backend, "message_gone", return_value=True) as lookup:
+            h.http.add(run["session_id"], "assistant", "text", "会议在周五。")
+            h.http.end_turn(run["session_id"])
+            wait_until(lambda: h.http.posts("/stop"), what="the fallback stopped the conversation")
+            lookup.assert_called_once_with(msg.chat_id, msg.id)
+        self.assertEqual(run_of(h, msg)["stop_reason"], "recalled")
+        self.assertEqual(h.sent(), [])
+        self.assertEqual(h.world.reactions, reactions)
 
 
 class StopTest(unittest.TestCase):

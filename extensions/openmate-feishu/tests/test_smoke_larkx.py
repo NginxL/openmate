@@ -28,7 +28,7 @@ LAUNCHER = os.path.join(EXT_DIR, "bin", "openmate-feishu")
 PYTHON = os.environ.get("OPENMATE_LARKX_PYTHON", "")
 
 INSIDE = r'''
-import json, os, sys, tempfile
+import asyncio, json, os, queue, sys, tempfile
 sys.path[:0] = [sys.argv[1], sys.argv[2]]
 from openmate_feishu import larkagentx, pin
 out = {"commit": pin.verify(larkagentx.DEFAULT_COMMIT)}
@@ -129,7 +129,8 @@ x = pm.messages["88"]; x.id = "88"; x.editVersion = 1
 x = pm.messages["89"]; x.id = "89"; x.createTimeMs = 1763000000000; x.editTimeMs = 1763000060000  # edited a minute on
 x = pm.messages["90"]; x.id = "90"; x.createTimeMs = 1763000000000; x.editTimeMs = 1763000000000
 x = pm.messages["91"]; x.id = "91"; x.status = 1  # as sent: surely not an edit
-x = pm.messages["92"]; x.id = "92"; x.status = 2  # deleted: not known as unedited
+x = pm.messages["92"]; x.id = "92"; x.status = 2; x.chatId = "900"; x.channelId = "901"
+x = pm.messages["93"]; x.status = 2; x.channelId = "900"  # a deletion can name only the map key and channel
 marks = larkagentx.pushed_threads(pm.SerializeToString())
 E = LA.entities.RichTextElement
 cb = E.CodeBlockProperty(); cb.content = "SELECT 1"
@@ -146,6 +147,15 @@ first = {"elementIds": ["a", "c"], "elements": {"dictionary": {
     "a": {"tag": 5, "property": ap.SerializeToString()}, "c": {"tag": 31, "property": ind.SerializeToString()}}}}
 out["code_first"] = larkagentx.rich_after_mentions(first, b.lx.P)
 out["pushed_threads"] = [[k, marks[k], larkagentx.synced_mark(marks[k])] for k in sorted(marks)]
+push = LA.messages.PushMessagesRequest()
+x = push.messages["201"]; x.status = 2; x.channelId = "900"
+x = push.messages["202"]; x.id = "202"; x.status = 1; x.chatId = "900"; x.fromId = "7002"; x.type = 4
+x.content = tc.SerializeToString()
+packet = P.Packet(cmd=larkagentx.PUSH_CMD, payload=push.SerializeToString())
+frame = P.Frame(payload=packet.SerializePartialToString())
+inbox = queue.Queue()
+asyncio.run(b._frame(None, None, frame.SerializePartialToString(), inbox))
+out["recall_push"] = [list(inbox.get_nowait()["recalled"]), inbox.get_nowait()["msg_id"], inbox.empty()]
 pkt = b.lx.builders.build_send_message_packet("也发到群里", "900", "rid", root_id="80", thread_chat=False)
 pkt = larkagentx.also_to_chat(pkt, "81", "sync")
 lr = LA.messages.PutMessageRequest(); lr.ParseFromString(pkt.payload)
@@ -311,7 +321,7 @@ class RealLarkAgentXTest(unittest.TestCase):
         self.assertEqual(out["reactions"], [[["71"]], 24, ["71", "73"], {"73": 1763000000.0}],
                          "a real push names the message with the account's reaction; a real answer's own status")
         none = {"thread_type": 2, "thread_known": True, "send_to_chat": False, "sync_type": 0, "sync_related": "",
-                "sync_root": "", "status": None, "edited": None}
+                "sync_root": "", "status": None, "chat_id": "", "edited": None}
         self.assertEqual(out["pushed_threads"], [
             ["81", dict(none, sync_type=2, sync_related="82", sync_root="80"), "sync"],
             ["83", dict(none, send_to_chat=True), "send"],
@@ -323,8 +333,10 @@ class RealLarkAgentXTest(unittest.TestCase):
             ["89", dict(none, thread_type=0, thread_known=False, edited=True), ""],
             ["90", dict(none, thread_type=0, thread_known=False), ""],
             ["91", dict(none, thread_type=0, thread_known=False, status=1, edited=False), ""],
-            ["92", dict(none, thread_type=0, thread_known=False, status=2), ""]],
+            ["92", dict(none, thread_type=0, thread_known=False, status=2, chat_id="900"), ""],
+            ["93", dict(none, thread_type=0, thread_known=False, status=2, chat_id="900"), ""]],
             "where pushed messages show, read from a real push; an unset thread kind is told from a quote's 0; edits")
+        self.assertEqual(out["recall_push"], [["900", "201"], "202", True])
         self.assertEqual(out["code_cut"], ["/stop\nSELECT 1\n\na = 1\nb = 2", "@我 /stop"],
                          "an @自己 request keeps code blocks (no bare /stop then); the message's text as before")
         self.assertEqual(out["code_first"], "    def a():\n        pass", "a code block first keeps its indents")

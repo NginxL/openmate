@@ -939,6 +939,10 @@ class Store:
         rows = self._all("SELECT * FROM runs WHERE chat_id = ? ORDER BY created DESC LIMIT ?", (chat_id, limit))
         return [self._run_row(r) for r in rows]
 
+    def runs_for_request(self, chat_id: str, message_id: str) -> List[dict]:
+        rows = self._all("SELECT * FROM runs WHERE chat_id = ? AND request_id = ?", (chat_id, message_id))
+        return [self._run_row(r) for r in rows]
+
     def sent_by_a_run(self, chat_id: str, msg_id: str) -> bool:
         """Whether a run of the chat (any still kept) sent this message: it is in the run's reply_ids."""
         if not msg_id:
@@ -1141,6 +1145,9 @@ class Store:
         return int(r["n"]) if r else 0
 
     # ---- handled-once keys ----
+
+    def seen_has(self, key: str) -> bool:
+        return self._one("SELECT 1 FROM seen WHERE key = ?", (key,)) is not None
 
     def seen_add(self, key: str, now: Optional[float] = None) -> bool:
         """Record key; False when it was recorded already (the thing was handled)."""

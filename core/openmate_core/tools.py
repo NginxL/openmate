@@ -701,7 +701,10 @@ def describe(app, params: dict) -> dict:
     a = _args(params)
     c = app.cid
     if name == c + "_send":
-        _, _, _, visible, summary, _, _ = _send_card(app, a)
+        epoch = app.account_epoch()
+        chat_id, _, reply_to, visible, summary, _, _ = _send_card(app, a)
+        if app.agent is not None:
+            app.agent.check_auto_draft(chat_id, reply_to, epoch, lookup=True)
         return {"action": {"name": name, "visible": visible}, "summary": summary}
     if name == c + "_send_dm":
         _, _, visible, summary, _ = _dm_card(app, a)
@@ -744,6 +747,8 @@ def do(app, params: dict) -> dict:
 
         def send():
             as_asked()
+            if app.agent is not None:
+                app.agent.check_auto_draft(chat_id, reply_to, epoch, lookup=False)
             mid = app.send_as_user(chat_id, text, reply_to or None, root, mentions=mentions or None, rich=rich)
             return {"text": "已发送到%s" % visible, "message_ref": mid}
 

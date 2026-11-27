@@ -15,6 +15,7 @@ import threading
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXT_DIR = os.path.dirname(HERE)
@@ -1240,6 +1241,38 @@ class ReadTest(Base):
         S.history["500"] = {p: frame_msg(str(100 + p), "500", p, text_data("第%d条" % p), sender=ME if p == 9 else "7002")
                             for p in range(1, 11) if p not in (6, 7)}  # 6 and 7 were recalled
 
+    def test_message_gone_only_takes_an_explicit_status_for_the_message(self):
+        name = "messages.PullMessagesByIdsRequest"
+        samples = [(2, True), ("DELETED", True), (1, False), ("NORMAL", False), (0, None), (None, None)]
+        for status, expected in samples:
+            with self.subTest(status=status):
+                S.api_answers[name] = {"messages": {"201": {"status": status}}}
+                self.assertIs(self.b.message_gone("500", "201"), expected)
+        S.api_answers[name] = {"messages": {"202": {"status": 2}}}
+        self.assertIsNone(self.b.message_gone("500", "201"))
+        S.api_answers[name] = OSError("offline")
+        self.assertIsNone(self.b.message_gone("500", "201"))
+        self.assertEqual([call for call in S.api_calls if call[0] == name], [(name, {"messageIds": ["201"]})] * 8)
+
+    def test_message_gone_does_not_wait_for_a_slow_api(self):
+        client, _ = self.b._session()
+        finished = threading.Event()
+        release = threading.Event()
+
+        def slow(*_):
+            release.wait(5)
+            finished.set()
+            return {"messages": {"201": {"status": 2}}}
+
+        self.b.recall_timeout = 0.03
+        with patch.object(client, "api", side_effect=slow):
+            try:
+                self.assertIsNone(self.b.message_gone("500", "201"))
+                self.assertFalse(finished.is_set())
+            finally:
+                release.set()
+                self.assertTrue(finished.wait(2))
+
     def test_a_text_that_is_a_link(self):
         def pb(*fields):  # a protobuf message of string fields: (number, text)
             out = b""
@@ -2128,10 +2161,10 @@ class ListenTest(Base):
         self.stop = threading.Event()
         self.error = []
 
-    def start(self):
+    def start(self, on_recalled=None):
         def run():
             try:
-                self.b.listen(self.got.append, lambda s, r="": self.links.append(s), self.stop)
+                self.b.listen_with_recall(self.got.append, lambda s, r="": self.links.append(s), self.stop, on_recalled)
             except BaseException as e:
                 self.error.append(e)
 
@@ -2181,6 +2214,45 @@ class ListenTest(Base):
                          [("206", "thread_chat"), ("207", "thread"), ("208", "chat"), ("209", "thread")])
         self.stop.set()
         t.join(5)
+        self.assertEqual(self.error, [])
+
+    def test_deleted_pushes_are_recall_notifications_even_without_a_sender(self):
+        from larkx import proto
+        from larkx._fake import frame, text_data
+
+        class Entity:
+            def __init__(self, **data):
+                self.data = data
+
+            def __getattr__(self, key):
+                return self.data.get(key, 0)
+
+            def HasField(self, key):
+                return key in self.data
+
+        class PushMessagesRequest:
+            def ParseFromString(self, payload):
+                self.messages = {mid: Entity(**fields) for mid, fields in json.loads(payload).items()}
+
+        fake = types.SimpleNamespace(messages=types.SimpleNamespace(PushMessagesRequest=PushMessagesRequest))
+        recalled = []
+        with patch.object(proto, "lark_all_pb2", fake, create=True), self.assertLogs("openmate.larkx", "INFO") as logs:
+            t = self.start(lambda chat, mid: recalled.append((chat, mid)))
+            S.frames.put(frame(payload=b'{"201":{"status":2,"chatId":"500","channelId":"501"}}'))
+            S.frames.put(frame(payload=b'{"202":{"status":2,"channelId":"500"},"203":{"status":2},'
+                                       b'"204":{"status":1},"205":{"status":2,"chatId":"500"}}', messages=[
+                frame_msg("202", "", 20, {}, sender=""),
+                frame_msg("203", "", 21, text_data("已撤回")),
+                frame_msg("204", "500", 22, text_data("正常消息")),
+                frame_msg("205", "500", 23, text_data("带发送者的撤回")),
+            ]))
+            wait_until(lambda: self.got, what="the normal message")
+            self.stop.set()
+            t.join(5)
+        self.assertEqual(recalled, [("500", "201"), ("500", "202"), ("500", "205")])
+        self.assertEqual([m.id for m in self.got], ["204"])
+        self.assertTrue(any("a pushed message 203 in ? says it was recalled (status DELETED)" in line
+                            for line in logs.output))
         self.assertEqual(self.error, [])
 
     def test_chats_moved_to_done_reach_the_core(self):
