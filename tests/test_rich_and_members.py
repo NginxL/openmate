@@ -60,6 +60,27 @@ class PostAgentTest(unittest.TestCase):
         self.assertTrue(body["prompt"].endswith("\n帮我看下"), body["prompt"][-80:])
         self.assertEqual(run_of(h, m)["request_text"], "帮我看下")
 
+    def test_the_title_is_matched_as_written_and_code_counts(self):
+        h = agent(self)
+        ask(h, "周报 \n/agent 帮我看下", type="POST", title="周报 ")  # a title with a space at its end
+        wait_until(lambda: h.http.starts(), what="started")
+        h2 = agent(self)
+        # the code block before the paragraph shows first (the text leaves code out): no request
+        ask(h2, "周报\n/agent 帮我看下", type="POST", title="周报",
+            text_after_mentions="周报\nprint(1)\n/agent 帮我看下")
+        time.sleep(0.4)
+        self.assertEqual(h2.http.starts(), [])
+
+    def test_its_pictures_are_kept_for_a_resume(self):
+        h = agent(self)
+        pics = [Media("image", ref="img:%d" % i) for i in range(2)]
+        m = ask(h, "/agent 看图", type="POST", media=pics)
+        run = wait_until(lambda: next((r for r in h.app.store.runs_in_chat(TEAM) if r["request_id"] == m.id), None),
+                         what="the run")
+        first = h.app.agent._request_images(run, h.app.store.message(TEAM, m.id) | {"type": "POST"})
+        again = h.app.agent._request_images(run, {"type": "POST", "media": [{"kind": "image", "ref": "fail:not_found"}]})
+        self.assertEqual(first, again, "the same pictures, however a second fetch would go")
+
     def test_no_title_no_second_line(self):
         h = agent(self)
         ask(h, "先说一句\n/agent 帮我看下", type="POST")  # a second paragraph is no request without a title

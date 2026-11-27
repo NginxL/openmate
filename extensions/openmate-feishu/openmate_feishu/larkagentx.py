@@ -59,7 +59,7 @@ MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
 IMG_TAG = 2  # RichTextElement.Tag IMG: a picture inside a rich text (a POST's)
 MEMBERS_TTL = 300.0  # a chat's members (chat_members) kept this long for a session
 MEMBERS_PAGE = 100  # chatters per chats.PullChatChattersRequest…
-MEMBERS_PAGES = 5  # …at most this many pages (500 people and bots)
+MEMBERS_PAGES = 20  # …at most this many pages (2000 people and bots; a longer list is marked partial)
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 IMAGE = 5
 IMAGE_MOST = 10 << 20  # a picture sent (the core checks and copies it first: images.take)
@@ -1850,9 +1850,13 @@ class LarkXBackend(Backend):
             else:
                 cut = body
         markdown, title = "", ""
+        text = self._read_text(mt, name, data, str(d.get("content") or ""))
         if data is not None and mt in (TEXT, POST):
-            title = str(data.get("title") or "").strip() if mt == POST else ""
+            title = str(data.get("title") or "") if mt == POST else ""  # as the text has it (its line, spaces and all)
             markdown = rich_markdown(data.get("richText") or {}, self.lx.P, title)
+            if markdown and not text.strip():  # only code, or a rule: the words of its code, never nothing
+                body = rich_after_mentions(data.get("richText") or {}, self.lx.P, cut=False) or "[富文本]"
+                text = ("%s\n%s" % (title, body) if title.strip() else body).strip()
         media = self._media_of(mt, data, chat_id, msg_id)
         if data is not None and mt == POST:  # its inline pictures: seen, fetched and handed over like a picture's
             media += [Media("image", ref=media_ref("image", chat_id, msg_id, key))
@@ -1864,7 +1868,7 @@ class LarkXBackend(Backend):
         return Message(
             id=msg_id, chat_id=chat_id, position=self._position(chat_id, d.get("position"), client),
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),
-            text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
+            text=text, at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
             media=media, placement=placement, same_as=same_as, markdown=markdown, title=title,
             text_after_mentions=cut, edited=marks["edited"] if "edited" in marks else None)  # None: not known
@@ -2452,6 +2456,7 @@ class LarkXBackend(Backend):
             return [dict(m) for m in hit[1]]
         out: Dict[str, dict] = {}
         cursor = 0
+        partial = False
         for _ in range(MEMBERS_PAGES):
             params = {"chatId": chat_id, "needChatters": True, "limit": MEMBERS_PAGE}
             if cursor:
@@ -2462,7 +2467,8 @@ class LarkXBackend(Backend):
                 raise self._net(e, "读取群成员")
             resp = self._answer(resp, "读取群成员")
             chatters = resp.get("chatters") or {}
-            nicks = resp.get("groupNicknames") if isinstance(resp.get("groupNicknames"), dict) else {}
+            raw_nicks = resp.get("groupNicknames") if isinstance(resp.get("groupNicknames"), dict) else {}
+            nicks = {_id(k): str(v or "") for k, v in raw_nicks.items() if isinstance(v, str)}  # (keys: numbers)
             if not isinstance(chatters, dict) or not chatters:
                 break
             added = 0
@@ -2472,8 +2478,9 @@ class LarkXBackend(Backend):
                 uid = _id(c.get("id") or key)
                 if not uid.isdigit() or uid in out:
                     continue
-                own = str(c.get("displayName") or c.get("name") or c.get("enUsName") or "").strip()
-                nick = str(nicks.get(uid) or nicks.get(key) or "").strip()
+                own = next((v.strip() for v in (c.get("name"), c.get("displayName"), c.get("enUsName"))
+                            if isinstance(v, str) and v.strip()), "")  # (displayName may be an object: never its text)
+                nick = (nicks.get(uid) or "").strip()
                 shown = nick or own
                 if not shown or "\n" in shown or "\r" in shown:
                     continue
@@ -2484,10 +2491,15 @@ class LarkXBackend(Backend):
             if not added or not nxt or nxt == cursor:
                 break
             cursor = nxt
+        else:
+            partial = True
         members = sorted(out.values(), key=lambda m: (m["kind"] != "bot", m["name"]))
+        if partial and members:
+            members[0] = dict(members[0], partial=True)  # (the list says it is not the whole chat)
         with self._lock:
-            if self._session_no == no and self._still(me):  # another sign-in meanwhile: not kept for it
-                self._members[chat_id] = (time.monotonic() + MEMBERS_TTL, members)
+            if self._session_no != no or not self._still(me):  # another sign-in meanwhile: not that account's list
+                raise BackendError("刚换了%s账号，请重新读群成员" % self.region.label, "unknown")
+            self._members[chat_id] = (time.monotonic() + MEMBERS_TTL, members)
         return [dict(m) for m in members]
 
     def chat_mute(self, chat_id: str) -> Optional[bool]:

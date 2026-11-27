@@ -189,6 +189,10 @@ _INSERT_COLUMNS = ("chat_id, id, position, sender_id, sender_name, mine, type, t
                    "at_me, at_all, media, from_history, received, blocked")
 
 
+def media_json(m: Message) -> str:
+    return json.dumps([x.to_dict() for x in (m.media or [])], ensure_ascii=False)
+
+
 def _message_row(r: sqlite3.Row) -> dict:
     d = dict(r)
     for k in ("mine", "at_me", "at_all", "from_history", "blocked"):
@@ -645,6 +649,11 @@ class Store:
                         # placeholder, never brings it to the archive); only a recall's notice replaces its note
                         db.execute("UPDATE messages SET text = ?, type = ? WHERE chat_id = ? AND id = ? AND text != ? "
                                    "AND (blocked = 0 OR ? = 'SYSTEM')", (m.text, kind, m.chat_id, m.id, m.text, kind))
+                    if (m.type or "").upper() == "POST" and m.text and not m.blocked:
+                        # a rich text's pictures as this reading has them (an earlier one may have had none, an edit
+                        # others): they are its words' (Feishu)
+                        db.execute("UPDATE messages SET media = ? WHERE chat_id = ? AND id = ? AND media != ?",
+                                   (media_json(m), m.chat_id, m.id, media_json(m)))
                     if (m.type or "").upper() == "SYSTEM" and not m.media:
                         # turned into a notice (a recall): what it carried is not offered any more
                         db.execute("UPDATE messages SET media = '[]' WHERE chat_id = ? AND id = ? AND media != '[]'",

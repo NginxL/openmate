@@ -31,7 +31,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
+import os
+import shutil
 import re
 import secrets
 import threading
@@ -645,10 +648,14 @@ class AgentRunner:
             self._take_stop(row, epoch)
             return
         req = match_prefix(body, self.prefix)
-        title = str(row.get("post_title") or "")
-        if req is None and title and body.startswith(title) and body[len(title):len(title) + 1] in ("\n", "\r"):
-            # a rich text's title line first: the request is the prefix at the start of what follows it
-            req = match_prefix(body[len(title):].lstrip("\r\n").lstrip(), self.prefix)
+        title = str(row.get("post_title") or "").strip()
+        if req is None and title:
+            # a rich text's title line first: the request is the prefix at the start of what shows after it (its code
+            # blocks too, which the text leaves out: the backend's reading with them, text_after_mentions)
+            shown = row.get("text_after_mentions")
+            first, _, rest = strip_leading_mentions(shown if isinstance(shown, str) else text).lstrip().partition("\n")
+            if first.strip() == title:
+                req = match_prefix(rest.lstrip(), self.prefix)
         # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), is surely not
         # an edit (edited or not known: never a request) and was not held back. Its request is the message after its
         # leading @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right
@@ -1077,6 +1084,12 @@ class AgentRunner:
                 self._starting_now.discard(run["id"])
 
     def _start_once(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
+        try:
+            self._start_once_now(run, row, epoch)
+        finally:
+            self._drop_request_images(run["id"])  # its start is over (a restart midway keeps them for the resume)
+
+    def _start_once_now(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
         """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
         is touched, once another account's sign-in took the store."""
         if not self.app.owns(epoch):
@@ -1283,17 +1296,33 @@ class AgentRunner:
                  ", try %d" % tries if tries > 1 else "")
         self._wake.set()
 
+    def _images_dir(self, run_id: str) -> str:
+        return os.path.join(str(getattr(self.app, "data_dir", "") or ""), "agent-images", run_id)
+
     def _request_images(self, run: dict, row: dict) -> List[dict]:
-        """The pictures inside the request itself (a rich text's, a POST's), for the conversation to see with it: at
-        most REQUEST_IMAGES_MOST, each at most REQUEST_IMAGE_MOST, as the hub takes a message's ([{mime, data}]). One
-        that cannot be fetched is left out (the context still names it for the media tool)."""
-        if (row.get("type") or "").upper() != "POST":
+        """The pictures inside the request itself (a rich text's, a POST's), for the conversation to see with it: the
+        first REQUEST_IMAGES_MOST that can be fetched, each at most REQUEST_IMAGE_MOST, as the hub takes a message's
+        ([{mime, data}]). Fetched once per run and kept in the data directory till its start is over, so every try of
+        the start, a resume after a restart too, sends the very same body (one operation id, one body)."""
+        if (row.get("type") or "").upper() != "POST" or not getattr(self.app, "data_dir", ""):
             return []
+        folder = self._images_dir(run["id"])
+        index = os.path.join(folder, "index.json")
+        try:
+            with open(index, encoding="utf-8") as f:
+                kept = json.load(f)
+            out = []
+            for item in kept:
+                with open(os.path.join(folder, item["file"]), "rb") as f:
+                    out.append({"mime": item["mime"], "data": base64.b64encode(f.read()).decode("ascii")})
+            return out
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         backend = getattr(self.app, "backend", None)
         refs = [m.get("ref") for m in row.get("media") or [] if isinstance(m, dict) and m.get("kind") == "image" and m.get("ref")]
-        out: List[dict] = []
+        got: List[Tuple[str, bytes]] = []
         for ref in refs[:2 * REQUEST_IMAGES_MOST]:  # the first ones that can be fetched (a few tries more at most)
-            if len(out) >= REQUEST_IMAGES_MOST:
+            if len(got) >= REQUEST_IMAGES_MOST:
                 break
             try:
                 mime, data = backend.media(ref, REQUEST_IMAGE_MOST)
@@ -1301,10 +1330,26 @@ class AgentRunner:
                 log.info("/agent: a picture of the request was not fetched (%s)", getattr(e, "kind", "") or type(e).__name__)
                 continue
             kind = modelimages.kind_of(data[:16]) or str(mime or "")
-            if kind not in modelimages.TYPES and kind != "image/gif":
-                continue
-            out.append({"mime": kind, "data": base64.b64encode(data).decode("ascii")})
-        return out
+            if kind in modelimages.TYPES or kind == "image/gif":
+                got.append((kind, data))
+        if not got:
+            return []
+        try:
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            for i, (_, data) in enumerate(got):
+                with open(os.path.join(folder, "%d.bin" % i), "wb") as f:
+                    f.write(data)
+            with open(index + ".tmp", "w", encoding="utf-8") as f:
+                json.dump([{"mime": m, "file": "%d.bin" % i} for i, (m, _) in enumerate(got)], f)
+            os.replace(index + ".tmp", index)
+        except OSError:
+            log.info("/agent: the request's pictures could not be kept: they go without")
+            return []  # (kept or none: never a body a resume could not send again)
+        return [{"mime": m, "data": base64.b64encode(d).decode("ascii")} for m, d in got]
+
+    def _drop_request_images(self, run_id: str) -> None:
+        if getattr(self.app, "data_dir", ""):
+            shutil.rmtree(self._images_dir(run_id), ignore_errors=True)
 
     def _place(self, run: dict) -> str:
         """The computer a new conversation of this run starts on ("" is the assistant's, as a start without one):
@@ -1707,7 +1752,8 @@ class AgentRunner:
                         return gone()
             tries += 1
             try:
-                res = self.hub.send_message(target["machine_id"], target["session_id"], text, cmid) or {}
+                res = self.hub.send_message(target["machine_id"], target["session_id"], text, cmid,
+                                            images=self._request_images(run, row or {})) or {}
                 held = bool(isinstance(res, dict) and res.get("waits_on_computer"))
                 break
             except HubError as e:

@@ -20,8 +20,8 @@ def members_tools(app) -> Dict:
     schema = {
         "name": MEMBERS_TOOL,
         "description": "列出一个飞书群（或私聊）里的人和机器人：每个的用户 id、在这个群里显示的准确名字、是人还是机器人。要真正 @ 某人或某个"
-                       "机器人时，用这里的 id 和名字（matefeishu_send 的 at、matefeishu_agent_reply 的 at），不要只在正文里打「@名字」，"
-                       "那只是普通文字。只读，不发消息；列表会缓存几分钟。",
+                       "机器人时，用这里的 id 和名字（发消息工具的 at），不要只在正文里打「@名字」，那只是普通文字。只读，不发消息；"
+                       "列表会缓存几分钟。",
         "input_schema": {"type": "object", "properties": {
             "chat": {"type": "string", "description": "会话 id（matefeishu_chats、matefeishu_search 或 /agent 上下文里的 chat=…）"},
             "query": {"type": "string", "description": "只列名字里含这个词的，可选"},
@@ -73,6 +73,8 @@ def roster_text(app, chat_id: str, query: str = "", limit: int = SHOWN_DEFAULT) 
     bots = sum(1 for p in people if p.get("kind") == "bot")
     head = "飞书%s「%s」（chat=%s）：%d 个成员，其中机器人 %d 个" % (
         "私聊" if (chat or {}).get("kind") == "dm" else "群", name, chat_id, len(people), bots)
+    if any(p.get("partial") for p in people):
+        head += "（群太大，只读到这些）"
     if query:
         head += "；名字含「%s」的 %d 个" % (query, len(shown))
     lines = [head + "。真 @ 时用这里的 id 和名字："]
@@ -98,7 +100,8 @@ def verify(app, chat_id: str, wanted: List[dict]) -> List[tuple]:
         name = str((w or {}).get("name") or "").strip().lstrip("@").strip()
         p = people.get(uid)
         if p is None:
-            raise MembersError("id=%s 不在这个会话的成员里：先用 %s 查准确的 id" % (uid or "（空）", MEMBERS_TOOL))
+            partial = "（群太大，成员只读到一部分）" if any(x.get("partial") for x in people.values()) else ""
+            raise MembersError("id=%s 不在这个会话的成员里%s：先用 %s 查准确的 id" % (uid or "（空）", partial, MEMBERS_TOOL))
         if name not in (p["name"], p.get("real_name") or p["name"]):
             raise MembersError("id=%s 在这个会话里显示为「%s」，不是「%s」：用 %s 给出的名字" % (uid, p["name"], name, MEMBERS_TOOL))
         if uid not in {u for u, _ in out}:

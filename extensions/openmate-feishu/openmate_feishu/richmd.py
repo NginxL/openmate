@@ -2,8 +2,8 @@
 italics, lists, quotes, headings, code and links shown as the sender formatted them. Everything else reads the plain
 text as before (commands, @s, the archive, quotes, the models' chat lines).
 
-Safe: every word from the message is escaped (an ASCII punctuation mark gets a backslash), so nothing written in a
-message becomes Markdown or HTML of its own; a link is kept only with an http(s) address, its address percent-encoded
+Safe: every word from the message is escaped (an ASCII punctuation mark gets a backslash; "(", ")" and "]" need
+none once "[" has one), so nothing written in a message becomes Markdown, HTML or a formula of its own; a link is kept only with an http(s) address, its address percent-encoded
 where it could end the link; code is fenced longer than any run of backticks in it. A rich text with none of these
 formats gives "" (the page shows the plain text, as before), and so does one this walk cannot read.
 
@@ -26,7 +26,10 @@ HEADINGS = {H1: 1, H2: 2, H3: 3, H4: 4, H5: 5, H6: 6}
 FORMATS = frozenset((B, I, A, LINK, UL, OL, QUOTE, CODE, CODE_BLOCK, CODE_BLOCK_V2, HR, MARKDOWN) + tuple(HEADINGS))
 PLACEHOLDERS = {IMG: "[图片]", EMOTION: "[表情]", MEDIA: "[视频]"}
 DEPTH_MOST = 20
-_ESCAPED = frozenset(string.punctuation)
+# ASCII punctuation, each escaped with a backslash, except "(", ")" and "]": "\\(" "\\)" "\\[" "\\]" open and close
+# formulas in renderers with math (Persona's web), and with "[" escaped no link or image can start anyway ("$" is
+# escaped, so no formula starts either)
+_ESCAPED = frozenset(string.punctuation) - frozenset("()]")
 _FENCE = re.compile(r"^(`{3,}|~{3,})([^\n`]*)\n(.*?)\n?\1[ \t]*$", re.S)
 
 
@@ -135,9 +138,12 @@ def _render(rich: dict, P_, title: str) -> str:
         seen.add(k)
         el = els[k]
         tag, prop = _tag(el), el.get("property") or b""
-        kids = "".join(inline(c, depth + 1) for c in kids_of[k])
         if tag == CODE:
             return code_span(words_of(prop) + "".join(plain(c) for c in kids_of[k]))
+        if tag in (CODE_BLOCK, CODE_BLOCK_V2, MARKDOWN) or tag in HEADINGS or tag in (UL, OL, QUOTE, HR, P, DOCS, DIV):
+            seen.discard(k)
+            return block(k, depth)  # a block inside a line (a client's odd tree): on lines of its own
+        kids = _join(inline(c, depth + 1) for c in kids_of[k])
         if tag == A:
             href, words = link_text_parts(prop) if prop else ("", "")
             return link(href, words) + kids
@@ -154,9 +160,6 @@ def _render(rich: dict, P_, title: str) -> str:
             return own + kids
         if tag in PLACEHOLDERS:
             return escape(PLACEHOLDERS[tag]) + kids
-        if tag in (CODE_BLOCK, CODE_BLOCK_V2, MARKDOWN) or tag in HEADINGS or tag in (UL, OL, QUOTE, HR, P, DOCS, DIV):
-            seen.discard(k)
-            return block(k, depth)  # a block inside a line (a client's odd tree): on lines of its own
         own = escape(words_of(prop)) if tag in (TEXT, B, I, U, LI) else ""
         body = (own + kids).replace("\n", "  \n")  # a line break inside a paragraph stays one
         bold, italic = _styled(el)
@@ -168,6 +171,13 @@ def _render(rich: dict, P_, title: str) -> str:
             core = mark + ("*%s*" % core if italic else core) + mark
             return lead + core + tail
         return body
+
+    def inline_kids(k: str, depth: int) -> str:
+        """A paragraph's words on the line it is in (a list item's)."""
+        if k in seen:
+            return ""
+        seen.add(k)
+        return _join([escape(words_of(els[k].get("property") or b""))] + [inline(c, depth + 1) for c in kids_of[k]]).strip()
 
     def plain(k: str) -> str:
         """An element's words with nothing made of them (inside code)."""
@@ -213,9 +223,16 @@ def _render(rich: dict, P_, title: str) -> str:
             marker = "%d. " % number if number else "- "
             line, nested = "", ""
             own = escape(words_of(prop))
+            pad = indent + " " * len(marker)
             for c in kids_of[k]:
-                if _tag(els[c]) in (UL, OL):
-                    nested += block(c, depth + 1, 0, indent + " " * len(marker))
+                ct = _tag(els[c])
+                if ct in (UL, OL):
+                    nested += block(c, depth + 1, 0, pad)
+                elif ct == P and not nested:
+                    line += (" " if line.strip() else "") + inline_kids(c, depth + 1)
+                elif _is_block(els[c]):
+                    piece = block(c, depth + 1).strip("\n")
+                    nested += "\n".join(pad + x if x else x for x in piece.split("\n")) + "\n" if piece else ""
                 else:
                     line += inline(c, depth + 1)
             text = (own + line).strip().replace("  \n", " ")
@@ -231,7 +248,7 @@ def _render(rich: dict, P_, title: str) -> str:
         if tag in (DOCS, DIV, FIGURE) or (not prop and kids_of[k] and tag not in (P, TEXT, B, I, U)):
             return "".join(block(c, depth + 1) if _is_block(els[c]) else para_of(c, depth + 1) for c in kids_of[k])
         if tag == P:
-            words = (escape(words_of(prop)) + "".join(inline(c, depth + 1) for c in kids_of[k])).strip("\n")
+            words = _join([escape(words_of(prop))] + [inline(c, depth + 1) for c in kids_of[k]]).strip("\n")
             return words + "\n\n" if words.strip() else ""
         seen.discard(k)
         return para_of(k, depth)
@@ -253,10 +270,21 @@ def _render(rich: dict, P_, title: str) -> str:
             loose = ""
             out.append(block(k, 0))
         else:
-            loose += inline(k, 0)
+            loose = _join([loose, inline(k, 0)])
     if loose.strip():
         out.append(loose.strip("\n") + "\n\n")
     return "".join(out).strip()
+
+
+def _join(pieces) -> str:
+    """Runs of a line side by side; two bold ones that meet read as one ("**a****b**" would show its stars)."""
+    out = ""
+    for p in pieces:
+        if out.endswith("**") and p.startswith("**") and not out.endswith("\\**"):
+            out = out[:-2] + p[2:]
+        else:
+            out += p
+    return out
 
 
 def _is_block(el: dict) -> bool:

@@ -142,6 +142,9 @@ class MappingTest(Base):
         self.assertTrue(m.markdown.startswith("**周报**\n\n"), m.markdown)
         self.assertIn("**很急**", m.markdown)
         self.assertIn("\\/agent", m.markdown)  # escaped: shown as written, never markup
+        code = self.m(msg_type=2, content_data={"title": "", "richText": {"elementIds": ["c"], "elements": {"dictionary": {
+            "c": {"tag": 49, "property": pb((1, "```\nls\n```"))}}}}})
+        self.assertEqual((code.text, code.markdown), ("```\nls\n```", "```\nls\n```"), "code alone: words, never none")
         plain = self.m(content_data={"richText": {"elementIds": ["t"], "elements": {"dictionary": {
             "t": {"tag": 1, "property": "普通的一句".encode()}}}}})
         self.assertEqual((plain.markdown, plain.title, plain.media), ("", "", []))
@@ -1817,12 +1820,12 @@ class ReadTest(Base):
 
     def test_chat_members_people_and_bots_kept_for_a_while(self):
         S.api_answers["chats.PullChatChattersRequest"] = {
-            "chatters": {"7001": {"id": "7001", "name": "张三", "type": 1},
+            "chatters": {"7001": {"id": "7001", "name": "张三", "type": 1, "displayName": {"defaultVal": "不是名字"}},
                          "7002": {"id": "7002", "name": "李四", "type": 1},
                          "8001": {"id": "8001", "name": "构建机器人", "type": 2},
                          "8002": {"id": "8002", "name": "助理", "type": 1, "botConfig": {"x": 1}},
                          "bad": {"id": "x", "name": "不是 id"}, "7003": {"id": "7003", "name": ""}},
-            "groupNicknames": {"7002": "小李"}, "nextCursor": 0}
+            "groupNicknames": {7002: "小李"}, "nextCursor": 0}  # (its keys: numbers, as LarkAgentX decodes them)
         got = self.b.chat_members("500")
         self.assertEqual(got, [
             {"id": "8002", "name": "助理", "real_name": "助理", "kind": "bot"},

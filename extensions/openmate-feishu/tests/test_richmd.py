@@ -59,8 +59,7 @@ class MarkdownTest(unittest.TestCase):
                  qp={"tag": 3, "property": b"", "childIds": ["qt"]}, qt=text("引一句"))
         md = richmd.rich_markdown(r, P)
         self.assertIn("# 周报", md)
-        self.assertIn("这是 **重点**", md)
-        self.assertIn("**也重要**", md)
+        self.assertIn("这是 **重点也重要**", md)  # two bold runs that meet: one, no stars shown
         self.assertIn("- 第一项\n- 第二项", md)
         self.assertIn("3. 三\n4. 四", md)
         self.assertIn("> 引一句", md)
@@ -72,9 +71,11 @@ class MarkdownTest(unittest.TestCase):
         self.assertTrue(md.startswith("**") and md.endswith("**"))
         import re
 
-        self.assertIsNone(re.search(r"(?<!\\)[<>\[\]`]", md), "every mark escaped")
+        self.assertIsNone(re.search(r"(?<!\\)[<>\[`$]", md), "every mark escaped")
+        self.assertNotIn("\\(", md)  # "\\(" opens a formula where the renderer has math: "(" needs no escape
+        self.assertNotIn("\\]", md)
         self.assertIn("\\<img", md)
-        self.assertIn("\\[x\\]\\(javascript\\:alert\\(1\\)\\)", md)
+        self.assertIn("\\[x](javascript\\:alert(1))", md)  # "[" escaped: no link can start
         self.assertIn("\\*a\\*", md)
         self.assertIn("\\`c\\`", md)
 
@@ -104,6 +105,21 @@ class MarkdownTest(unittest.TestCase):
         md = richmd.rich_markdown(r, P, title="标题 #1")
         self.assertTrue(md.startswith("**标题 \\#1**\n\n"))
         self.assertIn("一行  \n二行 **粗**", md)
+
+    def test_nothing_read_twice_or_lost(self):
+        r = rich(["p", "ul"], p={"tag": 3, "property": b"", "childIds": ["t", "c"]}, t=text("run "),
+                 c={"tag": 30, "property": b"", "childIds": ["ct"]}, ct=text("build"),
+                 ul={"tag": 26, "property": b"", "childIds": ["li"]},
+                 li={"tag": 28, "property": b"", "childIds": ["lp", "cb"]},
+                 lp={"tag": 3, "property": b"", "childIds": ["lt"]}, lt=text("details"),
+                 cb={"tag": 49, "property": pb((1, "```\n# Notes\nx = 1\n```"))})
+        md = richmd.rich_markdown(r, P)
+        self.assertIn("run `build`", md)
+        self.assertIn("- details\n  ```\n  # Notes\n  x = 1\n  ```", md)  # the code inside the item, every line
+
+    def test_code_alone(self):
+        r = rich(["m"], m={"tag": 49, "property": pb((1, "```\nls -la\n```"))})
+        self.assertEqual(richmd.rich_markdown(r, P), "```\nls -la\n```")
 
     def test_odd_trees_never_raise(self):
         loop = rich(["a"], a={"tag": 3, "property": b"", "childIds": ["b"]}, b={"tag": 7, "property": b"", "childIds": ["a"]})
