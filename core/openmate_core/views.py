@@ -228,9 +228,10 @@ def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, since: f
     else:
         before = [r for r in rows if float(r.get("at") or 0) <= until] if until else []
         old = inbox_thing(chat, before, **kw) if before and not main else None
-        if old is not None and not old.get("done"):
-            old["done"], old["why"] = "read", "规则：这个群的消息现在按话题各成一条"
-            out.append(old)  # the one item a version before this one kept for the whole group: ended
+        if old is not None:  # the one item a version before this one kept for the whole group: ended
+            if not old.get("done"):
+                old["done"], old["why"] = "read", "规则：这个群的消息现在按话题各成一条"
+            out.append(old)
         if main:  # (a topic group's line outside any topic: the chat's own)
             thing = inbox_thing(chat, main, **kw)
             if thing is not None:

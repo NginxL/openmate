@@ -1748,8 +1748,6 @@ class ConnectorApp:
                                             private=hidden):
                 thing["_chat"] = cid
                 things.append(thing)
-        if epoch != self.account_epoch():
-            return {"things": []}  # read partly for another account: none of it is handed over
         if has_mute and groups:
             now = time.time()
             self._ask_mutes([c for c in groups if c not in mutes or mutes[c][1] < now - t.mute_ttl])
@@ -1764,6 +1762,8 @@ class ConnectorApp:
                                                  if th["_chat"] not in known or known[th["_chat"]][1] < now - t.avatar_ttl)))
         for th in things:
             del th["_chat"]
+        if epoch != self.account_epoch():
+            return {"things": []}  # read partly for another account (its rows, its pictures): none of it is handed over
         return {"things": things}
 
     def _declared(self, name: str) -> Any:
