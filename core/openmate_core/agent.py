@@ -462,6 +462,7 @@ class AgentRunner:
         for r in self.store.runs_in_state(["forwarded", "starting"]):
             if now - float(r.get("created") or 0) <= t.agent_keep and not r.get("replies"):
                 waiting += [r.get("asked"), r["id"]]  # and the follow-up itself, till its answer
+        waiting += [r["id"] for r in self.store.runs_in_state(["done"]) if r.get("awaiting")]  # (its answer awaited)
         self.store.runs_prune(now - t.agent_keep, t.agent_keep_most, protect=[w for w in waiting if w])
         self.store.seen_prune(now - t.agent_keep)
 
@@ -651,13 +652,16 @@ class AgentRunner:
             return
         req = match_prefix(body, self.prefix)
         title = str(row.get("post_title") or "").strip()
-        if req is None and title:
+        if req is None and title and not row.get("blocked"):
             # a rich text's title line first: the request is the prefix at the start of what shows after it (its code
-            # blocks too, which the text leaves out: the backend's reading with them, text_after_mentions)
+            # blocks too, which the text leaves out: the backend's reading with them, text_after_mentions; the text
+            # when that reading has no words after the title)
             shown = row.get("text_after_mentions")
-            first, _, rest = strip_leading_mentions(shown if isinstance(shown, str) else text).lstrip().partition("\n")
-            if first.strip() == title:
-                req = match_prefix(rest.lstrip(), self.prefix)
+            for words in ([shown] if isinstance(shown, str) else []) + [text]:
+                first, _, rest = strip_leading_mentions(words).lstrip().partition("\n")
+                if first.strip() == title and rest.strip():
+                    req = match_prefix(rest.lstrip(), self.prefix)
+                    break
         # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), is surely not
         # an edit (edited or not known: never a request) and was not held back. Its request is the message after its
         # leading @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right
@@ -1089,7 +1093,8 @@ class AgentRunner:
         try:
             self._start_once_now(run, row, epoch)
         finally:
-            self._drop_request_images(run["id"])  # its start is over (a restart midway keeps them for the resume)
+            if self._state(run["id"]) != "starting" or not self._stop.is_set():
+                self._drop_request_images(run["id"])  # its start is over (shutting down midway: kept for the resume)
 
     def _start_once_now(self, run: dict, row: dict, epoch: Optional[int] = None) -> None:
         """epoch: the account generation the request was claimed in (None: now); nothing is started, and no other run
@@ -1334,8 +1339,6 @@ class AgentRunner:
             kind = modelimages.kind_of(data[:16]) or str(mime or "")
             if kind in modelimages.TYPES or kind == "image/gif":
                 got.append((kind, data))
-        if not got:
-            return []
         try:
             os.makedirs(folder, mode=0o700, exist_ok=True)
             for i, (_, data) in enumerate(got):
@@ -1346,7 +1349,7 @@ class AgentRunner:
             os.replace(index + ".tmp", index)
         except OSError:
             log.info("/agent: the request's pictures could not be kept: they go without")
-            return []  # (kept or none: never a body a resume could not send again)
+            return []  # (kept or none: never a body a resume could not send again; none kept too, an empty index)
         return [{"mime": m, "data": base64.b64encode(d).decode("ascii")} for m, d in got]
 
     def _drop_request_images(self, run_id: str) -> None:
@@ -1654,6 +1657,7 @@ class AgentRunner:
             self._fail(run["id"], "没能确认这条追问有没有转给正在做这件事的 Agent：扩展内部错误。" + FORWARD_CHECK)
         finally:
             self._handing_done(run["id"])
+            self._drop_request_images(run["id"])
 
     def _forward_send(self, run_id: str, row: Optional[dict], target: dict, epoch: Optional[int] = None,
                       resumed: bool = False) -> bool:
@@ -1688,6 +1692,8 @@ class AgentRunner:
                 self._stop_conversation(conv)
             return True
 
+        first = self.store.run_get(run_id) or {}
+        pictures = self._request_images(first, row or {}) if first else []  # fetched before its checks, kept for a resume
         while True:
             state = self._state(run_id)
             if self._stop.is_set() or state in ("stopped", "") or not self.app.owns(epoch):
@@ -1755,7 +1761,7 @@ class AgentRunner:
             tries += 1
             try:
                 res = self.hub.send_message(target["machine_id"], target["session_id"], text, cmid,
-                                            images=self._request_images(run, row or {})) or {}
+                                            images=pictures) or {}
                 held = bool(isinstance(res, dict) and res.get("waits_on_computer"))
                 break
             except HubError as e:
@@ -2235,21 +2241,17 @@ class AgentRunner:
     def _task_wait_on(self) -> bool:
         return bool(getattr(self.app.platform, "agent_task_wait", False))
 
-    def _open_tasks(self, run: dict) -> str:
+    def _open_tasks(self, run: dict, todos: Optional[List[dict]] = None) -> str:
         """Whether the run's conversation still has work it handed out under way: "open" (an open to-do it opened,
-        `origin`), "none", or "unknown" (the hub could not say now)."""
+        `origin`), "none", or "unknown" (the hub could not say now). todos: the to-dos read already."""
         conv = run.get("session_id") or ""
         if not conv:
             return "none"
-        if not self.hub.available:
-            return "unknown"
-        try:
-            todos = self.hub.todos()
-        except HubError as e:
-            if e.status == 404:
-                return "none"  # a hub without to-dos: nothing is waited on
-            log.info("/agent: the to-dos could not be read (HTTP %s %s)", e.status, e.code)
-            return "unknown"
+        if todos is None:
+            todos = self._todos_now()
+            if todos is None:
+                log.info("/agent: the to-dos could not be read")
+                return "unknown"
         busy = [t for t in todos if t.get("origin") == conv and not t.get("done_at") and (t.get("kind") or "") in ("", "todo")]
         return "open" if busy else "none"
 
@@ -2257,8 +2259,7 @@ class AgentRunner:
         """With agent_task_wait: a run whose turn ends with no answer yet (only progress, or nothing) may end waiting
         for it, when its conversation has handed out work (_open_tasks)."""
         return (self._task_wait_on() and cur.get("kind") not in GUEST_KINDS and not cur.get("forward_pending")
-                and not int(cur.get("replies") or 0) and not int(cur.get("reply_inflight") or 0)
-                and not cur.get("fallback") and self._can_edit())
+                and not int(cur.get("replies") or 0) and not cur.get("fallback") and self._can_edit())
 
     def _tasks_sweep(self) -> None:
         """The requests that ended waiting for their answer (awaiting): their 🤔 becomes ✅ once the answer went out
@@ -2269,19 +2270,37 @@ class AgentRunner:
         if not self._task_wait_on() or now - self._swept < t.agent_task_recheck:
             return
         self._swept = now
-        for run in self.store.runs_in_state(["done"]):
-            if not run.get("awaiting"):
-                continue
+        waiting = [r for r in self.store.runs_in_state(["done"]) if r.get("awaiting")]
+        if not waiting:
+            return
+        todos: Optional[List[dict]] = None
+        for run in waiting:
             end = bool(int(run.get("replies") or 0)) or now - float(run.get("awaiting_since") or 0) > t.agent_task_wait_most
-            if not end and self._open_tasks(run) != "none":
-                continue
-            with self._lock(run["id"]):
-                cur = self.store.run_get(run["id"])
-                if cur is None or not cur.get("awaiting"):
+            if not end:
+                if todos is None:  # (one read of the to-dos for all of them)
+                    todos = self._todos_now()
+                if todos is None or self._open_tasks(run, todos) != "none":
                     continue
+            self._end_awaiting(run["id"])
+
+    def _todos_now(self) -> Optional[List[dict]]:
+        """The hub's to-dos ([] from a hub without them), None when it cannot say now."""
+        if not self.hub.available:
+            return None
+        try:
+            return self.hub.todos()
+        except HubError as e:
+            return [] if e.status == 404 else None
+
+    def _end_awaiting(self, run_id: str, outcome: str = "done") -> None:
+        """A request that waited for its answer is over: its 🤔 swapped first, then the mark taken off (a restart in
+        between swaps nothing twice: _end_reaction is once per run)."""
+        self._end_reaction(run_id, outcome)
+        with self._lock(run_id):
+            cur = self.store.run_get(run_id)
+            if cur is not None and cur.get("awaiting"):
                 cur["awaiting"] = ""
                 self.store.run_put(cur)
-            self._end_reaction(run["id"], "done")
 
     def _turn_ended(self, run_id: str) -> None:
         first = self.store.run_get(run_id)
@@ -2342,10 +2361,9 @@ class AgentRunner:
                 self._progress_done(cur)
 
     def _await_progress(self, run: dict) -> None:
-        """A run that ended waiting for its answer: the turn's last words (when it said any and sent no progress of its
-        own) go as its progress message, so the chat hears what was handed out; never as the answer."""
-        if run.get("progress_id"):
-            return
+        """A run that ended waiting for its answer: the turn's last words go as its progress (the progress message,
+        edited in place when there is one), so the chat hears what was handed out; never as the answer, and not once
+        the answer is on its way or out."""
         lt = run.get("last_text") or {}
         text = lt.get("text") or ""
         if lt.get("full") and lt.get("id"):
@@ -2354,10 +2372,12 @@ class AgentRunner:
             except HubError:
                 pass
         words = self._clean_answer(text, run).strip() if text.strip() else ""
-        if not words:
+        cur = self.store.run_get(run["id"]) or {}
+        if not words or words == (cur.get("progress_text") or "") or int(cur.get("replies") or 0) \
+                or int(cur.get("reply_inflight") or 0) or not cur.get("awaiting"):
             return
         try:
-            self._progress(run, words)
+            self._progress(cur, words)
         except Exception as e:
             log.info("/agent: the waiting request's progress was not sent (%s)", getattr(e, "kind", "") or type(e).__name__)
 
@@ -2706,6 +2726,10 @@ class AgentRunner:
         me = getattr(getattr(self.app, "account", None), "id", "")
         if me and any(uid == me for uid, _ in pairs):  # sent as the user, an @ of them reads as an @自己 request
             raise RPCError("at 里不能有你自己")
+        names = [n for _, n in pairs]
+        if len(set(names)) != len(names):  # one "@name" cannot say which of them
+            raise RPCError("at 里有重名（%s）：分不清是谁，不要 @ 他们" % "、".join(sorted({n for n in names if names.count(n) > 1})))
+        pairs.sort()
         missing = [n for u, n in pairs if mention_spans(text, [(u, n)])[0] != text]
         if missing:
             raise RPCError("text 里要写出「@%s」（at 里的人都要在正文里原样写到）" % "」「@".join(missing))
@@ -2864,12 +2888,7 @@ class AgentRunner:
         if cur.get("progress_id") and cur.get("kind") != "doc":
             self._progress_done(cur)
         if cur.get("awaiting"):  # the answer it waited for: ✅ now
-            with self._lock(rid):
-                latest = self.store.run_get(rid)
-                if latest is not None and latest.get("awaiting"):
-                    latest["awaiting"] = ""
-                    self.store.run_put(latest)
-            self._end_reaction(rid, "done")
+            self._end_awaiting(rid)
         note = self._send_image(cur, pic, key, full_body) + at_note if pic is not None else skipped + at_note
         return "已回复到%s（消息 id=%s）%s" % (self.app.platform.name, sent_id or "未知", note)
 
@@ -3073,6 +3092,8 @@ class AgentRunner:
                 return
         if before in ACTIVE:
             self._end_reaction(cur["id"], "stopped")
+        elif cur.get("awaiting"):  # ended waiting for its answer: no more waited for
+            self._end_awaiting(cur["id"], "stopped")
         for other in (self._same_conversation(cur) if before != "stopped" else []):
             # what this stop stops at the hub is theirs too: a turn still running, a follow-up handed to the task's
             # Agent and waiting for its result (an earlier stop that reached nothing here stops nothing more)

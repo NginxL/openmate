@@ -51,6 +51,19 @@ class TaskWaitTest(unittest.TestCase):
         wait_until(lambda: "✅ 已完成" in h.sent()[0]["text"], what="the progress message closed")
         self.assertFalse(h.app.store.run_get(run["id"]).get("awaiting"))
 
+    def test_its_last_words_update_its_progress(self):
+        h = make(self)
+        msg, run = self.dispatched(h)
+        wait_until(lambda: "已经派出去了" in h.sent()[0]["text"], what="the progress edited with the last words")
+        self.assertEqual(len(h.sent()), 1)
+
+    def test_a_stop_ends_the_wait(self):
+        h = make(self)
+        msg, run = self.dispatched(h)
+        h.world.push(TEAM, "me", "/stop", root_id=msg.id, thread_id=msg.id, parent_id=msg.id)
+        wait_until(lambda: not h.app.store.run_get(run["id"]).get("awaiting"), what="no more waited for")
+        self.assertNotIn((TEAM, msg.id, "DONE"), h.world.reactions)
+
     def test_its_last_words_go_as_progress_when_it_sent_none(self):
         h = make(self)
         msg, run = self.dispatched(h, progress=False)
@@ -90,8 +103,8 @@ class TaskWaitTest(unittest.TestCase):
         run = running(h, msg)
         h.http.add(run["session_id"], "assistant", "text", "答案是 42")
         h.http.end_turn(run["session_id"])
+        wait_until(lambda: h.sent() and h.sent()[-1]["text"].startswith("答案是 42"), what="its answer, as before")
         wait_until(lambda: (TEAM, msg.id, "DONE") in h.world.reactions, what="✅")
-        self.assertTrue(h.sent()[-1]["text"].startswith("答案是 42"))
 
     def test_the_instructions_say_so(self):
         h = make(self)
@@ -151,6 +164,12 @@ class AtTest(unittest.TestCase):
         self.h.tool("agent_reply", request=self.run["id"], text="请 @构建机器人 重跑")
         self.h.tool("agent_reply", request=self.run["id"], text="请 @构建机器人 重跑", at=[{"id": "8001", "name": "构建机器人"}])
         self.assertEqual([s["mentions"] for s in self.h.sent()], [[], [("8001", "构建机器人", 2)]])
+
+    def test_two_of_one_name_are_refused(self):
+        self.h.world.members[TEAM].append({"id": "8002", "name": "构建机器人", "real_name": "构建机器人", "kind": "bot"})
+        with self.assertRaises(HubSideError):
+            self.h.tool("agent_reply", request=self.run["id"], text="@构建机器人 跑",
+                        at=[{"id": "8001", "name": "构建机器人"}, {"id": "8002", "name": "构建机器人"}])
 
     def test_wechat_leaves_at_alone(self):
         w = wechat(self)

@@ -72,14 +72,17 @@ class PostAgentTest(unittest.TestCase):
         self.assertEqual(h2.http.starts(), [])
 
     def test_its_pictures_are_kept_for_a_resume(self):
-        h = agent(self)
-        pics = [Media("image", ref="img:%d" % i) for i in range(2)]
-        m = ask(h, "/agent 看图", type="POST", media=pics)
-        run = wait_until(lambda: next((r for r in h.app.store.runs_in_chat(TEAM) if r["request_id"] == m.id), None),
-                         what="the run")
-        first = h.app.agent._request_images(run, h.app.store.message(TEAM, m.id) | {"type": "POST"})
+        h = agent(self, agent=False)
+        run = {"id": "omr_resume_test"}  # (no start of its own: nothing else reads or drops its pictures)
+        row = {"type": "POST", "media": [{"kind": "image", "ref": "img:1"}, {"kind": "image", "ref": "img:2"}]}
+        first = h.app.agent._request_images(run, row)
+        self.assertEqual(len(first), 2)
         again = h.app.agent._request_images(run, {"type": "POST", "media": [{"kind": "image", "ref": "fail:not_found"}]})
         self.assertEqual(first, again, "the same pictures, however a second fetch would go")
+        h.app.agent._drop_request_images(run["id"])
+        none = {"id": "omr_none_test"}
+        self.assertEqual(h.app.agent._request_images(none, {"type": "POST", "media": [{"kind": "image", "ref": "fail:x"}]}), [])
+        self.assertEqual(h.app.agent._request_images(none, row), [], "none kept is kept too: a resume sends none")
 
     def test_no_title_no_second_line(self):
         h = agent(self)

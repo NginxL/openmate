@@ -961,7 +961,7 @@ class LarkXBackend(Backend):
         self._chats: Dict[str, Tuple[float, Chat]] = {}
         self._names: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._person_avatars: Dict[str, Tuple[float, str]] = {}  # person → (good till, their picture's key or "")
-        self._members: Dict[str, Tuple[float, List[dict]]] = {}  # chat → (good till, its people and bots): a session's
+        self._members: Dict[str, Tuple[float, List[dict], int]] = {}  # chat → (good till, its people and bots): a session's
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
@@ -2452,7 +2452,9 @@ class LarkXBackend(Backend):
         with self._lock:
             no = self._session_no
             hit = self._members.get(chat_id)
-        if hit is not None and hit[0] > time.monotonic():
+            if not self._still(me):  # another account's session since this one was taken
+                raise BackendError("刚换了%s账号，请重新读群成员" % self.region.label, "unknown")
+        if hit is not None and hit[0] > time.monotonic() and hit[2] == no:
             return [dict(m) for m in hit[1]]
         out: Dict[str, dict] = {}
         cursor = 0
@@ -2499,7 +2501,7 @@ class LarkXBackend(Backend):
         with self._lock:
             if self._session_no != no or not self._still(me):  # another sign-in meanwhile: not that account's list
                 raise BackendError("刚换了%s账号，请重新读群成员" % self.region.label, "unknown")
-            self._members[chat_id] = (time.monotonic() + MEMBERS_TTL, members)
+            self._members[chat_id] = (time.monotonic() + MEMBERS_TTL, members, no)
         return [dict(m) for m in members]
 
     def chat_mute(self, chat_id: str) -> Optional[bool]:

@@ -54,7 +54,9 @@ def link(href: str, words: str = "") -> str:
         href = href.replace(c, code)
     if not words or words == href:
         return "<%s>" % href
-    return "[%s](%s)" % (escape(words), href)
+    # a link's words: its brackets as character references (a "]" would end the words, "\\[" "\\]" a formula)
+    label = escape(words).replace("\\[", "&#91;").replace("]", "&#93;")
+    return "[%s](%s)" % (label, href)
 
 
 def code_span(words: str) -> str:

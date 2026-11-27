@@ -82,6 +82,8 @@ class MarkdownTest(unittest.TestCase):
     def test_links_only_http(self):
         good = rich(["a"], a={"tag": 6, "property": pb((1, "https://example.com/a_(b)"), (2, "文档"))})
         self.assertEqual(richmd.rich_markdown(good, P), "[文档](https://example.com/a_%28b%29)")
+        brackets = rich(["a"], a={"tag": 6, "property": pb((1, "https://example.com/v"), (2, "版本[2]说明"))})
+        self.assertEqual(richmd.rich_markdown(brackets, P), "[版本&#91;2&#93;说明](https://example.com/v)")
         bare = rich(["a"], a={"tag": 6, "property": pb((1, "https://example.com/x"))})
         self.assertEqual(richmd.rich_markdown(bare, P), "<https://example.com/x>")
         bad = rich(["a"], a={"tag": 6, "property": pb((1, "javascript:alert(1)"), (2, "点我"))})
