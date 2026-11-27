@@ -94,6 +94,8 @@ class FixtureWorld:
         self.mutes: Dict[str, Optional[bool]] = {}  # chat id → what chat_mute answers (missing: None)
         self.mute_fail = False  # chat_mute raises
         self.mute_asked: List[str] = []  # chat_mute's calls, in order
+        self.members: Dict[str, List[dict]] = {}  # chat id → what chat_members answers (missing: not_found)
+        self.members_asked: List[str] = []
         self.info_asked: List[str] = []  # chat_info's calls, in order
         self.image_fail: Optional[str] = None  # "rejected" | "uncertain" for the next picture
         self.send_delay = 0.0
@@ -339,6 +341,14 @@ class FixtureBackend(Backend):
                 if c.kind == "group" and q and q in c.name.lower():
                     out.append(Person("group", c.id, c.name, "%d 人" % c.members if c.members else ""))
         return out[:limit]
+
+    def chat_members(self, chat_id: str) -> List[dict]:
+        w = self.world
+        with w.lock:
+            w.members_asked.append(chat_id)
+            if chat_id not in w.members:
+                raise BackendError("没有这个会话的成员", "not_found")
+            return [dict(m) for m in w.members[chat_id]]
 
     @property
     def has_mute(self) -> bool:

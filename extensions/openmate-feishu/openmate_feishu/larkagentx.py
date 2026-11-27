@@ -42,6 +42,7 @@ from openmate_core import markup
 from openmate_core.textutil import mention_spans, span_pieces
 
 from . import DLP_BLOCKED_TEXT, launch, pin  # DLP_BLOCKED_TEXT: a blocked message's note (Message.blocked)
+from .richmd import rich_markdown  # a rich text as safe Markdown for the thread page (it reads helpers here lazily)
 
 log = logging.getLogger("openmate.larkx")
 
@@ -55,6 +56,10 @@ REF_PREFIX = "lx1"
 # LarkAgentX's message types (larkx.proto.decoders.MSG_TYPE_NAMES) that the core names differently
 CORE_TYPES = {"MEDIA": "VIDEO", "SHARE_GROUP_CHAT": "SHARE_CHAT", "SHARE_USER_CARD": "SHARE_USER"}
 MEDIA_KINDS = {5: "image", 3: "file", 15: "video", 7: "voice", 10: "sticker"}
+IMG_TAG = 2  # RichTextElement.Tag IMG: a picture inside a rich text (a POST's)
+MEMBERS_TTL = 300.0  # a chat's members (chat_members) kept this long for a session
+MEMBERS_PAGE = 100  # chatters per chats.PullChatChattersRequest…
+MEMBERS_PAGES = 5  # …at most this many pages (500 people and bots)
 TEXT, POST, SYSTEM, CARD = 4, 2, 6, 14
 IMAGE = 5
 IMAGE_MOST = 10 << 20  # a picture sent (the core checks and copies it first: images.take)
@@ -956,6 +961,7 @@ class LarkXBackend(Backend):
         self._chats: Dict[str, Tuple[float, Chat]] = {}
         self._names: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._person_avatars: Dict[str, Tuple[float, str]] = {}  # person → (good till, their picture's key or "")
+        self._members: Dict[str, Tuple[float, List[dict]]] = {}  # chat → (good till, its people and bots): a session's
         self._peers: Dict[str, str] = {}  # dm chat id → the other person (the dms we opened)
         self._own: Optional[Tuple[str, str, float]] = None  # (account id, its chat with itself or "", ask again after)
         self._last_pos: Dict[str, int] = {}  # chat id → the newest position seen
@@ -1069,6 +1075,7 @@ class LarkXBackend(Backend):
                     self._doc_writer = None
                 self._auth, self._client, self._me, self._creds = auth, client, acct, creds
                 self._session_no += 1
+                self._members.clear()  # a sign-in reads every chat's members anew
         if stale:
             self._close_client(client)
             raise BackendError("恢复登录时已经退出或换了账号：这次恢复作废", "unknown")
@@ -1209,6 +1216,7 @@ class LarkXBackend(Backend):
             self._person_avatars.clear()
             self._chats.clear()
             self._peers.clear()
+            self._members.clear()
             self._doc_writer = None
         with self._groups_mu:
             self._groups, self._groups_join, self._groups_owner, self._groups_at = [], {}, "", 0.0
@@ -1841,6 +1849,14 @@ class LarkXBackend(Backend):
                 cut = (title + "\n" + (body or "")).strip()
             else:
                 cut = body
+        markdown, title = "", ""
+        if data is not None and mt in (TEXT, POST):
+            title = str(data.get("title") or "").strip() if mt == POST else ""
+            markdown = rich_markdown(data.get("richText") or {}, self.lx.P, title)
+        media = self._media_of(mt, data, chat_id, msg_id)
+        if data is not None and mt == POST:  # its inline pictures: seen, fetched and handed over like a picture's
+            media += [Media("image", ref=media_ref("image", chat_id, msg_id, key))
+                      for key in post_images(data.get("richText") or {})]
         at_all = "all" in mentions
         # the service's own at-me mark counts for someone else's message only: an own message @-mentions the account
         # only by a real @ of it in the text (@自己 asks the Agent, so a reply or quote of an own message never does)
@@ -1850,7 +1866,7 @@ class LarkXBackend(Backend):
             sender_id=sender, mine=bool(me_id) and sender == me_id, type=CORE_TYPES.get(name, name),
             text=self._read_text(mt, name, data, str(d.get("content") or "")), at=_seconds(d.get("create_time")),
             root_id=root if in_thread else "", thread_id=thread_id, parent_id=parent, at_me=at_me, at_all=at_all,
-            media=self._media_of(mt, data, chat_id, msg_id), placement=placement, same_as=same_as,
+            media=media, placement=placement, same_as=same_as, markdown=markdown, title=title,
             text_after_mentions=cut, edited=marks["edited"] if "edited" in marks else None)  # None: not known
 
     def _placement(self, d: dict, chat_id: str, msg_id: str, in_thread: bool, topic_root: bool, mine: bool,
@@ -2418,6 +2434,61 @@ class LarkXBackend(Backend):
             return chat
         client, me = self._signed_in()
         return self._chat_read(client, chat_id, me)[1]
+
+    def chat_members(self, chat_id: str) -> List[dict]:
+        """The people and bots in a chat as Feishu lists them (chats.PullChatChattersRequest, a page of MEMBERS_PAGE at
+        a time, at most MEMBERS_PAGES pages): [{"id", "name": the name shown in that chat (the group nickname, else the
+        person's own), "real_name": their own name, "kind": "user" | "bot" (Chatter.type BOT or AI, or a botConfig)}],
+        bots first, then by name. Kept MEMBERS_TTL for the session (a sign-in or logout forgets them); BackendError
+        when it could not be read."""
+        chat_id = _id(chat_id)
+        if not chat_id.isdigit():
+            raise BackendError("会话 id 不对", "not_found")
+        client, me = self._signed_in()
+        with self._lock:
+            no = self._session_no
+            hit = self._members.get(chat_id)
+        if hit is not None and hit[0] > time.monotonic():
+            return [dict(m) for m in hit[1]]
+        out: Dict[str, dict] = {}
+        cursor = 0
+        for _ in range(MEMBERS_PAGES):
+            params = {"chatId": chat_id, "needChatters": True, "limit": MEMBERS_PAGE}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                resp = client.api("chats.PullChatChattersRequest", params)
+            except Exception as e:
+                raise self._net(e, "读取群成员")
+            resp = self._answer(resp, "读取群成员")
+            chatters = resp.get("chatters") or {}
+            nicks = resp.get("groupNicknames") if isinstance(resp.get("groupNicknames"), dict) else {}
+            if not isinstance(chatters, dict) or not chatters:
+                break
+            added = 0
+            for key, c in chatters.items():
+                if not isinstance(c, dict):
+                    continue
+                uid = _id(c.get("id") or key)
+                if not uid.isdigit() or uid in out:
+                    continue
+                own = str(c.get("displayName") or c.get("name") or c.get("enUsName") or "").strip()
+                nick = str(nicks.get(uid) or nicks.get(key) or "").strip()
+                shown = nick or own
+                if not shown or "\n" in shown or "\r" in shown:
+                    continue
+                kind = "bot" if _int(c.get("type")) in (2, 3) or str(c.get("type")) in ("BOT", "AI") or c.get("botConfig") else "user"
+                out[uid] = {"id": uid, "name": shown, "real_name": own, "kind": kind}
+                added += 1
+            nxt = _int(resp.get("nextCursor"))
+            if not added or not nxt or nxt == cursor:
+                break
+            cursor = nxt
+        members = sorted(out.values(), key=lambda m: (m["kind"] != "bot", m["name"]))
+        with self._lock:
+            if self._session_no == no and self._still(me):  # another sign-in meanwhile: not kept for it
+                self._members[chat_id] = (time.monotonic() + MEMBERS_TTL, members)
+        return [dict(m) for m in members]
 
     def chat_mute(self, chat_id: str) -> Optional[bool]:
         """Backend.chat_mute: the chat's record read now (mute_of)."""
@@ -3265,6 +3336,57 @@ def wire_fields(b: bytes) -> List[Tuple[int, str]]:
 
 
 ANCHOR_HREF, ANCHOR_CONTENT, ANCHOR_TEXT, ANCHOR_PC_HREF = 1, 2, 3, 8  # RichTextElement.AnchorProperty
+
+
+def link_text_parts(prop: bytes) -> Tuple[str, str]:
+    """An A element's (address, words) as written (AnchorProperty: href 1, else pcHref 8; textContent 3, else content
+    2), each "" when it has none; the address is not checked here (richmd keeps only an http(s) one)."""
+    f: Dict[int, str] = {}
+    for n, s in wire_fields(prop):
+        if s.strip() and n not in f:
+            f[n] = s.strip()
+    return f.get(ANCHOR_HREF) or f.get(ANCHOR_PC_HREF) or "", f.get(ANCHOR_TEXT) or f.get(ANCHOR_CONTENT) or ""
+
+
+def post_images(rich: dict) -> List[str]:
+    """The keys of a rich text's inline pictures (IMG elements), in the order they show: each element before its
+    children, from the listed roots (ImageProperty: token 2, else originKey 4, middleKey 5, thumbKey 6)."""
+    try:
+        dictionary = (rich.get("elements") or {}).get("dictionary") or {}
+    except AttributeError:
+        return []
+    if not isinstance(dictionary, dict):
+        return []
+    ids = [str(k) for k in rich.get("elementIds") or []]
+    if not ids:
+        try:
+            ids = sorted(dictionary, key=lambda k: int(k))
+        except (TypeError, ValueError):
+            ids = list(dictionary)
+    keys: List[str] = []
+    seen: Set[str] = set()
+
+    def visit(k: str, depth: int = 0) -> None:
+        if k in seen or k not in dictionary or depth > 20:
+            return
+        seen.add(k)
+        el = dictionary.get(k)
+        if not isinstance(el, dict):
+            return
+        tag = el.get("tag", 1)
+        if not isinstance(tag, bool) and str(tag).isdigit() and int(tag) == IMG_TAG and el.get("property"):
+            f = {n: w.strip() for n, w in reversed(wire_fields(el["property"])) if w.strip()}
+            key = next((f[n] for n in (2, 4, 5, 6) if f.get(n)), "")
+            if key and key not in keys:
+                keys.append(key)
+        for c in el.get("childIds") or []:
+            visit(str(c), depth + 1)
+
+    for k in ids:
+        visit(k)
+    for k in dictionary:
+        visit(str(k))
+    return keys
 
 
 def link_text(prop: bytes) -> str:

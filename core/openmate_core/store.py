@@ -103,6 +103,9 @@ _SCHEMA = [
     # "unknown" (asked, and the service did not say), and when it was last asked; a table of its own, like avatars
     # (owner: the account it was asked for; an older version's account switch does not empty this table, so a row of
     # another account's is never read)
+    # a message as safe Markdown for the thread page (Message.markdown), only one with formatting: a table of its own
+    "CREATE TABLE IF NOT EXISTS markdown (chat_id TEXT NOT NULL, id TEXT NOT NULL, text TEXT NOT NULL, "
+    "PRIMARY KEY (chat_id, id))",
     "CREATE TABLE IF NOT EXISTS mutes (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, checked REAL NOT NULL, "
     "owner TEXT NOT NULL DEFAULT '')",
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
@@ -214,6 +217,8 @@ def _live_row(r: sqlite3.Row, m: Message) -> dict:
     d["edited"] = m.edited  # True, False, or None (the backend could not tell)
     if m.text_after_mentions is not None:
         d["text_after_mentions"] = m.text_after_mentions
+    if m.title:
+        d["post_title"] = m.title
     return d
 
 
@@ -372,6 +377,17 @@ class Store:
             part = ids[i:i + 500]
             rows = self._all("SELECT chat_id, value, checked FROM avatars WHERE chat_id IN (%s)" % ",".join("?" * len(part)), part)
             out.update({r["chat_id"]: (r["value"], float(r["checked"])) for r in rows})
+        return out
+
+    def markdowns(self, chat_id: str, ids: Iterable[str]) -> Dict[str, str]:
+        """{message id: its Markdown} of those of ids (in chat) that have one."""
+        ids = sorted({str(i) for i in ids if i})
+        out: Dict[str, str] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            rows = self._all("SELECT id, text FROM markdown WHERE chat_id = ? AND id IN (%s)" % ",".join("?" * len(part)),
+                             [chat_id] + part)
+            out.update({r["id"]: r["text"] for r in rows})
         return out
 
     def set_mute(self, chat_id: str, state: str, owner: str = "", now: Optional[float] = None) -> None:
@@ -603,6 +619,12 @@ class Store:
                         int(bool(m.blocked)),
                     ),
                 )
+                if (m.text or "").strip() or m.blocked:  # a reading with words says whether it has formatting now
+                    if m.markdown and not m.blocked:
+                        db.execute("INSERT INTO markdown (chat_id, id, text) VALUES (?, ?, ?) ON CONFLICT(chat_id, id) "
+                                   "DO UPDATE SET text = excluded.text", (m.chat_id, m.id, m.markdown))
+                    elif cur.rowcount != 1:
+                        db.execute("DELETE FROM markdown WHERE chat_id = ? AND id = ?", (m.chat_id, m.id))
                 if cur.rowcount != 1:
                     blank = db.execute("SELECT " + _INSERT_COLUMNS + " FROM messages WHERE chat_id = ? AND id = ? "
                                        "AND text = ''", (m.chat_id, m.id)).fetchone() if (m.text or "").strip() else None
@@ -1142,7 +1164,7 @@ class Store:
             runs = [r["id"] for r in db.execute("SELECT id FROM runs").fetchall()]
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
             for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone",
-                          "channel_msgs", "channel_asks", "avatars", "mutes"):
+                          "channel_msgs", "channel_asks", "avatars", "mutes", "markdown"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             # its history marks, and its name (the next one's is written next, when it has one)

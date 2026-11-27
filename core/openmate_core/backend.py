@@ -77,6 +77,12 @@ class Message:
     same_as: str = ""
     text_after_mentions: Optional[str] = None
     edited: Optional[bool] = False
+    #: the message as safe Markdown, for the thread page only ("" when it has no formatting: the page shows text).
+    #: Commands, @s, the archive, quotes and models read text, as always. Stored.
+    markdown: str = ""
+    #: a rich text's (a POST's) title, which text starts with on a line of its own: /agent reads the request after it.
+    #: Live-only, like placement
+    title: str = ""
 
 
 @dataclass

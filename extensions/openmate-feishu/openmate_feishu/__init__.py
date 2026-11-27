@@ -52,16 +52,18 @@ def platform(manifest_path: str = "") -> Platform:
         ui_pages=_agenda_pages,
         usage_query=_starkmesh_usage,  # the sidebar's usage bars: the StarkMesh pool, from the 中转站 page's read
         legacy_blocked_texts=(DLP_BLOCKED_TEXT,),  # what told a blocked message before 0.11.29 stored the mark
-        tools=_media_tools,  # matefeishu_media: a message's pictures and files as local files (read-only)
+        tools=_media_tools,  # matefeishu_media and matefeishu_members (read-only)
         media_tool=CONNECTOR_ID + "_media",
         inbox_topics=True,  # a group's topics are Inbox items of their own ("<chat>:<root>")
     )
 
 
 def _media_tools(app):
+    # matefeishu_media (a message's pictures and files) and matefeishu_members (a chat's people and bots, for real @s)
     from .media import media_tools
+    from .members import members_tools
 
-    return media_tools(app)
+    return dict(media_tools(app), **members_tools(app))
 
 
 def _starkmesh_usage(ui, params):

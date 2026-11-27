@@ -118,6 +118,34 @@ class MappingTest(Base):
         d.update(kw)
         return self.b._message(d, ME, self.b._client)
 
+    def test_a_post_s_title_pictures_and_markdown(self):
+        def pb(*fields):
+            out = b""
+            for n, text in fields:
+                raw = text.encode("utf-8")
+                out += bytes([(n << 3) | 2, len(raw)]) + raw
+            return out
+
+        dic = {"d": {"tag": 22, "property": b"", "childIds": ["p", "i1", "p2", "i2"]},
+               "p": {"tag": 3, "property": b"", "childIds": ["t", "b"]},
+               "t": {"tag": 1, "property": "/agent 看下这两张图 ".encode()},
+               "b": {"tag": 1, "property": "很急".encode(), "style": {"fontWeight": "bold"}},
+               "i1": {"tag": 2, "property": pb((2, "img_v2_first"), (4, "origin_first"))},
+               "p2": {"tag": 3, "property": b"", "childIds": ["t2"]}, "t2": {"tag": 1, "property": "第二段".encode()},
+               "i2": {"tag": 2, "property": pb((4, "origin_second"))}}
+        m = self.m(msg_type=2, content_data={"title": "周报", "richText": {"elementIds": ["d"], "elements": {"dictionary": dic}}})
+        self.assertEqual(m.type, "POST")
+        self.assertEqual(m.title, "周报")
+        self.assertTrue(m.text.startswith("周报\n/agent 看下这两张图 很急"), m.text)
+        self.assertEqual([(x.kind, larkagentx.parse_ref(x.ref)[3]) for x in m.media],
+                         [("image", "img_v2_first"), ("image", "origin_second")])  # in the order they show
+        self.assertTrue(m.markdown.startswith("**周报**\n\n"), m.markdown)
+        self.assertIn("**很急**", m.markdown)
+        self.assertIn("\\/agent", m.markdown)  # escaped: shown as written, never markup
+        plain = self.m(content_data={"richText": {"elementIds": ["t"], "elements": {"dictionary": {
+            "t": {"tag": 1, "property": "普通的一句".encode()}}}}})
+        self.assertEqual((plain.markdown, plain.title, plain.media), ("", "", []))
+
     def test_a_docs_block_is_no_document(self):
         """The newer rich text wraps its paragraphs in a DOCS element (22): never "[文档]" before the words, so an
         /agent or a stop written in it is seen (a topic group's posts, and many others, are written so)."""
@@ -1786,6 +1814,34 @@ class ReadTest(Base):
         S.api_answers["reactions.PullReactionsRequest"] = {"status": 503}
         with self.assertRaises(BackendError):
             self.b.my_reactions(["201"])
+
+    def test_chat_members_people_and_bots_kept_for_a_while(self):
+        S.api_answers["chats.PullChatChattersRequest"] = {
+            "chatters": {"7001": {"id": "7001", "name": "张三", "type": 1},
+                         "7002": {"id": "7002", "name": "李四", "type": 1},
+                         "8001": {"id": "8001", "name": "构建机器人", "type": 2},
+                         "8002": {"id": "8002", "name": "助理", "type": 1, "botConfig": {"x": 1}},
+                         "bad": {"id": "x", "name": "不是 id"}, "7003": {"id": "7003", "name": ""}},
+            "groupNicknames": {"7002": "小李"}, "nextCursor": 0}
+        got = self.b.chat_members("500")
+        self.assertEqual(got, [
+            {"id": "8002", "name": "助理", "real_name": "助理", "kind": "bot"},
+            {"id": "8001", "name": "构建机器人", "real_name": "构建机器人", "kind": "bot"},
+            {"id": "7002", "name": "小李", "real_name": "李四", "kind": "user"},
+            {"id": "7001", "name": "张三", "real_name": "张三", "kind": "user"}])
+        self.assertEqual(S.api_calls[-1], ("chats.PullChatChattersRequest", {"chatId": "500", "needChatters": True, "limit": 100}))
+        n = len(S.api_calls)
+        self.b.chat_members("500")
+        self.assertEqual(len(S.api_calls), n, "kept for a while")
+        self.b.logout()
+        self.b = self.signed_in()
+        self.b.chat_members("500")
+        self.assertEqual(len(S.api_calls), n + 1, "a sign-in reads them anew")
+        S.api_answers["chats.PullChatChattersRequest"] = {"status": 503}
+        self.b.logout()
+        self.b = self.signed_in()
+        with self.assertRaises(BackendError):
+            self.b.chat_members("500")
 
     def test_chat_mute_reads_the_reminder_switch(self):
         cases = [

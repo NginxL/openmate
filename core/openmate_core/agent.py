@@ -29,6 +29,7 @@ reply into the chat, so the user never gets two answers.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import re
@@ -154,6 +155,8 @@ ASK_ASSISTANT = re.compile(r"问\s*(?:persona|助手)", re.IGNORECASE)  # a foll
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # what agents.control refuses in a message (newline, tab kept)
 ACTIVE = ("starting", "running")
 PROMPT_MOST = 30000
+REQUEST_IMAGES_MOST = 4  # pictures of a request handed to its conversation…
+REQUEST_IMAGE_MOST = 3 << 20  # …each at most this big
 CONTEXT_MESSAGES = 40
 DOC_LINKS_MOST = 2
 _DOC_PATHS = ("/docx/", "/docs/", "/doc/", "/wiki/", "/sheets/", "/sheet/", "/base/", "/bitable/", "/mindnotes/", "/slides/", "/file/")
@@ -642,6 +645,10 @@ class AgentRunner:
             self._take_stop(row, epoch)
             return
         req = match_prefix(body, self.prefix)
+        title = str(row.get("post_title") or "")
+        if req is None and title and body.startswith(title) and body[len(title):len(title) + 1] in ("\n", "\r"):
+            # a rich text's title line first: the request is the prefix at the start of what follows it
+            req = match_prefix(body[len(title):].lstrip("\r\n").lstrip(), self.prefix)
         # @自己: this live reading @-mentions the user (not a mark an earlier reading left in the store), is surely not
         # an edit (edited or not known: never a request) and was not held back. Its request is the message after its
         # leading @s, cut where the service's @ elements end when the backend read them ("@Jane Doe …", an @ right
@@ -1130,6 +1137,7 @@ class AgentRunner:
         t = self.app.timing
         deadline = time.time() + t.agent_hub_wait
         cmid = "openmate-" + run["id"]
+        images = [] if run.get("kind") in GUEST_KINDS else self._request_images(run, row)
         baseline: Optional[int] = None
         op = ""
         if prev is not None:
@@ -1183,7 +1191,7 @@ class AgentRunner:
                     if not self._may_submit(run, epoch):
                         return
                     attempt = time.time()
-                    self.hub.send_message(mid, sid, prompt, cmid)  # the hub sends each client_msg_id once
+                    self.hub.send_message(mid, sid, prompt, cmid, images=images)  # each client_msg_id once
                     fields = {"machine_id": mid, "session_id": sid, "last_seq": baseline, "client_msg_id": cmid,
                               "ours_seen": False, "continued": prev["id"], "remote": str(prev.get("remote") or "")}
                 elif run.get("kind") in GUEST_KINDS:
@@ -1202,7 +1210,8 @@ class AgentRunner:
                     if not self._may_submit(run, epoch):
                         return
                     attempt = time.time()
-                    sess = self.hub.start_conversation(prompt, self.purpose, True, machine, launcher, op_id=op)
+                    sess = self.hub.start_conversation(prompt, self.purpose, True, machine, launcher, op_id=op,
+                                                       images=images)
                     fields = {"machine_id": sess.get("machine_id") or "", "session_id": sess["session_id"], "last_seq": 0,
                               "ours_seen": True, "remote": str(run.get("start_remote") or "")}
                 break
@@ -1273,6 +1282,29 @@ class AgentRunner:
         log.info("/agent request started (%s%s)", "continued" if prev is not None else "new conversation",
                  ", try %d" % tries if tries > 1 else "")
         self._wake.set()
+
+    def _request_images(self, run: dict, row: dict) -> List[dict]:
+        """The pictures inside the request itself (a rich text's, a POST's), for the conversation to see with it: at
+        most REQUEST_IMAGES_MOST, each at most REQUEST_IMAGE_MOST, as the hub takes a message's ([{mime, data}]). One
+        that cannot be fetched is left out (the context still names it for the media tool)."""
+        if (row.get("type") or "").upper() != "POST":
+            return []
+        backend = getattr(self.app, "backend", None)
+        refs = [m.get("ref") for m in row.get("media") or [] if isinstance(m, dict) and m.get("kind") == "image" and m.get("ref")]
+        out: List[dict] = []
+        for ref in refs[:2 * REQUEST_IMAGES_MOST]:  # the first ones that can be fetched (a few tries more at most)
+            if len(out) >= REQUEST_IMAGES_MOST:
+                break
+            try:
+                mime, data = backend.media(ref, REQUEST_IMAGE_MOST)
+            except Exception as e:
+                log.info("/agent: a picture of the request was not fetched (%s)", getattr(e, "kind", "") or type(e).__name__)
+                continue
+            kind = modelimages.kind_of(data[:16]) or str(mime or "")
+            if kind not in modelimages.TYPES and kind != "image/gif":
+                continue
+            out.append({"mime": kind, "data": base64.b64encode(data).decode("ascii")})
+        return out
 
     def _place(self, run: dict) -> str:
         """The computer a new conversation of this run starts on ("" is the assistant's, as a start without one):

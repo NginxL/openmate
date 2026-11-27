@@ -161,13 +161,16 @@ class HubAPI:
             raise
 
     def start_conversation(self, prompt: str, purpose: str, report_tasks: bool, machine_id: str = "", launcher: str = "",
-                           guest_tools: Optional[List[str]] = None, op_id: str = "") -> dict:
+                           guest_tools: Optional[List[str]] = None, op_id: str = "",
+                           images: Optional[List[dict]] = None) -> dict:
         """A conversation; with guest_tools a guest one (docs/assistant/assistant.md "Guest conversations"): it answers
         someone else for the user, with none of the assistant's powers but these connector tools. With op_id the hub
         starts it once however often it is asked (assistant_start_ops): the same op_id and body get the first answer.
         HubError code "pending": that start is still under way (ask again); "unknown": nobody can tell whether it
         started (never ask again on your own)."""
         body: Dict[str, Any] = {"prompt": prompt, "purpose": purpose, "report_tasks": bool(report_tasks)}
+        if images:  # [{mime, data (base64)}]: pictures with the first message (only when some)
+            body["images"] = list(images)
         if guest_tools:
             body["guest"] = {"tools": list(guest_tools)}
         if machine_id:
@@ -221,8 +224,11 @@ class HubAPI:
                 out[mid] = out.get(mid, 0) + 1
         return out
 
-    def send_message(self, machine_id: str, session_id: str, text: str, client_msg_id: str = "") -> dict:
+    def send_message(self, machine_id: str, session_id: str, text: str, client_msg_id: str = "",
+                     images: Optional[List[dict]] = None) -> dict:
         body: Dict[str, Any] = {"text": text}
+        if images:  # [{mime, data (base64)}]: pictures with it (only when some)
+            body["images"] = list(images)
         if client_msg_id:
             body["client_msg_id"] = client_msg_id
         return self.request("POST", "/api/v1/sessions/%s/%s/messages" % (_seg(machine_id), _seg(session_id)), body, timeout=120)

@@ -2000,9 +2000,10 @@ class ConnectorApp:
         rows.sort(key=lambda r: (r.get("at") or 0, r["position"]))
         me = self.me_name()
         messages = []
+        md = self.store.markdowns(chat_id, [r["id"] for r in rows])
         for r in rows:
             parent = self.store.message(chat_id, r["parent_id"]) if r.get("parent_id") else None
-            messages.append(views.thread_message(r, me, parent))
+            messages.append(views.thread_message(r, me, parent, md.get(r["id"], "")))
         page = {
             "chat": {"id": chat_id, "name": views.chat_name(chat, chat_id), "kind": views.chat_kind(chat),
                      "reply": self.cid + "_send"},
@@ -2040,9 +2041,10 @@ class ConnectorApp:
         page_rows = rows[-limit:]
         me = self.me_name()
         messages = []
+        md = self.store.markdowns(chat_id, [r["id"] for r in page_rows])
         for r in page_rows:
             parent = self.store.message(chat_id, r["parent_id"]) if r.get("parent_id") else None
-            messages.append(views.thread_message(r, me, parent))
+            messages.append(views.thread_message(r, me, parent, md.get(r["id"], "")))
         page = {"chat": {"id": thread, "name": views.chat_name(chat, chat_id), "kind": views.chat_kind(chat),
                          "reply": self.cid + "_send"},
                 "messages": messages}

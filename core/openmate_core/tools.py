@@ -548,6 +548,11 @@ def _mentions(app, a: dict, chat_id: str) -> List[tuple]:
                 name = app.backend.user_name(uid, chat_id) or ""
             except BackendError:
                 name = ""
+        if (not name or name == uid) and callable(getattr(app.backend, "chat_members", None)):
+            try:  # a bot, or someone the service names only in this chat's list (Feishu: matefeishu_members)
+                name = next((m["name"] for m in app.backend.chat_members(chat_id) if m.get("id") == uid), "")
+            except BackendError:
+                name = ""
         if not name or name == uid:
             raise RPCError("不认识用户 %s，没法 @ 他（先用 %s_search 查到他）" % (uid, app.cid))
         out.append((uid, name))

@@ -266,7 +266,7 @@ def media_list(row: dict) -> List[dict]:
     return out
 
 
-def thread_message(row: dict, me: str, parent: Optional[dict]) -> dict:
+def thread_message(row: dict, me: str, parent: Optional[dict], markdown: str = "") -> dict:
     event = is_system(row)
     out = {
         "id": row["id"],
@@ -283,7 +283,9 @@ def thread_message(row: dict, me: str, parent: Optional[dict]) -> dict:
     media = media_list(row)
     if not text.strip() and not media:
         text = text_of(row)
-    if text:
+    if markdown and markdown.strip() and not row.get("blocked") and not event:
+        out["text"], out["format"] = markdown, "markdown"  # (safe: richmd escapes every word)
+    elif text:
         out["text"] = text
     if media:
         out["media"] = media
