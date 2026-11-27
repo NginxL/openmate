@@ -54,6 +54,7 @@ def platform(manifest_path: str = "") -> Platform:
         legacy_blocked_texts=(DLP_BLOCKED_TEXT,),  # what told a blocked message before 0.11.29 stored the mark
         tools=_media_tools,  # matefeishu_media: a message's pictures and files as local files (read-only)
         media_tool=CONNECTOR_ID + "_media",
+        inbox_topics=True,  # a group's topics are Inbox items of their own ("<chat>:<root>")
     )
 
 

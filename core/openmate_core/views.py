@@ -71,10 +71,12 @@ def where(platform: str, chat: Optional[dict], chat_id: str) -> str:
     return "%s群「%s」%s" % (platform, name, "（%d 人）" % members if members else "")
 
 
-def reply_target(platform: str, chat: Optional[dict], chat_id: str) -> str:
+def reply_target(platform: str, chat: Optional[dict], chat_id: str, topic: bool = False) -> str:
     name = chat_name(chat, chat_id)
     if chat_kind(chat) == "dm":
         return "以你的身份发到%s私聊「%s」（对方能看到）" % (platform, name)
+    if topic:
+        return "以你的身份回复到%s群「%s」的这个话题（群里的人都能看到）" % (platform, name)
     return "以你的身份发到%s群「%s」（群里的人都能看到）" % (platform, name)
 
 
@@ -87,8 +89,15 @@ def unanswered_run(rows: List[dict]) -> List[dict]:
 
 
 def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rules: str, can_reply: bool,
-                context_lines: int = 8) -> Optional[dict]:
-    """One thing for a chat from its recent rows (oldest first), or None when there is nothing to show."""
+                context_lines: int = 8, root: str = "", mute: str = "", triage: bool = False,
+                private: bool = False) -> Optional[dict]:
+    """One thing for a chat from its recent rows (oldest first), or None when there is nothing to show.
+
+    root: the rows are one topic's of a group (inbox_things): the thing is that topic's ("<chat>:<root>"), its context,
+    done state and reply that topic's. mute: the group's mute state ("muted", "normal", "unknown" or "": not asked).
+    triage: the user listed the group for AI triage (setting inbox_triage_chats): its messages without an @ of the
+    user go to the triage model too, muted or not. private: the user listed the direct chat as one not handed to the
+    Inbox's AI (setting inbox_private_dms): its tier is the rule's, no model is asked."""
     msgs = [r for r in rows if not is_system(r) and has_content(r)]
     if not msgs:
         return None
@@ -115,11 +124,16 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
         kind = "mention"
     else:
         kind = "group"
+    if kind == "group" and mute == "muted" and not triage and not done:
+        return None  # muted in the service: what does not @ the user stays out of the Inbox (still archived)
     name = chat_name(chat, chat_id)
-    lines = [where(platform, chat, chat_id)]
+    head = where(platform, chat, chat_id)
+    if root:
+        head += "的一个话题（根消息 id=%s）" % root
+    lines = [head]
     lines += [log_line(r, tz, me) for r in msgs[-context_lines:]]
     thing = {
-        "thread": chat_id,
+        "thread": "%s:%s" % (chat_id, root) if root else chat_id,
         "kind": kind,
         "label": LABELS[kind],
         "title": name,
@@ -130,11 +144,18 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
         "last": latest["id"],
     }
     if can_reply:
-        thing["reply_to"] = reply_target(platform, chat, chat_id)
+        thing["reply_to"] = reply_target(platform, chat, chat_id, topic=bool(root))
         thing["can_reply"] = True
     if kind == "group":
-        thing["tier"] = "noise"
-        thing["why"] = "规则：群消息没有 @我，直接归为噪音（不调用模型）"
+        if triage:
+            # sorted by the model with the user's rules; the rule's tier only where the model cannot be asked
+            thing["extra"] = {"rule_tier": "noise"}
+        else:
+            thing["tier"] = "noise"
+            thing["why"] = "规则：群消息没有 @我，直接归为噪音（不调用模型）"
+    elif kind == "dm" and private:
+        thing["tier"] = "action"
+        thing["why"] = "规则：这个私聊设置为不交给收件箱 AI（不调用模型）"
     if done:
         thing["done"] = done
         thing["why"] = "我已经回复"
@@ -146,6 +167,35 @@ def inbox_thing(chat: dict, rows: List[dict], *, platform: str, tz, me: str, rul
     if rules:
         thing["rules"] = rules[:4000]
     return thing
+
+
+def topic_of(row: dict, roots: set) -> str:
+    """The topic a group's row is in: its thread's root (a reply in a topic), itself when it is a topic's root (a
+    reply in its thread is known, or the service read it as a thread-first group's root), "" outside any topic."""
+    if row.get("root_id"):
+        return str(row["root_id"])
+    rid = str(row.get("id") or "")
+    if rid and (rid in roots or row.get("thread_id") == rid):
+        return rid
+    return ""
+
+
+def inbox_things(chat: dict, rows: List[dict], *, topics: bool = False, **kw) -> List[dict]:
+    """The chat's things from its recent rows (oldest first): one for the chat (inbox_thing), or, with topics, in a
+    group one for each topic its rows are in and one for what was said outside any topic."""
+    if not topics or chat_kind(chat) == "dm":
+        thing = inbox_thing(chat, rows, **kw)
+        return [thing] if thing is not None else []
+    roots = {str(r["root_id"]) for r in rows if r.get("root_id")}
+    scopes: Dict[str, List[dict]] = {}
+    for r in rows:
+        scopes.setdefault(topic_of(r, roots), []).append(r)
+    out = []
+    for root, part in scopes.items():
+        thing = inbox_thing(chat, part, root=root, **kw)
+        if thing is not None:
+            out.append(thing)
+    return out
 
 
 def media_list(row: dict) -> List[dict]:

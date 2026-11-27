@@ -95,7 +95,7 @@ class ManifestTest(unittest.TestCase):
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
                                        "auto_reply_header", "auto_reply_at_asker",
                                        "agent_reply_suffix",
-                                       "history_chats", "triage_rules", "lark_cli", "lark_cli_profile", "starkmesh_url", "needs_hours", "bookmarks"])
+                                       "history_chats", "triage_rules", "inbox_triage_chats", "inbox_private_dms", "lark_cli", "lark_cli_profile", "starkmesh_url", "needs_hours", "bookmarks"])
         self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])
         self.assertIn("config:starkmesh_url:http", MANIFEST["permissions"]["network"])
         self.assertNotIn("default", props["larkx_python"])
@@ -118,6 +118,7 @@ class ManifestTest(unittest.TestCase):
         self.assertIs(d["agent_mark_effort"], False, "the mark names the model alone")
         self.assertEqual((props["history_chats"]["minimum"], props["history_chats"]["maximum"], d["history_chats"]), (0, 50, 20))
         self.assertLessEqual(props["triage_rules"]["maxLength"], 4000)
+        self.assertEqual((d["inbox_triage_chats"], d["inbox_private_dms"]), ([], []), "off unless the user lists some")
         self.assertIn("http://", props["http_proxy"]["description"])
         self.assertNotIn("socks5://", props["http_proxy"]["description"])
         self.assertEqual(MANIFEST["configuration"]["type"], "object")

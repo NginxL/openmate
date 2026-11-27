@@ -99,6 +99,9 @@ _SCHEMA = [
     # a chat's picture (Chat.avatar: "" when the service said it has none) and when the service was last asked; a
     # table of its own, so an older version opening the store (a rollback) finds every table as it knew it
     "CREATE TABLE IF NOT EXISTS avatars (chat_id TEXT PRIMARY KEY, value TEXT NOT NULL, checked REAL NOT NULL)",
+    # whether the account muted a group in the service's own client (Backend.chat_mute): state "muted", "normal" or
+    # "unknown" (asked, and the service did not say), and when it was last asked; a table of its own, like avatars
+    "CREATE TABLE IF NOT EXISTS mutes (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, checked REAL NOT NULL)",
     # one row per guest run started (自动代答, 文档代答): the hourly and daily most count these, not the pruned runs
     "CREATE TABLE IF NOT EXISTS guest_quota (chat_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS guest_quota_chat ON guest_quota (chat_id, kind, at)",
@@ -364,6 +367,25 @@ class Store:
             part = ids[i:i + 500]
             rows = self._all("SELECT chat_id, value, checked FROM avatars WHERE chat_id IN (%s)" % ",".join("?" * len(part)), part)
             out.update({r["chat_id"]: (r["value"], float(r["checked"])) for r in rows})
+        return out
+
+    def set_mute(self, chat_id: str, state: str, now: Optional[float] = None) -> None:
+        """A group's mute state as the service says it now: "muted", "normal" or "unknown"."""
+        if state not in ("muted", "normal", "unknown"):
+            state = "unknown"
+        self._tx(lambda db: db.execute(
+            "INSERT INTO mutes (chat_id, state, checked) VALUES (?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET state = excluded.state, checked = excluded.checked",
+            (str(chat_id), state, now or time.time())))
+
+    def mutes(self, ids: Iterable[str]) -> Dict[str, Tuple[str, float]]:
+        """{chat id: (state, when it was asked)} of those of ids the service was asked about."""
+        ids = sorted({str(i) for i in ids if i})
+        out: Dict[str, Tuple[str, float]] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            rows = self._all("SELECT chat_id, state, checked FROM mutes WHERE chat_id IN (%s)" % ",".join("?" * len(part)), part)
+            out.update({r["chat_id"]: (r["state"], float(r["checked"])) for r in rows})
         return out
 
     def people_kinds(self, ids: Iterable[str]) -> Dict[str, str]:
@@ -1114,7 +1136,7 @@ class Store:
             runs = [r["id"] for r in db.execute("SELECT id FROM runs").fetchall()]
             # the groups marked for 自动代答 and who is a person were the old account's choices and knowledge
             for table in ("chats", "messages", "names", "runs", "seen", "autoreply", "people", "guest_quota", "gone",
-                          "channel_msgs", "channel_asks", "avatars"):
+                          "channel_msgs", "channel_asks", "avatars", "mutes"):
                 db.execute("DELETE FROM " + table)
             db.execute("DELETE FROM dismissed WHERE key LIKE 'chat:%'")  # its chats' 处理完 (and 恢复) marks
             # its history marks, and its name (the next one's is written next, when it has one)

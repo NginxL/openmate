@@ -80,6 +80,10 @@ class Platform:
     media_tool: str = ""
     #: /agent can turn structured replies into pictures when the backend sends images but has no rich text.
     render_cards: bool = False
+    #: a group's Inbox items go by topic: each topic (a thread, by its root) is an item of its own ("<chat>:<root>"),
+    #: its context, done state, page and reply that topic's; what is said outside any topic stays the chat's item
+    #: (its id the chat's, as before). Feishu: yes. WeChat: no (no topics; one item per chat as always)
+    inbox_topics: bool = False
 
 
 @dataclass
@@ -121,4 +125,7 @@ class Timing:
     avatar_ttl: float = 86400.0  # a chat's picture (has_avatars) is asked of the service again when it is this old…
     avatar_retry: float = 3600.0  # …or this long after asking failed…
     avatar_batch: int = 30  # …at most this many chats per round, in the background (an Inbox read never waits for it)
+    mute_ttl: float = 3600.0  # a group's mute state (has_mute) is asked of the service again when it is this old…
+    mute_retry: float = 600.0  # …or this long after asking failed…
+    mute_batch: int = 10  # …at most this many groups per round, in the background (an Inbox read never waits for it)
     extra: Dict[str, float] = field(default_factory=dict)

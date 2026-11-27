@@ -310,6 +310,22 @@ def group_alive(info: dict) -> bool:
             and not info.get("isDissolved") and not info.get("isFrozen") and info.get("role") not in CHAT_NOT_MEMBER)
 
 
+def mute_of(info) -> Optional[bool]:
+    """Whether a chat's record (entities.Chat, as protobuf_to_dict gives it) says the account muted it (消息免打扰:
+    its reminder is off): True muted, False surely not, None when it does not say. Two fields say it, the chat's own
+    isRemind (27) and its userSetting's (29, isRemind 1); only a bool counts (a field the record leaves out is not
+    false), and when both are there and disagree it is not known either. userSetting.isMuteAtAll (no reminder for
+    @所有人) is another switch and is never read as this."""
+    if not isinstance(info, dict):
+        return None
+    says = []
+    setting = info.get("userSetting")
+    for remind in ((setting.get("isRemind") if isinstance(setting, dict) else None), info.get("isRemind")):
+        if type(remind) is bool:
+            says.append(not remind)
+    return says[0] if says and len(set(says)) == 1 else None
+
+
 def reacted_by(d: dict, user_id: str, only: Optional[Set[str]] = None, ignore: Tuple[str, ...] = ()) -> Dict[str, float]:
     """{message id: when (seconds, 0 when unknown)} of the messages user_id has a reaction on, from a
     reactions.PullReactionsResponse or a reactions.PushReactions read back (protobuf_to_dict): each message's
@@ -915,6 +931,7 @@ class LarkXBackend(Backend):
     rerender_empty = RERENDER_EMPTY
     done_marks = True  # a chat's 完成
     has_avatars = True  # chat_info's Chat carries the chat's picture (avatar_address)
+    has_mute = True  # chat_mute: the chat record's reminder switch (消息免打扰, mute_of)
     thread_reply_quotes_root = True  # send() passes only the root to LarkAgentX's builder
 
     # timings (tests shorten them)
@@ -2401,6 +2418,11 @@ class LarkXBackend(Backend):
             return chat
         client, me = self._signed_in()
         return self._chat_read(client, chat_id, me)[1]
+
+    def chat_mute(self, chat_id: str) -> Optional[bool]:
+        """Backend.chat_mute: the chat's record read now (mute_of)."""
+        client, me = self._signed_in()
+        return mute_of(self._chat_read(client, chat_id, me)[0])
 
     def chat_picture(self, chat_id: str, peer_id: str = "") -> Chat:
         """The chat as the service says it now (not a row kept from a list, which may not say its picture): what the

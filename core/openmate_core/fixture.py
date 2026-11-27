@@ -90,6 +90,10 @@ class FixtureWorld:
         self.format_ok = True  # the backend sends formatted texts (rich=True: the Markdown subset)
         self.image_threads = False  # …where a text with the same reply_to and root would go (Backend.image_threads)
         self.avatars_ok = False  # chat_info says a chat's picture (Backend.has_avatars)
+        self.mute_ok = False  # chat_mute says whether a group is muted (Backend.has_mute)
+        self.mutes: Dict[str, Optional[bool]] = {}  # chat id → what chat_mute answers (missing: None)
+        self.mute_fail = False  # chat_mute raises
+        self.mute_asked: List[str] = []  # chat_mute's calls, in order
         self.info_asked: List[str] = []  # chat_info's calls, in order
         self.image_fail: Optional[str] = None  # "rejected" | "uncertain" for the next picture
         self.send_delay = 0.0
@@ -335,6 +339,18 @@ class FixtureBackend(Backend):
                 if c.kind == "group" and q and q in c.name.lower():
                     out.append(Person("group", c.id, c.name, "%d 人" % c.members if c.members else ""))
         return out[:limit]
+
+    @property
+    def has_mute(self) -> bool:
+        return self.world.mute_ok
+
+    def chat_mute(self, chat_id: str) -> Optional[bool]:
+        w = self.world
+        with w.lock:
+            w.mute_asked.append(chat_id)
+            if w.mute_fail:
+                raise BackendError("飞书暂时没有回答", "unreachable")
+            return w.mutes.get(chat_id)
 
     @property
     def has_avatars(self) -> bool:

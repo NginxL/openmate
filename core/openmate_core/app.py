@@ -179,6 +179,8 @@ class ConnectorApp:
         self.people: Optional[People] = None  # who is a bot (made at the start, with the store)
         self._avatars_by: Optional[threading.Thread] = None  # the round asking the service for chats' pictures
         self._avatars_tried: Dict[str, float] = {}  # chat id → when its picture was last asked for (monotonic)
+        self._mutes_by: Optional[threading.Thread] = None  # the round asking the service whether groups are muted
+        self._mutes_tried: Dict[str, float] = {}  # chat id → when its mute state was last asked for (monotonic)
         self._methods = {
             "status": self.m_status,
             "tools.list": lambda p: {"tools": toolmod.read_tools(self)},
@@ -1707,24 +1709,95 @@ class ConnectorApp:
             return {"things": []}
         t = self.timing
         rules = str(self.config.get("triage_rules") or "").strip()
+        triage = set(_id_list(self._declared("inbox_triage_chats")))  # groups whose every message the model sorts
+        private = set(_id_list(self._declared("inbox_private_dms")))  # direct chats no Inbox model reads
         things = []
         me = self.me_name()
-        for chat in self.store.chats_since(time.time() - t.inbox_window, t.inbox_most):
+        chats = self.store.chats_since(time.time() - t.inbox_window, t.inbox_most)
+        has_mute = self.backend is not None and getattr(self.backend, "has_mute", False)
+        groups = [c["id"] for c in chats if views.chat_kind(c) == "group"]
+        mutes = self.store.mutes(groups) if has_mute else {}
+        for chat in chats:
             rows = self.store.inbox_rows(chat["id"], 60)
-            thing = views.inbox_thing(chat, rows, platform=self.platform.name, tz=self.tz, me=me, rules=rules,
-                                      can_reply=self.signed_in)
-            if thing is not None:
+            cid = chat["id"]
+            for thing in views.inbox_things(chat, rows, topics=self.platform.inbox_topics, platform=self.platform.name,
+                                            tz=self.tz, me=me, rules=rules, can_reply=self.signed_in,
+                                            mute=mutes.get(cid, ("", 0.0))[0], triage=cid in triage,
+                                            private=cid in private or (chat.get("peer_id") or "") in private):
+                thing["_chat"] = cid
                 things.append(thing)
+        if has_mute and groups:
+            now = time.time()
+            self._ask_mutes([c for c in groups if c not in mutes or mutes[c][1] < now - t.mute_ttl])
         if things and self.backend is not None and getattr(self.backend, "has_avatars", False):
-            known = self.store.avatars(th["thread"] for th in things)
+            known = self.store.avatars(th["_chat"] for th in things)
             for th in things:
-                value = known.get(th["thread"], ("", 0.0))[0]
+                value = known.get(th["_chat"], ("", 0.0))[0]
                 if value:
                     th["avatar"] = value
             now = time.time()
-            self._ask_avatars([th["thread"] for th in things
-                               if th["thread"] not in known or known[th["thread"]][1] < now - t.avatar_ttl])
+            self._ask_avatars(list(dict.fromkeys(th["_chat"] for th in things
+                                                 if th["_chat"] not in known or known[th["_chat"]][1] < now - t.avatar_ttl)))
+        for th in things:
+            del th["_chat"]
         return {"things": things}
+
+    def _declared(self, name: str) -> Any:
+        """A setting's value, only where this extension's manifest has the setting (None else): a platform without it
+        never acts on one a config may carry."""
+        props = ((self.manifest.get("configuration") or {}).get("properties") or {})
+        return self.config.get(name) if name in props else None
+
+    def _ask_mutes(self, chat_ids: List[str]) -> None:
+        """Ask the service, in the background, whether these groups are muted (none known, or an hour old), each at
+        most once per mute_retry; when one changed, the Inbox is told (connector.changed) to read the rows again."""
+        t = self.timing
+        now = time.monotonic()
+        with self.lock:
+            if not chat_ids or self._mutes_by is not None or not self.signed_in or self.link != "up":
+                return
+            due = [c for c in chat_ids if self._mutes_tried.get(c, -1e18) <= now - t.mute_retry][:t.mute_batch]
+            if not due:
+                return
+            for c in due:
+                self._mutes_tried[c] = now
+            if len(self._mutes_tried) > 4 * t.inbox_most:  # the ones asked about longest ago go first
+                for c, _ in sorted(self._mutes_tried.items(), key=lambda kv: kv[1])[:len(self._mutes_tried) // 2]:
+                    del self._mutes_tried[c]
+            epoch = self.account_epoch()
+            self._mutes_by = threading.Thread(target=self._mutes_round, args=(due, epoch), name="openmate-mutes",
+                                              daemon=True)
+            self._mutes_by.start()
+
+    def _mutes_round(self, due: List[str], epoch: int) -> None:
+        changed = False
+        try:
+            before = self.store.mutes(due)
+            for chat_id in due:
+                if self.closing.is_set() or not self.owns(epoch):
+                    return
+                try:
+                    muted = self.backend.chat_mute(chat_id)
+                except BackendError as e:
+                    log.info("a group's mute state was not read: %s", e.kind)
+                    continue  # asked again after mute_retry; the Inbox keeps what it knew (or the old way)
+                except Exception:
+                    log.exception("chat_mute failed")
+                    continue
+                state = "unknown" if muted is None else ("muted" if muted else "normal")
+                with self.owned(epoch) as ok:  # another account's sign-in meanwhile: its store is not written
+                    if not ok:
+                        return
+                    if self.store.get_chat(chat_id) is None:
+                        continue
+                    self.store.set_mute(chat_id, state)
+                if state != before.get(chat_id, ("", 0.0))[0]:
+                    changed = True
+        finally:
+            with self.lock:
+                self._mutes_by = None
+            if changed and self.changed is not None:
+                self.changed.mark("inbox")
 
     def _ask_avatars(self, chat_ids: List[str]) -> None:
         """Ask the service, in the background, for the pictures of these chats (none, or a day old), each at most once
@@ -1787,7 +1860,8 @@ class ConnectorApp:
     def m_inbox_reply(self, params: dict) -> dict:
         if params.get("changes"):
             raise RPCError("%s会话不支持修改状态，只能回复文字" % self.platform.name)
-        chat_id = str(params.get("thread") or "")
+        thread = str(params.get("thread") or "")
+        chat_id, topic = self._thread_of(thread)
         text = str(params.get("text") or "")
         epoch = self.account_epoch()  # the inbox it was asked from is this account's
         if not text.strip():
@@ -1800,7 +1874,14 @@ class ConnectorApp:
             raise RPCError("本地没有这个%s会话" % self.platform.name)
         reply_to, root = None, None
         last_row = self.store.message(chat_id, last) if last else None
-        if last_row is not None and not last_row.get("mine"):
+        if topic:
+            # a topic's item: the reply goes into that topic, under its last line of someone else's (else its root)
+            if last_row is not None and not last_row.get("mine") and (last_row.get("root_id") or last_row["id"]) == topic:
+                reply_to = last_row["id"]
+            else:
+                reply_to = topic
+            root = topic
+        elif last_row is not None and not last_row.get("mine"):
             if last_row.get("root_id"):
                 reply_to, root = last_row["id"], last_row["root_id"]
             elif chat.get("kind") != "dm":
@@ -1809,7 +1890,7 @@ class ConnectorApp:
         if client_id:
             key = "inbox:" + client_id
         else:
-            key = "inbox:" + hashlib.sha256("\x00".join([chat_id, last, text]).encode("utf-8")).hexdigest()
+            key = "inbox:" + hashlib.sha256("\x00".join([thread, last, text]).encode("utf-8")).hexdigest()
 
         def send():
             if not self.owns(epoch):  # another account signed in since it was asked: not said as that one
@@ -1850,8 +1931,18 @@ class ConnectorApp:
             self.store.upsert_chat(info)
         return self.store.get_chat(chat_id)
 
+    def _thread_of(self, thread: str) -> Tuple[str, str]:
+        """(chat id, topic root) an Inbox thread names: "<chat>:<root>" is a group topic's (inbox_topics), anything
+        else the whole chat's ("" root)."""
+        if self.platform.inbox_topics and ":" in thread:
+            chat_id, _, root = thread.partition(":")
+            if chat_id and root:
+                return chat_id, root
+        return thread, ""
+
     def m_thread_page(self, params: dict) -> dict:
-        chat_id = str(params.get("thread") or "")
+        thread = str(params.get("thread") or "")
+        chat_id, topic = self._thread_of(thread)
         if not chat_id or self.store is None:
             raise RPCError("缺少会话")
         epoch = self.account_epoch()  # the page is of one account's store: another's sign-in meanwhile ends it
@@ -1873,6 +1964,8 @@ class ConnectorApp:
             if epoch != self.account_epoch():
                 raise RPCError("刚换了%s账号，请重新打开这个会话" % self.platform.name)
             raise RPCError("本地没有这个%s会话" % self.platform.name)
+        if topic:
+            return self._topic_page(chat, chat_id, topic, thread, limit, epoch)
         rows = [r for r in self.store.messages_before(chat_id, before_pos, limit) if views.has_content(r)]
         at_start = False
         if len(rows) < limit:
@@ -1900,6 +1993,28 @@ class ConnectorApp:
                 self._ask_avatars([chat_id])  # (a chat outside the Inbox's days too: in the background)
         if rows and not (len(rows) < limit and at_start):
             page["before"] = str(min(r["position"] for r in rows))
+        if epoch != self.account_epoch():
+            raise RPCError("刚换了%s账号，请重新打开这个会话" % self.platform.name)
+        return page
+
+    def _topic_page(self, chat: dict, chat_id: str, topic: str, thread: str, limit: int, epoch: int) -> dict:
+        """One topic's page (an Inbox item of inbox_topics): its newest limit messages kept here, its root first,
+        oldest first. No reply action of its own (the item's reply goes into the topic) and no older pages."""
+        rows = [r for r in self.store.thread_messages(chat_id, topic, limit) if views.has_content(r)]
+        rows.sort(key=lambda r: (r.get("at") or 0, r["position"]))
+        me = self.me_name()
+        messages = []
+        for r in rows:
+            parent = self.store.message(chat_id, r["parent_id"]) if r.get("parent_id") else None
+            messages.append(views.thread_message(r, me, parent))
+        page = {"chat": {"id": thread, "name": views.chat_name(chat, chat_id), "kind": views.chat_kind(chat)},
+                "messages": messages}
+        if chat.get("members"):
+            page["chat"]["members"] = int(chat["members"])
+        if getattr(self.backend, "has_avatars", False):
+            known = self.store.avatars([chat_id]).get(chat_id)
+            if known is not None and known[0]:
+                page["chat"]["avatar"] = known[0]
         if epoch != self.account_epoch():
             raise RPCError("刚换了%s账号，请重新打开这个会话" % self.platform.name)
         return page
@@ -2143,6 +2258,15 @@ def _history_key(raw: str) -> tuple:
     if when != when or when in (float("inf"), float("-inf")) or not (-_SEQ_MOST - 1 <= seq <= _SEQ_MOST):
         raise RPCError("位置超出范围：%s" % raw[:40])
     return when, seq
+
+
+def _id_list(v: Any) -> List[str]:
+    """A setting that lists chat or user ids (an array; a string of them split at commas, spaces or lines)."""
+    if isinstance(v, str):
+        v = v.replace("，", ",").replace(",", " ").split()
+    if not isinstance(v, (list, tuple)):
+        return []
+    return [str(x).strip() for x in v if isinstance(x, (str, int)) and not isinstance(x, bool) and str(x).strip()]
 
 
 def _int(v: Any, default: int, lo: int, hi: int) -> int:

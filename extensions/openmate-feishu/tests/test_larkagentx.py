@@ -1787,6 +1787,27 @@ class ReadTest(Base):
         with self.assertRaises(BackendError):
             self.b.my_reactions(["201"])
 
+    def test_chat_mute_reads_the_reminder_switch(self):
+        cases = [
+            ({"isRemind": False}, True),
+            ({"isRemind": True}, False),
+            ({"userSetting": {"isRemind": False}}, True),
+            ({"userSetting": {"isRemind": False}, "isRemind": False}, True),
+            ({"userSetting": {"isRemind": True}, "isRemind": False}, None),  # the two disagree: not known
+            ({}, None),  # neither field there: not known (left out is not false)
+            ({"isRemind": 0}, None),  # only a bool counts
+            ({"userSetting": {"isMuteAtAll": True}}, None),  # no @所有人 reminder is another switch
+        ]
+        for i, (fields, want) in enumerate(cases):
+            cid = str(600 + i)
+            S.chats[cid] = dict({"id": cid, "type": 2, "name": "群%d" % i}, **fields)
+            self.assertIs(self.b.chat_mute(cid), want, fields)
+        self.assertIsNone(larkagentx.mute_of(None))
+        self.assertTrue(self.b.has_mute)
+        S.chats["699"] = OSError("down")
+        with self.assertRaises(BackendError):
+            self.b.chat_mute("699")
+
     def test_chat_info_topic_and_cache(self):
         S.chats["502"] = {"id": "502", "type": 2, "chatMode": 3, "name": "", "i18nNames": {"zh_cn": "话题群"}}
         c = self.b.chat_info("502")

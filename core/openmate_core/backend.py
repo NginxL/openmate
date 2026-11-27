@@ -427,6 +427,16 @@ class Backend(abc.ABC):
     #: that have none yet, or whose picture is a day old
     has_avatars: bool = False
 
+    #: Whether chat_mute works: the service says whether the account muted a chat (Feishu's 消息免打扰). The core then
+    #: asks it about the groups in the Inbox now and then (in the background): a muted group's messages that do not @
+    #: the user stay out of the Inbox (still archived); a group it could not tell about stays as before
+    has_mute: bool = False
+
+    def chat_mute(self, chat_id: str) -> Optional[bool]:
+        """Whether the account muted this chat in the service's own client: True muted, False surely not, None when
+        the service did not say (or said both). BackendError when it could not be asked. With has_mute."""
+        return None
+
     #: Whether send_image works now (an /agent reply may carry a picture then; the tool offers it only then)
     can_send_images: bool = False
 
