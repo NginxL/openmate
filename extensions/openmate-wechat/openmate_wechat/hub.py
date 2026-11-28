@@ -47,10 +47,12 @@ from .native import NativeError, NativeGone, clean_env
 log = logging.getLogger("openmate.wechat.hub")
 
 OPEN = "\x00open"  # events()'s first item: the hub took the stream
+KEEPALIVE = "\x00keepalive"  # a comment from the hub, with no cursor to save
 PROTOCOL = 2  # what native.Native.start expects of hello: the backend treats both the same
 JSON_MOST = 8 << 20
 LINE_MOST = 4 << 20
 STREAM_IDLE = 60.0  # the hub writes a keepalive every 15 s: this long without a byte is a dead stream
+SOFT_DOWN_RETRY = 60.0  # after this long without another tick failure, let the hub decide the next send
 TAKEN_SLACK = 0.0  # one clock on this computer: committed before the stream was taken is before it
 OWN_WAIT = 20.0  # a send to the chat still in flight is waited for this long before an outgoing message is judged
 PENDING_KEEP = 30 * 86400.0  # how long a send with no known outcome is asked about (as long as the core keeps it)
@@ -317,11 +319,13 @@ class HubClient:
                     pass
 
     def events(self, path: str, stop: threading.Event,
-               hold: Optional[Callable[[Optional[http.client.HTTPConnection]], None]] = None
+               hold: Optional[Callable[[Optional[http.client.HTTPConnection]], None]] = None, *,
+               keepalives: bool = False
                ) -> Iterator[Tuple[str, str]]:
-        """The server-sent events at path: (id, data) each, after (OPEN, "") once the hub took the stream; ends when
-        the hub closes it. HubError when the hub refuses it (an expired cursor, a revoked token), HubDown when it
-        breaks or goes quiet too long. hold(conn) gets the connection while it is open (closing it ends the read)."""
+        """The server-sent events at path: (id, data) each, after (OPEN, "") once the hub took the stream. If
+        requested, comments yield (KEEPALIVE, ""). Ends when the hub closes it. HubError when the hub refuses it
+        (an expired cursor, a revoked token), HubDown when it breaks or goes quiet too long. hold(conn) gets the
+        connection while it is open (closing it ends the read)."""
         conn = self._conn(STREAM_IDLE)
         if hold is not None:
             hold(conn)
@@ -353,7 +357,9 @@ class HubClient:
                     eid, name, data = "", "", []
                     continue
                 if line.startswith(":"):
-                    continue  # a comment: ": connected", the keepalive
+                    if keepalives:
+                        yield KEEPALIVE, ""
+                    continue
                 field, _, value = line.partition(":")
                 if value.startswith(" "):
                     value = value[1:]
@@ -1029,16 +1035,27 @@ class HubLink:
               before: Optional[Callable[[dict], Optional[dict]]] = None) -> dict:
         try:
             a = self._get("", timeout=10)
-            if not isinstance(a, dict) or not a.get("authenticated") or (
-                    self.expect and str(a.get("ownUsername") or "") != self.expect):
-                if isinstance(a, dict) and a.get("authenticated"):
-                    self.foreign = True
+            own = str(a.get("ownUsername") or "") if isinstance(a, dict) else ""
+            if not isinstance(a, dict) or not a.get("authenticated"):
+                log.info("a send was refused before it went out (hub_signed_out)")
                 return {"status": "rejected", "message": OTHER_ACCOUNT if self.foreign else SIGNED_OUT}
+            if not own:
+                # A moment without the account's name (its profile being read or rewritten) is not another account:
+                # taking it for one would refuse every send until the stream reconnects.
+                log.info("a send was refused before it went out (hub_no_username)")
+                return {"status": "rejected", "message": "AgentWechat 暂时读不到微信号，没有发送"}
+            if self.expect and own != self.expect:
+                self.foreign = True
+                log.info("a send was refused before it went out (other_account)")
+                return {"status": "rejected", "message": OTHER_ACCOUNT}
         except HubDown:
+            log.info("a send was refused before it went out (hub_unreachable)")
             return {"status": "rejected", "message": "连不上 AgentWechat，没有发送"}
         except HubError as e:
+            log.info("a send was refused before it went out (hub_error %s %s)", e.status, e.code)
             return {"status": "rejected", "message": "AgentWechat 拒绝了：%s" % e.code}
         except _Closed:
+            log.info("a send was refused before it went out (closed)")
             return {"status": "rejected", "message": "已退出登录，没有发送"}
         if before is not None:
             refused = before(body)  # what the send needs first (a picture's upload): nothing is sent when it fails
@@ -1189,6 +1206,8 @@ class HubLink:
                 if not isinstance(a, dict) or not a.get("authenticated"):
                     raise _SignedOut()
                 own = str(a.get("ownUsername") or "")
+                if not own:
+                    raise _SignedOut()  # no name for the account yet: as restore takes it, never another account
                 if self.expect and own != self.expect:
                     self.foreign = True
                     raise _OtherAccount()
@@ -1202,10 +1221,23 @@ class HubLink:
                     self._emit(gen, {"event": "cursor", "cursor": "%s:%d" % (self.account, after)})
                 began = time.monotonic()
                 taken = float("inf")  # when this stream was taken (wall clock): nothing is live before it is
-                for eid, data in self.client.events(self._path("/events/stream?after=%d" % after), stop, li.hold):
+                soft_down_at: Optional[float] = None
+                disconnected = False
+                path = self._path("/events/stream?after=%d" % after)
+                for eid, data in self.client.events(path, stop, li.hold, keepalives=True):
+                    if stop.is_set():
+                        return
                     if eid == OPEN:
                         taken = time.time()
                         self._emit(gen, {"event": "link", "up": True})
+                        continue
+                    if eid == KEEPALIVE:
+                        # The worker emits no success after a failed tick. A quiet, still-open stream lets us
+                        # clear the soft down after a while without treating the account's reported status as proof.
+                        if (soft_down_at is not None and not self.foreign
+                                and time.monotonic() - soft_down_at >= SOFT_DOWN_RETRY):
+                            soft_down_at = None
+                            self._emit(gen, {"event": "link", "up": True})
                         continue
                     try:
                         ev = json.loads(data)
@@ -1217,6 +1249,20 @@ class HubLink:
                     # committed before this stream was taken: kept while not listening, history only
                     replay = stamp(ev.get("createdAt")) < taken - TAKEN_SLACK
                     signal = self._on_event(gen, ev, stop, replay=replay)
+                    if signal == "disconnected":
+                        disconnected = True
+                        soft_down_at = None
+                        self._emit(gen, {"event": "link", "up": False, "why": "AgentWechat 断开了与微信的连接"})
+                    elif signal == "connection_unavailable" and not disconnected:
+                        if soft_down_at is None:
+                            self._emit(gen, {"event": "link", "up": False, "why": "AgentWechat 暂时连不上微信，正在重连"})
+                        soft_down_at = time.monotonic()
+                    elif not self.foreign and (
+                            (disconnected and signal == "push_connected")
+                            or (soft_down_at is not None and signal in ("activity", "push_connected"))):
+                        disconnected = False
+                        soft_down_at = None
+                        self._emit(gen, {"event": "link", "up": True})
                     after = int(cur)
                     self._emit(gen, {"event": "cursor", "cursor": "%s:%d" % (self.account, after)})
                     if signal == "signed_out":
@@ -1254,7 +1300,7 @@ class HubLink:
             backoff = min(backoff * 2, 60.0)
 
     def _on_event(self, gen: int, ev: dict, stop: threading.Event, replay: bool) -> str:
-        """One event of the log; "signed_out" when the account is no longer signed in there."""
+        """Handle one log event and return any signal it carries about the WeChat connection."""
         kind = str(ev.get("kind") or "")
         data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
         if kind == "message.committed":
@@ -1262,14 +1308,16 @@ class HubLink:
             mid = str(data.get("messageId") or "")
             if not mid or origin == "profile_import":
                 return ""
+            activity = "activity" if origin in ("live", "local_send") else ""
             msg = self._message(mid)
             if msg is None:
-                return ""
+                return activity
             if replay:
                 origin = "catchup"  # kept while the extension was not listening: history, never acted on
             out = self.message_event(msg, origin, stop)
             if out is not None:
                 self._emit(gen, out)
+            return activity
         elif kind == "message.recalled":
             mid = str(data.get("messageId") or "")
             msg = self._message(mid) if mid else None
@@ -1309,15 +1357,22 @@ class HubLink:
             if str(data.get("authentication") or "") == "logged_out":
                 return "signed_out"  # signed out there, or pushed out by another computer's sign-in
             if str(data.get("connection") or "") == "disconnected":
-                self._emit(gen, {"event": "link", "up": False, "why": "AgentWechat 断开了与微信的连接"})
+                return "disconnected"
         elif kind == "account.connection":
             st = str(data.get("state") or "")
-            if st == "auth_required" or str(data.get("authentication") or "") == "logged_out":
+            if st in ("auth_required", "logged_out") or data.get("authentication") == "logged_out":
                 return "signed_out"
             if st == "connection_unavailable":
-                self._emit(gen, {"event": "link", "up": False, "why": "AgentWechat 暂时连不上微信，正在重连"})
-        elif kind == "account.push" and str(data.get("state") or "") == "connected":
-            self._emit(gen, {"event": "link", "up": True})
+                return st
+            if st:
+                return "activity"
+        elif kind == "account.push":
+            if data.get("state") == "connected":
+                return "push_connected"
+            if data.get("state") == "notified":
+                return "activity"
+        elif kind in ("sync.received", "sync.committed") or (kind == "send.updated" and data.get("state") == "accepted"):
+            return "activity"
         return ""
 
     def _message(self, mid: str) -> Optional[dict]:

@@ -426,6 +426,164 @@ class LiveTest(Base):
         self.assertEqual(err, [])
 
 
+class LinkRecoveryTest(Base):
+    soft_down = ("down", "AgentWechat 暂时连不上微信，正在重连")
+    up = ("up", "")
+
+    def push_and_wait(self, b, kind, data):
+        cursor = self.hub.push(kind, data)
+        self.assertTrue(wait_until(lambda: b.store.get("hub_cursor") == "account-1:%d" % cursor), kind)
+
+    def tick_failed(self, b, links):
+        self.push_and_wait(b, "account.connection", {"state": "connection_unavailable"})
+        self.assertEqual(links[-1], self.soft_down)
+
+    def send_posts(self):
+        return [r[2] for r in self.hub.sent("/sends") if r[0] == "POST"]
+
+    def test_a_sync_commit_recovers_the_link_and_agent_replies(self):
+        b = self.signed_in()
+        b.ack_text = "处理中"
+        got, links, _, err = self.listen(b)
+        self.tick_failed(b, links)
+        self.push_and_wait(b, "sync.committed", {"batchId": "recovered"})
+        self.assertEqual(links, [self.up, self.soft_down, self.up])
+        self.hub.message("wxid_friend", "/agent 测一下", direction="outgoing", origin="local_send")
+        self.assertTrue(wait_until(lambda: got), err)
+        msg = got[0]
+        self.assertTrue(b.react(msg.chat_id, msg.id, b.ack_text))
+        self.assertTrue(b.send(msg.chat_id, "答复", reply_to=msg.id))
+        self.push_and_wait(b, "account.push", {"state": "connected"})
+        self.assertEqual([p["text"] for p in self.send_posts()], [b.ack_text, "答复"])
+        self.assertEqual(links, [self.up, self.soft_down, self.up])
+        self.assertEqual(err, [])
+
+    def test_each_kind_of_wechat_activity_recovers_a_soft_down_once(self):
+        b = self.signed_in()
+        _, links, _, _ = self.listen(b)
+        for kind, data in (
+                ("sync.received", {"batchId": "received"}),
+                ("send.updated", {"state": "accepted"}),
+                ("message.committed", {"origin": "live"}),
+                ("message.committed", {"origin": "local_send"}),
+                ("account.push", {"state": "notified"}),
+                ("account.push", {"state": "connected"}),
+                ("account.connection", {"state": "online"})):
+            with self.subTest(kind=kind, data=data):
+                start = len(links)
+                self.tick_failed(b, links)
+                self.tick_failed(b, links)
+                if kind == "message.committed":
+                    direction = "incoming" if data["origin"] == "live" else "outgoing"
+                    m = self.hub.message("wxid_friend", "新的消息", direction=direction, commit=False)
+                    data = dict(data, messageId=m["id"], threadId=m["threadId"])
+                self.push_and_wait(b, kind, data)
+                self.push_and_wait(b, kind, data)
+                self.assertEqual(links[start:], [self.soft_down, self.up])
+
+    def test_an_idle_soft_down_recovers_on_the_open_stream(self):
+        b = self.signed_in()
+        _, links, _, _ = self.listen(b)
+        streams = self.hub.streams
+        self.tick_failed(b, links)
+        # The real hub sends a keepalive every 15 seconds; the fake sends one every half second.
+        with patch.object(wh, "SOFT_DOWN_RETRY", 0.1, create=True):
+            self.assertTrue(wait_until(lambda: links[-1] == self.up), links)
+        self.assertEqual(self.hub.streams, streams)
+        self.assertEqual(links, [self.up, self.soft_down, self.up])
+
+    def test_while_soft_down_the_hub_decides_if_reactions_and_replies_go_out(self):
+        b = self.signed_in()
+        b.ack_text = "处理中"
+        got, links, _, _ = self.listen(b)
+        self.hub.message("wxid_friend", "/agent 测一下")
+        self.assertTrue(wait_until(lambda: got))
+        msg = got[0]
+        self.tick_failed(b, links)
+        self.hub.send_outcome = "failed"
+        with self.assertRaisesRegex(SendRejected, "refused_by_wechat"):
+            b.react(msg.chat_id, msg.id, b.ack_text)
+        self.hub.send_outcome = "needs_review"
+        with self.assertRaises(BackendError) as e:
+            b.send(msg.chat_id, "答复待核对", reply_to=msg.id)
+        self.assertNotIsInstance(e.exception, SendRejected)
+        self.assertIn("发送结果不确定", e.exception.message)
+        self.push_and_wait(b, "send.updated", {"state": "submitting"})
+        old = self.hub.message("wxid_friend", "导入的旧消息", commit=False)
+        self.push_and_wait(b, "message.committed", {"origin": "profile_import", "messageId": old["id"]})
+        self.assertEqual(links, [self.up, self.soft_down])
+        self.hub.send_outcome = "accepted"
+        self.assertTrue(b.send(msg.chat_id, "答复", reply_to=msg.id))
+        self.assertEqual([p["text"] for p in self.send_posts()], [b.ack_text, "答复待核对", "答复"])
+
+    def test_a_disconnected_account_is_not_recovered_by_soft_down_signals(self):
+        b = self.signed_in()
+        _, links, _, _ = self.listen(b)
+        self.tick_failed(b, links)
+        self.push_and_wait(b, "account.updated", {"connection": "disconnected"})
+        disconnected = links[-1]
+        self.assertEqual(disconnected, ("down", "AgentWechat 断开了与微信的连接"))
+        with patch.object(wh, "SOFT_DOWN_RETRY", 0.0, create=True):
+            self.push_and_wait(b, "account.connection", {"state": "connection_unavailable"})
+            self.push_and_wait(b, "sync.committed", {"batchId": "older-work"})
+            self.push_and_wait(b, "account.push", {"state": "notified"})
+            self.assertEqual(links[-1], disconnected)
+            self.assertEqual(links.count(self.up), 1)
+        self.push_and_wait(b, "account.push", {"state": "connected"})
+        self.assertEqual(links[-1], self.up)
+
+    def test_auth_required_ends_the_old_stream_and_blocks_sends(self):
+        b = self.signed_in()
+        _, links, _, _ = self.listen(b)
+        self.tick_failed(b, links)
+        self.hub.authenticated = False
+        self.push_and_wait(b, "account.connection", {"state": "auth_required"})
+        self.assertTrue(wait_until(lambda: links[-1] == ("down", wh.SIGNED_OUT)), links)
+        self.hub.push("sync.committed", {"batchId": "older-work"})
+        self.hub.push("account.push", {"state": "notified"})
+        with self.assertRaisesRegex(SendRejected, wh.SIGNED_OUT):
+            b.send("wxid_friend", "答复")
+        self.assertEqual(self.send_posts(), [])
+        self.assertEqual(links.count(self.up), 1)
+
+    def test_a_foreign_account_cannot_recover_a_soft_down(self):
+        b = self.signed_in()
+        _, links, _, _ = self.listen(b)
+        self.tick_failed(b, links)
+        self.hub.me = "wxid_other_person"
+        # The send's account check can see the switch before the stream has reconnected.
+        with self.assertRaisesRegex(SendRejected, "另一个微信号"):
+            b.send("wxid_friend", "答复")
+        with patch.object(wh, "SOFT_DOWN_RETRY", 0.0, create=True):
+            self.push_and_wait(b, "sync.committed", {"batchId": "foreign"})
+            self.push_and_wait(b, "account.push", {"state": "connected"})
+            self.assertFalse(wait_until(lambda: links.count(self.up) > 1, timeout=0.7), links)
+            self.assertEqual(links, [self.up, self.soft_down])
+        self.assertEqual(self.send_posts(), [])
+
+    def test_a_moment_without_the_account_name_is_not_another_account(self):
+        b = self.signed_in()
+        real = self.hub.account_obj
+        nameless = [1]
+
+        def account_obj():
+            obj = real()
+            if nameless and nameless.pop():
+                obj["ownUsername"] = None  # signed in there, its name not readable for a moment
+            return obj
+
+        with patch.object(self.hub, "account_obj", side_effect=account_obj), \
+                self.assertLogs("openmate.wechat.hub", level="INFO") as logs:
+            with self.assertRaisesRegex(SendRejected, "暂时读不到微信号"):
+                b.send("wxid_friend", "答复")
+            self.assertFalse(b._native.foreign)
+            self.assertEqual(self.send_posts(), [])
+            mid = b.send("wxid_friend", "答复")
+        self.assertTrue(mid)
+        self.assertEqual(len(self.send_posts()), 1)
+        self.assertIn("a send was refused before it went out (hub_no_username)", "\n".join(logs.output))
+
+
 class RecallOperationTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

@@ -1456,13 +1456,16 @@ class WeChatBackend(Backend):
         try:
             n = self._link()
         except BackendError as e:
+            log.info("a send was refused before it went out (link_not_ready %s)", e.kind)
             raise SendRejected("微信组件没准备好，没有发送：%s" % e.message)
         if self.hub_url and self._ready_for is not n:
             # AgentWechat's account was not taken (not yet, or another one is signed in there): nothing goes out
+            log.info("a send was refused before it went out (account_not_confirmed)")
             raise SendRejected("AgentWechat 的微信号还没确认，没有发送")
         unsure = ""
         with self._auth_mu:
             if self._signed_out or self._auth_epoch != epoch or self.me != me:
+                log.info("a send was refused before it went out (sign_in_changed)")
                 raise SendRejected("登录状态变了（退出或换了账号），没有发送")
             if self.hub_url:  # kept before it goes, in this account's store: an echo after a crash is still ours
                 unsure = "hub_unsure:" + params["key"]
@@ -1474,6 +1477,7 @@ class WeChatBackend(Backend):
         except NativeError as e:
             if unsure:
                 self.store.drop(unsure)
+            log.info("a send was refused before it went out (%s)", e.kind)
             raise SendRejected("没有发送：%s" % e.message)  # refused before anything was transmitted
         status = r.get("status")
         if unsure and status in ("rejected", "not_sent"):
