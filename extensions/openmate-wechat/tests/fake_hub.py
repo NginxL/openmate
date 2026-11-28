@@ -46,6 +46,8 @@ class FakeHub:
         self.lookup_missing_once = False  # only the next such lookup finds nothing
         self.big_chats: set = set()  # chats whose message list answers 503 pagination_capacity_exceeded
         self.sends: Dict[str, dict] = {}
+        self.recall_operations: Dict[str, dict] = {}
+        self.recall_outcome = "succeeded"
         self.uploads: Dict[str, dict] = {}  # staged sources: name, mime, the bytes
         self.upload_fail = ""  # /uploads answers this error code (409, or 500 for "operation_failed")
         self.send_outcome = "accepted"  # accepted | failed | needs_review | refuse | silent | lost_answer
@@ -229,6 +231,8 @@ class FakeHub:
                     m = hub.messages.get(rest[1])
                     if m is None:
                         return self._err(404, "message_not_found")
+                    if rest[2:] == ["recall"] and method == "POST":
+                        return self._start_recall(m, body)
                     if rest[2:] == ["media"]:
                         return self._json(200, {"items": hub.assets.get(rest[1], [])})
                     if rest[2:] == ["media-transfers"]:
@@ -240,6 +244,15 @@ class FakeHub:
                                          "_fail": hub.job_fail}
                         return self._json(202, hub.jobs[jid])
                     return self._json(200, m)
+                if rest[0] == "operations" and len(rest) == 2:
+                    op = hub.recall_operations.get(rest[1])
+                    if op is None:
+                        return self._err(404, "not_found")
+                    if op["state"] == "queued":
+                        op["state"] = hub.recall_outcome
+                        if op["state"] == "succeeded":
+                            hub.recall(hub.messages[op["result"]["messageId"]])
+                    return self._json(200, {k: v for k, v in op.items() if not k.startswith("_")})
                 if rest[0] == "jobs" and len(rest) == 2:
                     j = hub.jobs.get(rest[1])
                     if j is None:
@@ -279,6 +292,25 @@ class FakeHub:
                     s = hub.sends.get(rest[1])
                     return self._json(200, s) if s else self._err(404, "send_not_found")
                 return self._err(404, "no_route")
+
+            def _start_recall(self, message: dict, body: Any) -> None:
+                key = self.headers.get("Idempotency-Key")
+                if not key:
+                    return self._err(400, "idempotency_key_required")
+                if body != {"serverId": message["serverId"]} or message["direction"] != "outgoing":
+                    return self._err(409, "recall_target_changed")
+                if hub.recall_outcome == "refused":
+                    return self._err(409, "recall_target_unavailable")
+                for op in hub.recall_operations.values():
+                    if op["_key"] == key:
+                        return self._json(202, {k: v for k, v in op.items() if not k.startswith("_")})
+                op_id = "recall-%d" % next(hub._ids)
+                op = {"id": op_id, "_key": key, "accountId": hub.account, "kind": "message_recall", "state": "queued",
+                      "createdAt": iso(), "updatedAt": iso(),
+                      "result": {"messageId": message["id"], "threadId": message["threadId"],
+                                 "serverId": message["serverId"]}}
+                hub.recall_operations[op_id] = op
+                return self._json(202, {k: v for k, v in op.items() if not k.startswith("_")})
 
             def _multipart(self, ctype: str) -> Optional[dict]:
                 """The one "file" field of a multipart body: its file name, content type and bytes."""

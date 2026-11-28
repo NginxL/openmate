@@ -6,6 +6,7 @@ try:  # first: every temporary directory of this run in one, removed at its end
     import _runtmp  # noqa: F401
 except ImportError:  # (started by its path from elsewhere: its directory is not on the path)
     pass
+import hashlib
 import os
 import shutil
 import sys
@@ -13,7 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXT = os.path.dirname(HERE)
@@ -425,6 +426,56 @@ class LiveTest(Base):
         self.assertEqual(err, [])
 
 
+class RecallOperationTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.client = Mock()
+        self.link = wh.HubLink(self.client)
+        self.link.account = "account-1"
+        self.link._alive = True
+        self.backend = wb.WeChatBackend(None, directory.name, hub_url="http://127.0.0.1:1")
+        self.addCleanup(self.backend.close)
+        self.backend._ready_for = self.backend._native = self.link
+        self.backend.me = "wxid_me"
+        self.backend.store.put("account", self.backend.me)
+        self.chat, self.mid = "wxid_friend", "18446744073709551615"
+        self.backend.store.add_message({"id": self.mid, "chat": self.chat, "hub_id": "msg:with/slash",
+                                        "mine": True, "sender": self.backend.me, "at": int(time.time())})
+
+    def test_recall_submits_once_and_follows_the_returned_operation(self):
+        pending = {"id": "op-1", "state": "queued"}
+        self.client.call.side_effect = [pending, dict(pending, state="succeeded"), pending,
+                                        dict(pending, state="failed", result={"remoteOutcome": "rejected"})]
+        with patch.object(wh.time, "sleep"):
+            self.backend.recall(self.chat, self.mid)
+        with patch.object(wh.time, "sleep"), self.assertRaises(BackendError) as err:
+            self.backend.recall(self.chat, self.mid)
+        self.assertEqual(err.exception.kind, "rejected")
+        post, get, post_again, get_again = self.client.call.call_args_list
+        self.assertEqual(post.args, ("POST", "/v1/accounts/account-1/messages/msg%3Awith%2Fslash/recall",
+                                     {"serverId": self.mid}))
+        self.assertEqual(get.args, ("GET", "/v1/accounts/account-1/operations/op-1"))
+        self.assertEqual(post.kwargs["headers"], post_again.kwargs["headers"])
+        self.assertTrue(post.kwargs["headers"]["Idempotency-Key"].startswith("om-recall-"))
+        self.assertEqual(get.args, get_again.args)
+
+    def test_recall_polling_shares_the_post_deadline(self):
+        self.client.call.return_value = {"id": "op-1", "state": "queued"}
+        with patch.object(wh.time, "monotonic", side_effect=(0.0, 0.5, 0.75, 2.9, 3.0)), \
+                patch.object(wh.time, "sleep"), self.assertRaises(BackendError) as err:
+            self.backend.recall(self.chat, self.mid)
+        self.assertEqual(err.exception.kind, "timeout")
+        self.assertEqual([c.kwargs["timeout"] for c in self.client.call.call_args_list], [3.0, 2.25])
+
+    def test_message_recall_reports_an_unreachable_hub(self):
+        self.client.call.side_effect = wh.HubDown("ConnectionRefusedError")
+        with self.assertRaises(BackendError) as err:
+            self.backend.recall(self.chat, self.mid)
+        self.assertEqual(err.exception.kind, "unreachable")
+        self.client.call.assert_called_once()
+
+
 class RecallTest(Base):
     def test_a_recall_reports_the_core_id_after_renewing_history(self):
         b = self.signed_in()
@@ -519,10 +570,71 @@ class RecallTest(Base):
         del self.hub.messages[m["id"]]
         self.assertIsNone(b.message_gone(chat, mid))
 
+    def test_message_recall_posts_the_saved_ids_and_polls_the_operation(self):
+        b = self.signed_in()
+        self.assertFalse(b.can_recall)
+        chat = "wxid_friend"
+        mid = b.send(chat, "处理中", notice=True)
+        ev, _ = b.store.message(mid)
+        hub_id = ev["hub_id"]
+        base = "/v1/accounts/%s" % self.hub.account
+
+        for _ in range(2):
+            b.recall(chat, mid)
+        posts = [r for r in self.hub.requests if r[0] == "POST" and r[1].endswith("/recall")]
+        expected_key = "om-recall-" + hashlib.sha256(hub_id.encode()).hexdigest()
+        self.assertEqual([(r[1], r[2], r[3].get("Idempotency-Key")) for r in posts],
+                         [(base + "/messages/%s/recall" % hub_id, {"serverId": mid}, expected_key)] * 2)
+        op_id, = self.hub.recall_operations
+        self.assertEqual([r[:2] for r in self.hub.sent("/operations/")], [("GET", base + "/operations/" + op_id)])
+        self.assertIn("recall", self.hub.messages[hub_id])
+
+    def test_message_recall_finds_a_missing_hub_id_by_the_server_id(self):
+        b = self.signed_in()
+        chat = "wxid_friend"
+        mid = b.send(chat, "处理中", notice=True)
+        hub_id = b.store.message(mid)[0]["hub_id"]
+        b._native.call("recall", timeout=3.0, chat=chat, hub_id="", server_id=mid)
+        post, = self.hub.sent("/messages/%s/recall" % hub_id)
+        self.assertEqual((post[0], post[2]), ("POST", {"serverId": mid}))
+        self.assertIn("recall", self.hub.messages[hub_id])
+        with self.assertRaises(wh.NativeError) as err:
+            b._native.call("recall", timeout=3.0, chat=chat, hub_id="", server_id="12345")
+        self.assertEqual(err.exception.kind, "not_found")
+
+    def test_message_recall_surfaces_hub_failure_and_refusal(self):
+        b = self.signed_in()
+        chat = "wxid_friend"
+        for outcome, kind in (("failed", "failed"), ("refused", "rejected")):
+            with self.subTest(outcome=outcome):
+                mid = b.send(chat, "处理中", notice=True)
+                self.hub.recall_outcome = outcome
+                with self.assertRaises(BackendError) as err:
+                    b.recall(chat, mid)
+                self.assertEqual(err.exception.kind, kind)
+
+    def test_message_recall_leaves_old_or_unowned_messages_local(self):
+        b = self.signed_in()
+        chat = "wxid_friend"
+        old = self.hub.message(chat, "旧提示", direction="outgoing", at=time.time() - 121, commit=False)
+        other = self.hub.message(chat, "别人的消息", commit=False)
+        own = self.hub.message(chat, "本账号的消息", direction="outgoing", commit=False)
+        for message in (old, other, own):
+            b.store.add_message(b._native.message_event(message, "catchup"))
+        before = len(self.hub.requests)
+        for where, mid, kind in ((chat, old["serverId"], "too_old"), (chat, other["serverId"], "not_found"),
+                                 ("another_chat", own["serverId"], "not_found"), (chat, "missing", "not_found")):
+            with self.subTest(mid=mid, chat=where):
+                with self.assertRaises(BackendError) as err:
+                    b.recall(where, mid)
+                self.assertEqual(err.exception.kind, kind)
+        self.assertEqual(len(self.hub.requests), before)
+
     def test_recalling_a_request_stops_the_core_run(self):
-        h = Harness(self, platform=platform(), config={"agent": True, "agent_ack_reaction": ""},
+        ack = "🤖 贾维斯处理中…"
+        h = Harness(self, platform=platform(), config={"agent": True, "agent_ack_reaction": ack},
                     initialize=False,
-                    backend_factory=lambda cfg, data: wb.WeChatBackend(None, data, hub_url=self.hub.url))
+                    backend_factory=lambda cfg, data: wb.WeChatBackend(None, data, ack_text=ack, hub_url=self.hub.url))
         h.initialize(secrets={"hub_token": self.hub.token})
         h.sign_in()
         self.assertTrue(wait_until(h.app._catchup_done.is_set))
@@ -533,10 +645,18 @@ class RecallTest(Base):
 
         self.assertTrue(wait_until(lambda: any(r["state"] == "running" for r in runs())))
         run = runs()[0]
+        ack_id = run["ack_id"]
+        ack_hub_id = h.app.backend.store.message(ack_id)[0]["hub_id"]
+        send, = [r[2] for r in self.hub.sent("/sends") if r[0] == "POST"]
+        self.assertEqual(send["quote"], {"messageId": m["id"], "serverId": m["serverId"]})
+        self.assertEqual(send["text"], ack)
         self.hub.recall(m)
         self.assertTrue(wait_until(lambda: h.http.sessions[run["session_id"]]["stopped"]))
         stopped = h.app.store.run_get(run["id"])
         self.assertEqual((stopped["state"], stopped["stop_reason"]), ("stopped", "recalled"))
+        self.assertTrue(wait_until(lambda: "recall" in self.hub.messages[ack_hub_id]))
+        post, = self.hub.sent("/messages/%s/recall" % ack_hub_id)
+        self.assertEqual((post[0], post[2]), ("POST", {"serverId": ack_id}))
 
 
 class SendTest(Base):

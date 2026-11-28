@@ -343,6 +343,16 @@ class SendTest(Base):
 
 
 class AckTest(Base):
+    def test_native_mode_refuses_to_recall_without_calling_the_program(self):
+        b = self.backend()
+        b.restore({"state": {"k": "v1"}})
+        mid = b.send("wxid_bob", "处理中", notice=True)
+        before = self.requests()
+        with self.assertRaises(BackendError) as err:
+            b.recall("wxid_bob", mid)
+        self.assertEqual(err.exception.kind, "unsupported")
+        self.assertEqual(self.requests(), before)
+
     def test_the_ack_line_quotes_the_request_without_an_at(self):
         b = self.backend()
         b.ack_text = "🤖 贾维斯处理中..."

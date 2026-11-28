@@ -1066,8 +1066,29 @@ class AgentRunner:
                 if sent:
                     cur["ack_id"] = sent  # a /stop that quotes it finds the run
                 self.store.run_put(cur)
-        if cur is not None and cur.get("stop_reason") == USER_REPLY_STOP:
-            self._end_reaction(cur["id"], "stopped")  # the user's reply came while the reaction was being put
+        if cur is not None:
+            if cur.get("stop_reason") == USER_REPLY_STOP:
+                self._end_reaction(cur["id"], "stopped")  # the user's reply came while the reaction was being put
+            elif cur.get("stop_reason") == RECALL_STOP:
+                self._recall_ack(cur["id"], epoch)
+
+    def _recall_ack(self, run_id: str, epoch: Optional[int]) -> None:
+        """Take back a message sent as an ack, once even if the stop and the send finish together."""
+        with self._lock(run_id), self.app.owned(epoch) as ok:
+            if not ok:
+                return
+            cur = self.store.run_get(run_id)
+            backend = getattr(self.app, "backend", None)
+            if (backend is None or cur is None or cur.get("stop_reason") != RECALL_STOP
+                    or not cur.get("ack_id") or cur.get("replies")
+                    or not self.store.seen_add("ack-recalled:%s" % run_id)):
+                return
+        try:
+            backend.recall(cur["chat_id"], cur["ack_id"])
+        except BackendError as e:
+            log.info("the /agent ack was not recalled (%s)", e.kind)
+        except Exception as e:
+            log.info("the /agent ack was not recalled (%s)", type(e).__name__)
 
     def _end_reaction(self, run_id: str, outcome: str) -> None:
         """Swap the request's 🤔 for how it ended: "done" ✅, "failed" ❌ (a timeout too), "stopped" nothing. Only where
@@ -3370,6 +3391,7 @@ class AgentRunner:
         else:
             already = before not in ACTIVE
         if recalled:
+            self._recall_ack(cur["id"], epoch)
             return
         background = False
         if cur.get("session_id") and not failed and before != "stopped":

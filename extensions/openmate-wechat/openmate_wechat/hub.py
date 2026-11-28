@@ -1098,6 +1098,46 @@ class HubLink:
             except (HubError, HubDown) as e:
                 log.info("a send's state could not be read now: %s", e)
 
+    def _op_recall(self, timeout: float, hub_id: str, server_id: str, chat: str = "") -> dict:
+        deadline = time.monotonic() + timeout
+        if not hub_id and chat:
+            # A send of a moment ago: among the chat's latest messages, looked up within the same budget.
+            got = self._get("/threads/%s/messages?%s" % (seg(chat), urllib.parse.urlencode({"limit": 50})),
+                            timeout=timeout)
+            for m in (got.get("items") if isinstance(got, dict) else None) or []:
+                if isinstance(m, dict) and str(m.get("serverId") or "") == server_id:
+                    hub_id = str(m.get("id") or "")
+                    break
+            if not hub_id:
+                raise NativeError("not_found", "AgentWechat 里还找不到这条消息")
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise NativeError("timeout", "AgentWechat 撤回确认超时")
+        key = "om-recall-" + hashlib.sha256(hub_id.encode()).hexdigest()
+        try:
+            op = self._post("/messages/%s/recall" % seg(hub_id), {"serverId": server_id},
+                            headers={"Idempotency-Key": key}, timeout=timeout)
+        except _Closed:
+            raise NativeGone("AgentWechat 的连接已关闭")
+        op_id = op.get("id") if isinstance(op, dict) else None
+        while op_id and isinstance(op, dict) and op.get("id") == op_id:
+            state = op.get("state")
+            if state == "succeeded":
+                return {}
+            if state in ("rejected", "failed", "cancelled", "expired", "needs_review"):
+                result = op.get("result")
+                rejected = state == "rejected" or (isinstance(result, dict) and result.get("remoteOutcome") == "rejected")
+                kind = "input" if rejected else ("unknown" if state == "needs_review" else "failed")
+                raise NativeError(kind, "AgentWechat 没能确认撤回（%s）" % state)
+            if state not in ("queued", "running"):
+                break
+            time.sleep(max(0.0, min(0.25, deadline - time.monotonic())))
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise NativeError("timeout", "AgentWechat 撤回确认超时")
+            op = self._get("/operations/" + seg(op_id), timeout=left)
+        raise NativeError("unknown", "AgentWechat 返回了无效的撤回操作")
+
     # ---------------------------------------------------------------- the live link
 
     def _op_listen(self, timeout: float, cursor: str = "", gen: int = 0, **_: Any) -> dict:

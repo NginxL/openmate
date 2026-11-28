@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 from harness import CID, Harness, HubSideError, fast, openmate_feishu, wait_until
 from openmate_core.agent import AgentRunner
 from openmate_core.app import ConnectorApp
+from openmate_core.backend import BackendError
 from openmate_core.fixture import FixtureBackend
 from openmate_core.store import Store
 from openmate_core.wire import RPCError
@@ -545,6 +546,117 @@ class SupersedeTest(unittest.TestCase):
         h.tool("agent_reply", request=run["id"], text="/agent 这句只是回复里的文字")
         time.sleep(0.3)
         self.assertEqual(len(h.http.starts()), 1)
+
+
+class RecallAckTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.app = ConnectorApp(openmate_feishu.platform())
+        self.app.store = Store(os.path.join(directory.name, "openmate.db"))
+        self.addCleanup(self.app.store.close)
+        self.backend = self.app.backend = FixtureBackend()
+        self.app.record_sent = Mock()
+        self.app.hub.stop_conversation = Mock(return_value={})
+        self.runner = self.app.agent = AgentRunner(self.app)
+        self.runner.ack = "🤖 处理中"
+        self.epoch = self.app.account_epoch()
+        self.run = dict(id="run", chat_id="chat_example_team", request_id="request", thread_key="request",
+                        state="running", created=time.time(), kind="agent", machine_id="machine", session_id="session",
+                        replies=0)
+        self.app.store.run_put(self.run)
+
+    def acknowledge(self, react=None):
+        with patch.object(self.backend, "react", side_effect=react or self.send_ack):
+            self.runner._ack_request(self.run, self.epoch)
+
+    def send_ack(self, chat, mid, text):
+        return self.backend.send(chat, text, reply_to=mid)
+
+    def recall_request(self):
+        self.runner.on_recalled(self.run["chat_id"], self.run["request_id"], self.epoch)
+
+    def assert_stopped(self):
+        cur = self.app.store.run_get(self.run["id"])
+        self.assertEqual((cur["state"], cur["stop_reason"]), ("stopped", "recalled"))
+        self.app.hub.stop_conversation.assert_called_once_with("session")
+
+    def test_recall_withdraws_the_ack_once(self):
+        self.acknowledge()
+        ack = self.app.store.run_get(self.run["id"])["ack_id"]
+        with patch.object(FixtureBackend, "can_recall", False):
+            self.recall_request()
+            wait_for_recall()
+            self.recall_request()
+            wait_for_recall()
+        self.assert_stopped()
+        self.assertEqual(self.backend.world.recalls, [(self.run["chat_id"], ack)])
+
+    def test_recall_keeps_the_ack_if_the_run_has_replied(self):
+        self.acknowledge()
+        cur = self.app.store.run_get(self.run["id"])
+        cur["replies"] = 1
+        self.app.store.run_put(cur)
+        with patch.object(self.backend, "recall") as recall:
+            self.recall_request()
+            wait_for_recall()
+        self.assert_stopped()
+        recall.assert_not_called()
+
+    def test_recall_withdraws_an_ack_that_finishes_during_the_stop(self):
+        sent, release_send, stopping, release_stop = (threading.Event() for _ in range(4))
+
+        def send_ack(*args):
+            mid = self.send_ack(*args)
+            sent.set()
+            release_send.wait(5)
+            return mid
+
+        def stop_conversation(_):
+            stopping.set()
+            release_stop.wait(5)
+            return {}
+
+        self.app.hub.stop_conversation.side_effect = stop_conversation
+        sender = threading.Thread(target=self.acknowledge, args=(send_ack,), daemon=True)
+        sender.start()
+        try:
+            self.assertTrue(sent.wait(5))
+            self.assertNotIn("ack_id", self.app.store.run_get(self.run["id"]))
+            self.recall_request()
+            self.assertTrue(stopping.wait(5))
+            release_send.set()
+            sender.join(5)
+            ack = self.backend.world.sent[0]["id"]
+            self.assertEqual(self.backend.world.recalls, [(self.run["chat_id"], ack)])
+        finally:
+            release_send.set()
+            release_stop.set()
+            sender.join(5)
+            wait_for_recall()
+        self.assert_stopped()
+        self.assertEqual(self.backend.world.recalls, [(self.run["chat_id"], ack)])
+
+    def test_a_failed_ack_recall_does_not_prevent_the_stop(self):
+        self.acknowledge()
+        with patch.object(self.backend, "recall", side_effect=BackendError("private detail", "unavailable")) as recall, \
+                self.assertLogs("openmate.agent", level="INFO") as logs:
+            self.recall_request()
+            wait_for_recall()
+        self.assert_stopped()
+        recall.assert_called_once()
+        self.assertIn("the /agent ack was not recalled (unavailable)", "\n".join(logs.output))
+        self.assertNotIn("private detail", "\n".join(logs.output))
+
+    def test_recall_does_not_withdraw_a_reaction_without_a_message_id(self):
+        with patch.object(self.backend, "recall") as recall:
+            self.acknowledge(self.backend.react)
+            self.assertEqual(self.backend.world.reactions, [(self.run["chat_id"], self.run["request_id"], self.runner.ack)])
+            self.assertNotIn("ack_id", self.app.store.run_get(self.run["id"]))
+            self.recall_request()
+            wait_for_recall()
+        self.assert_stopped()
+        recall.assert_not_called()
 
 
 class RecallTest(unittest.TestCase):

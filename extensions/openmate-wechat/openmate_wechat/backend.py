@@ -321,6 +321,8 @@ class WeChatBackend(Backend):
     # a chat read on the phone (WeChat syncs the read to every device) after the last message from someone else
     # counts as 处理完 here, as Feishu's 完成 does; a new message brings it back
     done_marks = True
+    # Leave channel questions in the chat: WeChat allows only two minutes to recall and leaves a notice.
+    can_recall = False
 
     def __init__(self, native_path: Any, data_dir: str, ack_text: str = "", voice_cmd: str = "", hub_url: str = ""):
         """native_path: the program's path, or a callable that returns it (waiting for a download) or raises.
@@ -1390,7 +1392,36 @@ class WeChatBackend(Backend):
         return self.send(chat_id, self.ack_text, reply_to=message_id, mention=False, notice=True)
 
     def unreact(self, chat_id: str, message_id: str, reaction: str) -> None:
-        """Nothing to take back: the ack line stays (a recall works only for 2 minutes and leaves a notice)."""
+        """There is no reaction to remove. The core calls recall on the ack message if the request was recalled."""
+
+    def recall(self, chat_id: str, message_id: str) -> None:
+        if not self.hub_url:
+            raise BackendError("原生模式不支持撤回微信消息", "unsupported")
+        with self._auth_mu:
+            if self._closed or self._signed_out:
+                raise BackendError("AgentWechat 的微信号还没确认", "unreachable")
+            got = self.store.message(message_id)
+            ev = got[0] if got else {}
+            hub_id, server_id = ev.get("hub_id"), ev.get("id", "")
+            # Messages without a WeChat server ID are kept under a synthetic ID.
+            if (not self.me or self._foreign_store() or ev.get("chat") != chat_id or not ev.get("mine")
+                    or ev.get("sender") != self.me
+                    or not re.fullmatch(r"[1-9][0-9]{0,19}", server_id) or int(server_id) > 2**64 - 1):
+                raise BackendError("找不到这条自己发出的微信消息", "not_found")
+            if time.time() - int(ev.get("at") or 0) > 120:
+                raise BackendError("消息已超过微信的两分钟撤回时限", "too_old")
+            n = self._ready_for
+        # Use the signed-in link so a recall never waits for a reconnect.
+        if n is None or n is not self._ready_for:
+            raise BackendError("AgentWechat 的微信号还没确认", "unreachable")
+        try:
+            # The hub's id can still be missing right after the send (its echo brings it): the hub finds it then.
+            n.call("recall", timeout=3.0, chat=chat_id, hub_id=str(hub_id or ""), server_id=server_id)
+        except NativeGone as e:
+            raise BackendError(e.message, "unreachable") from e
+        except NativeError as e:
+            kind = {"input": "rejected", "error": "failed", "hub_signed_out": "expired"}.get(e.kind, e.kind)
+            raise BackendError(e.message, kind) from e
 
     def send(self, chat_id: str, text: str, reply_to: Optional[str] = None, root: Optional[str] = None,
              mention: bool = True, notice: bool = False) -> str:
