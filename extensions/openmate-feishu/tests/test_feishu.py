@@ -68,7 +68,7 @@ class ManifestTest(unittest.TestCase):
         perms = MANIFEST["permissions"]
         self.assertEqual(sorted(perms["hub"]), ["agents.control", "agents.read", "assistant.ask",
                                                 "extensions.call:openmate-wechat", "inbox.read", "kb.read", "machines.read",
-                                                "todos.read"])  # machines.read: /agent's placement by load
+                                                "notify", "todos.read"])  # machines.read: /agent's placement by load
         self.assertEqual(perms["network"], ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com",
                                             "larkoffice.com", "*.larkoffice.com", "config:starkmesh_url:http"])
         props = MANIFEST["configuration"]["properties"]
@@ -95,7 +95,9 @@ class ManifestTest(unittest.TestCase):
                                        "auto_reply", "auto_reply_docs", "auto_reply_daily_most", "auto_reply_hourly_most",
                                        "auto_reply_header", "auto_reply_at_asker", "auto_reply_full",
                                        "agent_reply_suffix",
-                                       "history_chats", "triage_rules", "inbox_triage_chats", "inbox_private_dms", "lark_cli", "lark_cli_profile", "starkmesh_url", "needs_hours", "bookmarks"])
+                                       "history_chats", "triage_rules", "inbox_triage_chats", "inbox_private_dms",
+                                       "lark_cli", "lark_cli_profile", "starkmesh_url", "starkmesh_alerts", "starkmesh_alert_left",
+                                       "needs_hours", "bookmarks"])
         self.assertEqual([(s["name"], s.get("hint")) for s in MANIFEST["secrets"]], [("starkmesh_key", "last4")])
         self.assertIn("config:starkmesh_url:http", MANIFEST["permissions"]["network"])
         self.assertNotIn("default", props["larkx_python"])
@@ -104,6 +106,10 @@ class ManifestTest(unittest.TestCase):
         d = config_defaults(MANIFEST)
         self.assertEqual(props["starkmesh_url"]["format"], "uri")
         self.assertNotIn("starkmesh_url", d, "an address a network permission names is the user's to write: no default")
+        self.assertEqual(props["starkmesh_alerts"]["type"], "boolean")
+        self.assertIs(d["starkmesh_alerts"], False)
+        line = props["starkmesh_alert_left"]
+        self.assertEqual((line["type"], line["minimum"], line["maximum"], d["starkmesh_alert_left"]), ("integer", 5, 50, 10))
         self.assertEqual((d["auto_reply"], d["auto_reply_daily_most"], d["auto_reply_header"], d["auto_reply_at_asker"]),
                          (True, 20, "> 🤖 AI 代答 · {model} · {effort}", True))
         self.assertEqual(props["auto_reply_full"]["type"], "boolean")

@@ -93,12 +93,14 @@ def _agenda_pages(app):
     # StarkMesh page and its Overview card, and the Agents' progress (the hub's session list)
     from openmate_core import agents
 
-    from . import agenda, starkmesh, today
+    from . import agenda, starkmesh, starkmesh_alerts, today
 
     shared = agenda.Agenda(app)
     persona = today.PersonaToday(app)
     wechat = today.PeerToday(app)  # openmate-wechat's chats, when it is installed beside this one
-    mesh = starkmesh.StarkMeshPage(app, starkmesh.StarkMesh(app))
+    mesh_read = starkmesh.StarkMesh(app)
+    alerts = starkmesh_alerts.StarkMeshAlerts(app, mesh_read)
+    mesh = starkmesh.StarkMeshPage(app, mesh_read, alerts)
     board = agents.AgentsRead(app)
 
     def drawn_again(*contributions):

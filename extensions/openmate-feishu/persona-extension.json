@@ -282,6 +282,20 @@
         "title": "StarkMesh 地址",
         "description": "StarkMesh 网关的地址（这台电脑上能访问到的，例如 http://127.0.0.1:18080）。StarkMesh 页和“今天”页的额度卡片从这里只读地读账号和用量。地址和下面的密钥都填了才会显示。"
       },
+      "starkmesh_alerts": {
+        "type": "boolean",
+        "title": "StarkMesh 后台告警",
+        "description": "先填好 StarkMesh 地址和只读管理密钥。打开后每 5 分钟在后台检查一次，号池额度快用完、Claude 号出错或全部不可用、StarkMesh 持续读不到时，给你的设备发 Persona 通知。",
+        "default": false
+      },
+      "starkmesh_alert_left": {
+        "type": "integer",
+        "title": "额度告警线（剩余 %）",
+        "description": "号池某个额度条的剩余百分比达到或低于这条线时提醒。",
+        "default": 10,
+        "minimum": 5,
+        "maximum": 50
+      },
       "needs_hours": {
         "type": "integer",
         "title": "“需要我”只看多久内的",
@@ -306,7 +320,7 @@
   "permissions": {
     "network": ["feishu.cn", "*.feishu.cn", "larksuite.com", "*.larksuite.com", "larkoffice.com", "*.larkoffice.com",
                 "config:starkmesh_url:http"],
-    "hub": ["agents.control", "agents.read", "assistant.ask", "extensions.call:openmate-wechat", "inbox.read", "kb.read", "machines.read", "todos.read"],
+    "hub": ["agents.control", "agents.read", "assistant.ask", "extensions.call:openmate-wechat", "inbox.read", "kb.read", "machines.read", "notify", "todos.read"],
     "launcher_keys": true
   },
   "host_integrations": [{"id": "lark-cli", "version": ">=1.0.72 <2.0.0"}]

@@ -211,6 +211,10 @@ def usable(a: dict, now: float) -> bool:
     return True
 
 
+def pool_usable(a: dict, now: float) -> bool:
+    return usable(a, now) and not expired(a, now)
+
+
 def state_of(a: dict, now: float) -> Tuple[str, str]:
     """(what to say, tone) of an account."""
     if str(a.get("status") or "") == "error":
@@ -293,6 +297,61 @@ def tone_of(ratio: float) -> Tuple[str, str]:
     return "red", "danger"
 
 
+class PoolUsage:
+    """The sidebar's pool measurements, before formatting them for the UI or an alert."""
+
+    def __init__(self, snap: Snapshot, now: float):
+        self.ok = [a for a in snap.claude if pool_usable(a, now)]
+        self.subs = [a for a in self.ok if str(a.get("type") or "") in SUBSCRIPTION_TYPES]
+        self.total = getattr(snap, "total", len(snap.accounts))
+        self.partial = self.total > len(snap.accounts) or getattr(snap, "cut", False)
+        failed = getattr(snap, "usage_failed", ())
+        self.missing = sum(str(a.get("id")) in failed for a in self.subs)
+        self.windows: Dict[str, dict] = {}
+        self.cover: Dict[str, int] = {}
+        if self.partial or self.missing:
+            return
+
+        def live(a):
+            return not expired(a, now)
+
+        def live_fable(a):
+            return live(a) and not fable_blocked(a, now)
+
+        for key, _, _ in USAGE_WINDOWS:
+            w = snap.window(key, now, live_fable if key == "seven_day_fable" else live)
+            counted = w["of"] if w else 0
+            if key != "seven_day_fable" and counted < len(self.subs):
+                self.cover[key] = len(self.subs) - counted  # the missing accounts might be the least used
+            elif w:
+                w["used_percent"] = 100.0 * (1.0 - min(1.0, max(0.0, w["ratio"])))
+                self.windows[key] = w
+
+
+class MeshFresh(Fresh):
+    def current(self, stop, failure) -> Snapshot:
+        """An observer needs the outcome of the read, even when a page can show the older value."""
+        while not stop.is_set():
+            if not self._reading.acquire(timeout=0.25):
+                continue
+            try:
+                if stop.is_set():
+                    break
+                failed = failure()
+                if failed is not None and self.clock() - failed[1] < self.ahead:
+                    raise failed[2].with_traceback(None)
+                k = self.key()
+                with self._mu:
+                    if self._usable(k, self.ahead):
+                        return self._kept[2]
+                value = self.read()
+                self._keep(k, value)
+                return value
+            finally:
+                self._reading.release()
+        raise NotYet(self.name)
+
+
 class StarkMesh:
     """The gateway's reads, kept fresh behind the pages."""
 
@@ -301,10 +360,11 @@ class StarkMesh:
         self.app = app
         self.api = api or StarkMeshAPI(app)
         self.clock = clock
-        self._fresh = Fresh(self._read, AHEAD, STALE, clock=clock, spawn=spawn, name="StarkMesh")
+        self._fresh = MeshFresh(self._read, AHEAD, STALE, clock=clock, spawn=spawn, name="StarkMesh")
         # (the newest read that came in, when a read last failed or None once one is in again), for usage.query: one
         # tuple, set at once and read at once, so a read coming in between never pairs the old read with no failure
         self.state: Tuple[Optional[Snapshot], Optional[float]] = (None, None)
+        self.failure: Optional[Tuple[float, float, Exception]] = None  # first, latest, error of consecutive failed reads
 
     @property
     def configured(self) -> bool:
@@ -314,8 +374,10 @@ class StarkMesh:
         if self.configured:
             self._fresh.warm(every=KEEP, stop=getattr(self.app, "closing", None))
 
-    def read(self, wait: Optional[float] = None) -> Snapshot:
+    def read(self, wait: Optional[float] = None, *, current: bool = False) -> Snapshot:
         try:
+            if current:
+                return self._fresh.current(self.app.closing, lambda: self.failure)
             return self._fresh.get(wait)
         except NotYet:
             raise StarkMeshError("正在读取 StarkMesh，稍后自动刷新", "loading")
@@ -332,11 +394,20 @@ class StarkMesh:
         # reads take turns (Fresh's lock), so the failure below changes a state no other read is changing
         try:
             snap = self._read_once()
-        except Exception:
-            self.state = (self.state[0], self.clock())
+        except Exception as e:
+            at = self.clock()
+            self.failure = (self.failure[0] if self.failure is not None else at, at, e.with_traceback(None))
+            self.state = (self.state[0], at)
             raise
+        self.failure = None
         self.state = (snap, None)
         return snap
+
+    def _call(self, *args, **kwargs):
+        closing = getattr(self.app, "closing", None)
+        if closing is not None and closing.is_set():
+            raise StarkMeshError("扩展正在退出", "loading")
+        return self.api.call(*args, **kwargs)
 
     def _read_once(self) -> Snapshot:
         accounts: List[dict] = []
@@ -344,7 +415,7 @@ class StarkMesh:
         total = 0
         full = False  # whether the last page read was full (more may follow)
         for page in range(1, ACCOUNT_PAGES + 1):  # every page, each account once (a gateway may ignore page)
-            data = self.api.call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": PAGE_SIZE}) or {}
+            data = self._call("GET", "/api/v1/admin/accounts", {"page": page, "page_size": PAGE_SIZE}) or {}
             items = [a for a in (data.get("items") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
             full = len(items) >= PAGE_SIZE
             new = []
@@ -363,10 +434,10 @@ class StarkMesh:
         missed = 0
         for i in range(0, len(ids), USAGE_BATCH):  # the usage of every account, a batch at a time; one that fails is passed
             try:
-                got = self.api.call("POST", "/api/v1/admin/accounts/usage/batch",
-                                    body={"account_ids": ids[i:i + USAGE_BATCH], "force": False, "refresh_claude": False}) or {}
+                got = self._call("POST", "/api/v1/admin/accounts/usage/batch",
+                                 body={"account_ids": ids[i:i + USAGE_BATCH], "force": False, "refresh_claude": False}) or {}
             except StarkMeshError as e:
-                if e.kind == "auth" or i == 0 and len(ids) <= USAGE_BATCH:
+                if e.kind in ("auth", "loading") or i == 0 and len(ids) <= USAGE_BATCH:
                     raise
                 missed += len(ids[i:i + USAGE_BATCH])
                 failed_ids.update(str(x) for x in ids[i:i + USAGE_BATCH])
@@ -378,8 +449,10 @@ class StarkMesh:
                 failed_ids.update(str(k) for k in got["errors"])
         stats_failed = ""
         try:
-            stats = self.api.call("GET", "/api/v1/admin/dashboard/stats") or {}
+            stats = self._call("GET", "/api/v1/admin/dashboard/stats") or {}
         except StarkMeshError as e:
+            if e.kind == "loading":
+                raise
             stats = {}
             if e.kind != "auth":  # a key without dashboard.read still shows the quota without a warning
                 # The error message may contain the gateway URL or credentials echoed by the server.
@@ -413,12 +486,19 @@ def count(v) -> str:
 class StarkMeshPage(Page):
     """The StarkMesh dashboard (a page of its own); card() is its block on the 今天 page."""
 
-    def __init__(self, app, mesh: StarkMesh):
+    def __init__(self, app, mesh: StarkMesh, alerts=None):
         self.app = app
         self.mesh = mesh
+        self.alerts = alerts
 
     def warm(self) -> None:
         self.mesh.warm()
+        if self.alerts is not None:
+            self.alerts.start()
+
+    def _alert_footer(self) -> List[dict]:
+        note = self.alerts.caption() if self.alerts is not None else ""
+        return [{"type": "text", "style": "caption", "text": note}] if note else []
 
     def _snapshot(self, version: int) -> Tuple[Optional[Snapshot], Optional[dict]]:
         if not self.mesh.configured:
@@ -492,7 +572,8 @@ class StarkMeshPage(Page):
         version = int(params.get("ui_version") or 1)
         s, problem = self._snapshot(version)
         if s is None:
-            return {"title": TITLE, "sections": [{"items": [problem]}], "refresh_after": 5 if "正在读取" in str(problem) else REFRESH}
+            return {"title": TITLE, "sections": [{"items": [problem] + self._alert_footer()}],
+                    "refresh_after": 5 if "正在读取" in str(problem) else REFRESH}
         st = s.stats
         errors = [a for a in s.accounts if state_of(a, s.now)[1] == "danger"]
         heads = [("服务", "%d/%d" % (len(s.ok), len(s.accounts)), "可用账号 / 全部", "power", "green" if not errors else "amber"),
@@ -538,7 +619,8 @@ class StarkMeshPage(Page):
             accounts["footer"] = "还有 %d 个账号（都能用的排在后面），完整列表在 StarkMesh 后台" % (len(listed) - ACCOUNTS_MOST)
         updated = "数据读于 %s" % when(s.now, self.app.tz)
         view = {"title": TITLE, "refresh_after": REFRESH,
-                "sections": [{"items": summary}, quota, accounts, {"items": [{"type": "text", "style": "caption", "text": updated}]}]}
+                "sections": [{"items": summary}, quota, accounts,
+                             {"items": [{"type": "text", "style": "caption", "text": updated}] + self._alert_footer()}]}
         if version >= 8:
             view["layout"] = "columns"
             view["sections"][0]["span"] = "full"
@@ -661,39 +743,30 @@ class StarkMeshPage(Page):
         if failed is not None:  # the newest read failed: this one is what was, not what is (told by the state, not the clock)
             raise RPCError("StarkMesh 读不到，留着的是 %s 的数据" % when(s.now, self.app.tz), "unavailable")
         now = self.mesh.clock()  # as of this query (its clock, even one set back since the read): resets, rate limits
-        live = lambda a: not expired(a, now)  # noqa: E731
-        ok = [a for a in s.claude if usable(a, now) and live(a)]
-        subs = [a for a in ok if str(a.get("type") or "") in SUBSCRIPTION_TYPES]  # the ones with windows
-        total = getattr(s, "total", len(s.accounts))
-        partial = (say["partial"].format(read=len(s.accounts), total=total) if total > len(s.accounts) else
-                   say["first"].format(read=len(s.accounts)) if getattr(s, "cut", False) else "")
+        measured = PoolUsage(s, now)
+        ok = measured.ok
         pool["sampled_at"] = _iso(s.now)
-        if partial:  # a part of the pool is not the pool: no bars (the collapsed strip draws a bar without its words)
+        if measured.partial:  # a part of the pool is not the pool: no bars (the collapsed strip draws a bar without its words)
+            partial = (say["partial"].format(read=len(s.accounts), total=measured.total) if measured.total > len(s.accounts)
+                       else say["first"].format(read=len(s.accounts)))
             pool["headline"] = say["usable"].format(ok=len(ok), all=len(s.claude)) + partial
             pool["notice"] = say["incomplete"] + partial
             return {"accounts": [pool]}
-        missing = [a for a in subs if str(a.get("id")) in getattr(s, "usage_failed", ())]
-        if missing:
-            raise RPCError("有 %d 个号的用量这次没读到" % len(missing), "unavailable")
+        if measured.missing:
+            raise RPCError("有 %d 个号的用量这次没读到" % measured.missing, "unavailable")
         tz = _zone(params.get("tz")) or self.app.tz
         windows, soonest = [], None
-        cover = []  # (window, counted, of): a bar that counts fewer accounts than could be in it, said in the headline
+        cover = [say["cover"].format(window=say["w_" + key], miss=miss) for key, miss in measured.cover.items()]
         for key, label, model in USAGE_WINDOWS:
-            keep = live if key != "seven_day_fable" else (lambda a: live(a) and not fable_blocked(a, now))
-            w = s.window(key, now, keep)
+            w = measured.windows.get(key)
             if w is None:
-                if key in ("five_hour", "seven_day") and subs:  # none of them has a number for it: said too
-                    cover.append((say["w_" + key], len(subs)))
-                continue
-            if key in ("five_hour", "seven_day") and w["of"] < len(subs):  # some have no number for it: the bar would be
-                cover.append((say["w_" + key], len(subs) - w["of"]))  # some accounts' (maybe the least used), left out
                 continue
             if key == "five_hour" and w["reset"]:
                 soonest = now + w["reset"]
             note = say["left"].format(of=w["of"], left=w["left"])
             if w["reset"]:
                 note += say["soonest"].format(at=clock_at(now + w["reset"], now, tz))
-            out: Dict[str, Any] = {"label": label, "used_percent": 100.0 * (1.0 - min(1.0, max(0.0, w["ratio"]))),  # unrounded:
+            out: Dict[str, Any] = {"label": label, "used_percent": w["used_percent"],  # unrounded:
                                    "note": note}  # the web's warning lines (5%, 20% left) are read from it
             if model:
                 out["model"] = model
@@ -702,13 +775,12 @@ class StarkMeshPage(Page):
             windows.append(out)
         pool["headline"] = (say["usable"].format(ok=len(ok), all=len(s.claude))
                             + (say["soon5h"].format(at=clock_at(soonest, now, tz)) if soonest else "")
-                            + "".join(say["cover"].format(window=n, miss=m) for n, m in cover))
+                            + "".join(cover))
         if windows:
             pool["windows"] = windows
         else:  # the sidebar shows the notice rather than the headline (with subscriptions, cover says which bars went)
             pool["notice"] = (say["no_claude"] if not s.claude else say["none_usable"] if not ok else
-                              say["no_subscription"] if not subs else
-                              say["gaps"] + "".join(say["cover"].format(window=n, miss=m) for n, m in cover))
+                              say["no_subscription"] if not measured.subs else say["gaps"] + "".join(cover))
         return {"accounts": [pool]}
 
 
