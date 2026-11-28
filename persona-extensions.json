@@ -9,7 +9,7 @@
         "manifest_version": 1,
         "id": "openmate-feishu",
         "name": "飞书（OpenMate）",
-        "version": "0.11.63",
+        "version": "0.11.64",
         "description": "把飞书私聊和群消息接进 Persona 的收件箱和知识库，手机确认后以你的身份发消息，支持 /agent。通过你自己安装的 LarkAgentX（非官方网页协议）连接，与飞书官方无关。",
         "publisher": "NginxL",
         "homepage": "https://github.com/NginxL/openmate",
@@ -398,6 +398,20 @@
               "title": "StarkMesh 地址",
               "description": "StarkMesh 网关的地址（这台电脑上能访问到的，例如 http://127.0.0.1:18080）。StarkMesh 页和“今天”页的额度卡片从这里只读地读账号和用量。地址和下面的密钥都填了才会显示。"
             },
+            "starkmesh_alerts": {
+              "type": "boolean",
+              "title": "StarkMesh 后台告警",
+              "description": "先填好 StarkMesh 地址和只读管理密钥。打开后每 5 分钟在后台检查一次，号池额度快用完、Claude 号出错或全部不可用、StarkMesh 持续读不到时，给你的设备发 Persona 通知。",
+              "default": false
+            },
+            "starkmesh_alert_left": {
+              "type": "integer",
+              "title": "额度告警线（剩余 %）",
+              "description": "号池某个额度条的剩余百分比达到或低于这条线时提醒。",
+              "default": 10,
+              "minimum": 5,
+              "maximum": 50
+            },
             "needs_hours": {
               "type": "integer",
               "title": "“需要我”只看多久内的",
@@ -444,6 +458,7 @@
             "inbox.read",
             "kb.read",
             "machines.read",
+            "notify",
             "todos.read"
           ],
           "launcher_keys": true
@@ -466,9 +481,9 @@
       "icon": "assets/icon.png",
       "packages": [
         {
-          "url": "packages/openmate-feishu/0.11.63/openmate-feishu-0.11.63.tar.gz",
-          "sha256": "511700a3846503ea58714b8b2d8fb82b777bc49859ddc573ddcb9dfc23f27e2f",
-          "size": 340402
+          "url": "packages/openmate-feishu/0.11.64/openmate-feishu-0.11.64.tar.gz",
+          "sha256": "588678864fee6e6e1efe6696160888137ade1470fd18e6c9355574bba4294a26",
+          "size": 344999
         }
       ]
     },
